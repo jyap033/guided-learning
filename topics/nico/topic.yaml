@@ -1,0 +1,47 @@
+# Topic definition for the NICo pilot. Everything topic-specific lives here,
+# not in code (D-001).
+id: nico
+name: NVIDIA NICo (NVIDIA Infra Controller)
+goal: >-
+  Understand, deploy and operate NVIDIA NICo well enough to provision
+  bare-metal machines through its APIs.
+
+source:
+  type: fern-docs            # docs site described by a Fern navigation file
+  repo: https://github.com/dsx-ai-factory/infra-controller
+  ref: 38a79e71dff48df7480134da2363acddd5ec117f   # pinned commit, 2026-11-20
+  docsDir: docs
+  nav: docs/index.yml
+  tab: documentation
+  # Top-level nav sections to learn from. The rest (Development, deep CLI
+  # references) is for NICo contributors, not for a first curriculum.
+  # First pilot run: the core sections (~700K characters). Add
+  # "Provisioning (Day 0)", "Configuration (Day 1)" and "Operations (Day 2)"
+  # for a fuller curriculum (~2.5M characters).
+  includeSections:
+    - Overview
+    - Getting Started
+    - Architecture
+  # Extra pages not in the nav sections above.
+  extraPages:
+    - glossary.md
+
+# What every learner is assumed to know already. Prerequisite expansion stops here.
+floor:
+  - Using a computer and a web browser
+  - Basic programming in any language
+  - Basic use of a terminal
+
+# Concepts this learner already knows (and, by implication, their prerequisites).
+known: []
+
+expansion:
+  maxDepth: 4            # how many prerequisite levels below the docs to explore
+  batchSize: 40          # concepts per AI call when expanding prerequisites
+
+graph:
+  minEdgeConfidence: 0.6 # edges below this are dropped (D-020)
+
+chapters:
+  maxConcepts: 10
+  minConcepts: 3

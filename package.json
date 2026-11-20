@@ -1,0 +1,30 @@
+{
+  "name": "guided-learning",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Turn a hard technical topic into an ordered curriculum: concept map, mind map and chapters.",
+  "type": "module",
+  "bin": {
+    "gl": "./src/cli.ts"
+  },
+  "scripts": {
+    "gl": "tsx src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.11.0",
+    "commander": "^14.0.3",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

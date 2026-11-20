@@ -1,0 +1,1465 @@
+{
+  "kind": "extract",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "concepts": [
+      {
+        "name": "NICo (NVIDIA Infra Controller)",
+        "aliases": [
+          "NICo",
+          "BMM",
+          "Bare Metal Manager"
+        ],
+        "definition": "NVIDIA's platform for managing the full lifecycle of bare-metal servers at a site, with tenant isolation enforced by DPUs. It has two halves: NICo Core, the on-site control plane, and NICo REST, the cloud-facing API.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "NICo Core",
+        "aliases": [
+          "Core"
+        ],
+        "definition": "The on-site Rust control plane of NICo. It runs as microservices (API, DHCP, DNS, hardware monitoring, rack management) on a Kubernetes cluster and exposes a gRPC API.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md",
+          "architecture/supernic_lockdown_key_management.md",
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "NICo REST",
+        "aliases": [
+          "REST API layer",
+          "nico-rest-api"
+        ],
+        "definition": "The cloud-facing Go API layer of NICo. It handles external HTTP requests, authenticates callers with JWTs, and sends site work to Core through Temporal workflows and a Site Agent.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "ManagedHost",
+        "aliases": [
+          "Managed Host"
+        ],
+        "definition": "The basic unit NICo manages: one physical box made up of a Host machine and the DPU machines attached to it (usually one, sometimes several or none).",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md",
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Instance",
+        "aliases": [],
+        "definition": "A Host that is currently allocated to a tenant. It comes with validated hardware, isolated networking, and DHCP/DNS service.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Data Processing Unit (DPU)",
+        "aliases": [
+          "DPU",
+          "BlueField DPU"
+        ],
+        "definition": "A smart network card with its own Arm CPU, OS and BMC. In NICo it is the main enforcement point: it acts as the VXLAN tunnel endpoint, runs HBN, and enforces tenant isolation in hardware.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "BlueField",
+        "aliases": [
+          "BlueField-2",
+          "BlueField-3",
+          "BF3"
+        ],
+        "definition": "NVIDIA's family of DPU and SuperNIC products. BlueField models that can run as DPUs have an Arm complex, a BMC, NIC firmware and an OS image that NICo provisions.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md",
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "SuperNIC",
+        "aliases": [
+          "Mellanox Ethernet SuperNIC",
+          "ConnectX-8",
+          "ConnectX-9"
+        ],
+        "definition": "A high-performance NVIDIA/Mellanox network card, such as BlueField-3 in NIC mode or a ConnectX-8. A NIC-only SuperNIC cannot switch into DPU mode.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Host DPU Policy",
+        "aliases": [
+          "HostDpuPolicy"
+        ],
+        "definition": "The operator's chosen treatment of DPU hardware on a host. `Manage` lets NICo provision the DPUs, `Nic` runs them as plain NICs, and `Ignore` leaves them unconfigured. It records intent, not what the hardware is actually doing.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "BlueField Operating Mode",
+        "aliases": [
+          "BlueFieldOperatingMode",
+          "NicMode"
+        ],
+        "definition": "The mode (`Dpu` or `Nic`) that a BlueField card's own BMC reports it is running in. NICo compares it with the Host DPU Policy to decide whether the card needs reconfiguring.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Mellanox Device Kind",
+        "aliases": [
+          "MlxDeviceKind"
+        ],
+        "definition": "The factory product class NICo derives from a card's part number. It identifies the SKU and does not change when the card's operating mode changes.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Zero-DPU Host",
+        "aliases": [],
+        "definition": "A managed host that runs without a NICo-managed DPU, because its policy is `ignore` or `nic`. NICo builds no overlay for it; its instances attach to HostInband segments inside Flat VPCs.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Baseboard Management Controller (BMC)",
+        "aliases": [
+          "BMC"
+        ],
+        "definition": "A small controller on a machine that manages low-level hardware functions such as power and BIOS settings, independently of the main OS. Hosts and DPUs each have their own BMC.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md",
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "Redfish API",
+        "aliases": [
+          "Redfish"
+        ],
+        "definition": "The standard HTTP API that BMCs expose for out-of-band hardware management. NICo uses it for power control, credentials and other BMC operations.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Out-of-Band Management (OOB)",
+        "aliases": [
+          "OOB",
+          "IPMI"
+        ],
+        "definition": "Managing a machine through a path that does not depend on its OS, usually a dedicated BMC/DPU management network. IPMI is an older protocol for this.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "BMC Discovery",
+        "aliases": [],
+        "definition": "How NICo finds BMCs. A BMC requests an IP address over DHCP (relayed to NICo), and NICo matches its MAC address against the expected-machines table to look up its initial credentials.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "DHCP",
+        "aliases": [
+          "DHCP relay",
+          "Dynamic Host Configuration Protocol"
+        ],
+        "definition": "The protocol that automatically assigns IP addresses to devices. NICo runs its own DHCP service, and switches must relay DHCP requests from BMC and DPU management networks to it.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "DNS",
+        "aliases": [
+          "Domain Name System"
+        ],
+        "definition": "The system that turns names into IP addresses. NICo runs DNS for its managed machines and control-plane zones.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "PXE and iPXE Boot",
+        "aliases": [
+          "PXE",
+          "iPXE",
+          "network boot"
+        ],
+        "definition": "Ways to boot a machine from software fetched over the network. NICo runs a PXE server that installs its own images and tenant-requested images on DPUs and Hosts.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "BFB (BlueField Bootstream)",
+        "aliases": [
+          "BFB"
+        ],
+        "definition": "The image format used to install or update the OS and firmware bundle on a BlueField DPU.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Cloud-init",
+        "aliases": [],
+        "definition": "The standard tool that configures an OS on first boot (networking, SSH keys, packages). NICo uses it to install its components on DPUs, and tenants can supply their own for Hosts.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Managed Host State Machine",
+        "aliases": [
+          "ManagedHostState"
+        ],
+        "definition": "The finite state machine that drives a Host through its lifecycle: DPU discovery, DPU/host init, BOM validation, validation, measurement, Ready, Assigned. It also has reprovisioning and failure states.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md",
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Finite State Machine",
+        "aliases": [
+          "state machine"
+        ],
+        "definition": "A model in which an object is always in exactly one of a fixed set of states and moves between them according to defined transitions. NICo's controllers use these to drive hosts and racks.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "State Controller Tick",
+        "aliases": [
+          "state handler",
+          "handle_ready",
+          "handle_error"
+        ],
+        "definition": "The periodic loop in which a state handler reloads an object from the database, checks its config flags, and performs any transition. A gRPC call only sets a flag; the actual transition happens on a later tick.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Host Reprovision",
+        "aliases": [
+          "M_HostReprovision",
+          "FailedFirmwareUpgrade",
+          "WaitingForRackFirmwareUpgrade"
+        ],
+        "definition": "The managed-host substates that upgrade a host's firmware, including the failure state FailedFirmwareUpgrade. Retries there are automatic and bounded, but a fresh reprovision request restarts the upgrade straight away.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "SKU / BOM Validation",
+        "aliases": [
+          "BOM validation",
+          "SKU Validation"
+        ],
+        "definition": "Checking that a machine's actual hardware (its bill of materials) matches the expected SKU before it can reach Ready.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Rack State Machine",
+        "aliases": [
+          "rack state handler",
+          "R_Maintenance",
+          "R_Validation"
+        ],
+        "definition": "The state machine that manages a whole rack (compute trays, switches, power shelves) through states such as Discovering, Maintenance, Validating, Ready and Error.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Compute Tray",
+        "aliases": [
+          "ComputeTrays"
+        ],
+        "definition": "A compute server module that sits in a rack and appears in NICo as a machine.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Power Shelf",
+        "aliases": [
+          "PowerShelves"
+        ],
+        "definition": "A rack component that supplies power to the rack's devices. It is handled directly by the component manager rather than by the rack state machine.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "On-Demand Rack Maintenance",
+        "aliases": [
+          "OnDemandRackMaintenance",
+          "maintenance_requested"
+        ],
+        "definition": "A gRPC operation that sets a maintenance request on a rack in Ready or Error. The rack state machine then picks it up, runs the selected maintenance activities, and returns the rack through Validating to Ready.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Maintenance Scope",
+        "aliases": [
+          "MaintenanceScope",
+          "RackMaintenanceScope"
+        ],
+        "definition": "The optional lists of machine, switch and power-shelf IDs to maintain. If all three lists are empty, the whole rack is maintained.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Maintenance Activities",
+        "aliases": [
+          "MaintenanceActivityConfig",
+          "FirmwareUpgradeActivity",
+          "NvosUpdateActivity",
+          "PowerSequenceActivity",
+          "ConfigureNmxClusterActivity"
+        ],
+        "definition": "The steps a maintenance run can include: firmware upgrade, NVOS update, power sequence and NMX cluster configuration. They always run in that fixed order. An empty list selects everything except the power sequence.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Rack Management Service (RMS)",
+        "aliases": [
+          "RMS"
+        ],
+        "definition": "The rack-level backend service that NICo calls to perform firmware upgrades and switch system-image updates.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "SOT JSON",
+        "aliases": [
+          "source-of-truth JSON",
+          "firmware_object"
+        ],
+        "definition": "A JSON document that defines the target firmware or system-image configuration and is passed to RMS. It comes either from the rack profile's firmware object or from an explicit maintenance activity.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "NVOS",
+        "aliases": [
+          "NVOS update"
+        ],
+        "definition": "The NVIDIA operating system that runs on rack switches. It is updated through RMS's ApplySwitchSystemImage call.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Component Manager",
+        "aliases": [
+          "UpdateComponentFirmware"
+        ],
+        "definition": "A higher-level firmware-update API. For compute trays and switches it hands the work to on-demand rack maintenance; it updates power shelves itself.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "gRPC",
+        "aliases": [
+          "Google Remote Procedure Call"
+        ],
+        "definition": "An RPC framework that uses protobuf-defined services. It is the API style of NICo Core, used by the CLI and the Site Agent.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Protocol Buffers (protobuf)",
+        "aliases": [
+          "protobuf",
+          "oneof"
+        ],
+        "definition": "Google's language for defining interfaces and serializing data. A `oneof` field holds exactly one of several variants; NICo uses it to represent the type of each maintenance activity.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Role-Based Access Control (RBAC)",
+        "aliases": [
+          "RBAC",
+          "NicoAdminCLI role",
+          "Authorization Roles"
+        ],
+        "definition": "Granting permissions to roles instead of individual users. For example, Core grants OnDemandRackMaintenance to the NicoAdminCLI role, and REST uses provider/tenant admin and viewer roles.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rack.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "NMX-C",
+        "aliases": [
+          "NMX Controller",
+          "NMX cluster"
+        ],
+        "definition": "The controller that manages NVLink partitions so that tenants are isolated GPU-to-GPU. Rack maintenance can configure its cluster.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md",
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "NVLink",
+        "aliases": [],
+        "definition": "NVIDIA's high-speed GPU-to-GPU interconnect fabric. It is partitioned by NMX-C, outside NICo Core.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "SuperNIC Lockdown",
+        "aliases": [
+          "hw_access mode",
+          "NIC lockdown"
+        ],
+        "definition": "A card mode that blocks firmware and configuration changes unless the card is unlocked with a 64-bit key, so host tenants cannot tamper with the NIC. Losing the key effectively bricks the card.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "ASTRA",
+        "aliases": [],
+        "definition": "An NVIDIA hardware architecture (e.g. ConnectX-9 with BF4) in which SuperNICs are locked by design and managed only through the DPU, so NICo does no key management.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "S-VPC",
+        "aliases": [],
+        "definition": "A non-ASTRA deployment flavour (for example on BF3) where SuperNICs are flashed so that NICo must manage their lockdown keys.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "Key Derivation Function (KDF)",
+        "aliases": [
+          "KDF"
+        ],
+        "definition": "A function that deterministically produces cryptographic keys from secret input material plus context. The same inputs always give the same key, and different contexts give independent keys.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "HKDF-SHA256",
+        "aliases": [
+          "HKDF",
+          "RFC 5869"
+        ],
+        "definition": "The standard HMAC-based KDF from RFC 5869. NICo applies it with no salt and an info string of `supernic-lock:v1:{mac}:{machine_id}` to produce each card's 8-byte lockdown key.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "Input Key Material (IKM)",
+        "aliases": [
+          "IKM",
+          "NicLockdownIkm",
+          "lockdown IKM"
+        ],
+        "definition": "The secret, high-entropy, site-wide value that all lockdown keys are derived from. It is versioned and kept in the credential store, and the key cannot be re-derived without the exact version used.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "KDF Context",
+        "aliases": [
+          "KdfContext",
+          "info string"
+        ],
+        "definition": "The non-secret inputs that tie a derived key to one card: its MAC address and the owning host's MachineId, encoded in the versioned V1 format.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "MachineId",
+        "aliases": [],
+        "definition": "NICo's stable identifier for a machine (Host or DPU). It is used as an input when deriving keys.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md",
+          "architecture/state_machines/rack.md"
+        ]
+      },
+      {
+        "name": "Entropy and Offline Guessing",
+        "aliases": [
+          "high-entropy secret"
+        ],
+        "definition": "A secret's strength comes from how unpredictable it is. HKDF adds no entropy, so if a card key leaks, a weak IKM could be guessed offline.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "Lockdown IKM Rotation",
+        "aliases": [
+          "RotatingNicLockdown",
+          "nic_lockdown_ikm_rotation_enabled",
+          "rotating_to_version",
+          "current_version"
+        ],
+        "definition": "Creating a new IKM version and moving cards to it. Cards migrate at allocation or through idle unlock/re-lock, and the version chosen depends on in-flight, current and site-target bookkeeping.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "DPA Interface",
+        "aliases": [
+          "dpa_interfaces"
+        ],
+        "definition": "NICo's record and lifecycle for a SuperNIC attached to a host. It moves through Unlocking, firmware/profile application, Locking and Assigned.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "Scout",
+        "aliases": [
+          "scout"
+        ],
+        "definition": "A NICo agent that reports discovered hardware to Core and runs hardware operations such as SuperNIC lock and unlock.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md",
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "dpu-agent",
+        "aliases": [],
+        "definition": "A daemon on each provisioned DPU that regularly calls Core's gRPC API to fetch configuration and report state.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Credential Store",
+        "aliases": [
+          "Vault",
+          "Postgres credentials",
+          "credential journal"
+        ],
+        "definition": "The backend (Vault or Postgres) that holds NICo secrets such as BMC credentials and lockdown IKMs. The Postgres backend encrypts them with key encryption keys.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "Key Encryption Key (KEK)",
+        "aliases": [
+          "KEK"
+        ],
+        "definition": "A key used to encrypt other stored secrets. Every KEK must be kept, or the credential journal cannot be decrypted.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "BMC Site-Wide Root Credential",
+        "aliases": [
+          "SiteWideRoot"
+        ],
+        "definition": "The site-wide BMC root secret. It is copied once to seed lockdown IKM version 0 and stays independent afterwards.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "NIC Firmware Recovery",
+        "aliases": [
+          "generic NIC firmware recovery"
+        ],
+        "definition": "A recovery engine, disabled by default, that freezes a card's original lockdown policy, changes its firmware, then restores the original policy and reads it back.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "name": "MAC Address",
+        "aliases": [],
+        "definition": "A network interface's hardware address. NICo uses it to identify cards and BMCs and as a key-derivation input.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/supernic_lockdown_key_management.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "VXLAN",
+        "aliases": [
+          "Virtual Extensible LAN",
+          "VXLAN overlay"
+        ],
+        "definition": "An overlay technology that wraps Ethernet frames in IP/UDP packets tagged with a VNI. Many isolated tenant L2 networks can then share one routed datacenter fabric.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "VNI",
+        "aliases": [
+          "VXLAN Network Identifier"
+        ],
+        "definition": "The 24-bit ID in a VXLAN header that says which virtual network a packet belongs to.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "VTEP",
+        "aliases": [
+          "VXLAN Tunnel Endpoint"
+        ],
+        "definition": "The device that wraps and unwraps VXLAN packets. In NICo this is the DPU.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "VLAN",
+        "aliases": [],
+        "definition": "A 12-bit tag on an Ethernet frame that marks which virtual network it belongs to. It allows only 4096 IDs, which is too few for large multi-tenant sites.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "BGP",
+        "aliases": [
+          "Border Gateway Protocol"
+        ],
+        "definition": "The standard routing protocol for exchanging reachability information. In NICo, DPUs and switches use it to carry EVPN routes.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "EVPN",
+        "aliases": [
+          "Ethernet VPN"
+        ],
+        "definition": "A BGP-based control plane that tells VTEPs which tenant addresses are reachable where in a VXLAN overlay.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "VRF",
+        "aliases": [
+          "Virtual Routing and Forwarding"
+        ],
+        "definition": "Separate routing tables on one device, which keep each tenant's routes isolated.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "HBN (Host Based Networking)",
+        "aliases": [
+          "HBN"
+        ],
+        "definition": "A container on the DPU that runs Cumulus Linux routing components (FRR, NVUE). It handles VXLAN/EVPN and enforces Ethernet tenancy.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "VPC",
+        "aliases": [
+          "Virtual Private Cloud"
+        ],
+        "definition": "A tenant's isolated network boundary. NICo builds it as a DPU overlay (ETV, FNN) or as a Flat VPC.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "FNN",
+        "aliases": [
+          "Forge Native Networking"
+        ],
+        "definition": "The Core networking subsystem that manages VPCs, subnets and VXLAN overlays. It is also the name of an L3 DPU-overlay VPC type that uses per-VPC routing profiles.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Network Segment",
+        "aliases": [
+          "underlay segment",
+          "overlay segment"
+        ],
+        "definition": "NICo's definition of an IP address pool. Underlay segments carry management traffic; overlay segments are tenant networks built on VXLAN.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "HostInband Network Segment",
+        "aliases": [
+          "HostInband"
+        ],
+        "definition": "An underlay segment that a zero-DPU host's NIC attaches to directly. It is the only segment type a Flat VPC accepts.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Flat VPC",
+        "aliases": [],
+        "definition": "A VPC type for zero-DPU hosts. NICo allocates addresses and keeps records, but the operator's fabric does the routing and enforcement.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "InfiniBand Partitioning (P_Key / UFM)",
+        "aliases": [
+          "P_Key",
+          "UFM",
+          "Unified Fabric Manager"
+        ],
+        "definition": "Tenant isolation on InfiniBand: Core allocates partition keys and UFM manages which hosts are members of each partition.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Multi-Tenancy and Isolation",
+        "aliases": [],
+        "definition": "NICo's coordinated isolation across four fabrics: Ethernet north-south (VXLAN/EVPN on DPUs), east-west Ethernet (ConnectX firmware paths where configured), InfiniBand (UFM) and NVLink (NMX-C).",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Temporal",
+        "aliases": [
+          "Temporal namespace",
+          "Cloud workflow",
+          "Site workflow"
+        ],
+        "definition": "A workflow orchestration engine that NICo REST uses for long-running operations, with one namespace per site.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Site Agent",
+        "aliases": [
+          "nico-rest-site-agent",
+          "Elektra"
+        ],
+        "definition": "An on-site agent that polls the site's Temporal namespace, turns workflow tasks into gRPC calls to Core, and publishes inventory back.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "JWT Authentication",
+        "aliases": [
+          "JWT",
+          "JWT Claims Processor Pipeline",
+          "SSA",
+          "NGC KAS",
+          "Keycloak"
+        ],
+        "definition": "How NICo REST authenticates callers. A JSON Web Token comes from an issuer such as Keycloak, NGC KAS or a service account, and processors map its claims to authorization context.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "SPIFFE Identity",
+        "aliases": [
+          "SPIFFE",
+          "JWT-SVID",
+          "IMDS",
+          "FMDS"
+        ],
+        "definition": "A standard for workload identity. NICo uses it between services, and its DPU metadata service can issue SPIFFE JWT-SVIDs to tenant workloads.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "Kubernetes and Helm",
+        "aliases": [
+          "Helm charts"
+        ],
+        "definition": "The container orchestration platform that NICo Core and REST run on, and the Helm charts used to deploy them.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "DOCA",
+        "aliases": [
+          "Data Center-on-a-Chip Architecture"
+        ],
+        "definition": "NVIDIA's software framework and release train for BlueField DPU functionality.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      },
+      {
+        "name": "LLDP",
+        "aliases": [
+          "Link Layer Discovery Protocol"
+        ],
+        "definition": "A neighbour-discovery protocol. NICo uses the adjacency data it provides to learn how hosts, DPUs and switches are cabled together.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "glossary.md"
+        ]
+      }
+    ],
+    "prerequisites": [
+      {
+        "concept": "ManagedHost",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.85,
+        "why": "A ManagedHost is defined as a Host grouped with its DPUs"
+      },
+      {
+        "concept": "Instance",
+        "requires": "ManagedHost",
+        "confidence": 0.7,
+        "why": "An instance is an allocated managed host"
+      },
+      {
+        "concept": "Managed Host State Machine",
+        "requires": "Finite State Machine",
+        "confidence": 0.85,
+        "why": "It is a state machine"
+      },
+      {
+        "concept": "Managed Host State Machine",
+        "requires": "ManagedHost",
+        "confidence": 0.85,
+        "why": "It governs managed host lifecycle"
+      },
+      {
+        "concept": "Rack State Machine",
+        "requires": "Finite State Machine",
+        "confidence": 0.85,
+        "why": "It is a state machine"
+      },
+      {
+        "concept": "State Controller Tick",
+        "requires": "Finite State Machine",
+        "confidence": 0.75,
+        "why": "Ticks evaluate state transitions"
+      },
+      {
+        "concept": "On-Demand Rack Maintenance",
+        "requires": "Rack State Machine",
+        "confidence": 0.9,
+        "why": "The request is carried out by rack state transitions"
+      },
+      {
+        "concept": "On-Demand Rack Maintenance",
+        "requires": "State Controller Tick",
+        "confidence": 0.75,
+        "why": "The gRPC call only sets a flag that a later tick picks up"
+      },
+      {
+        "concept": "On-Demand Rack Maintenance",
+        "requires": "gRPC",
+        "confidence": 0.7,
+        "why": "It is exposed as a gRPC method"
+      },
+      {
+        "concept": "On-Demand Rack Maintenance",
+        "requires": "Maintenance Scope",
+        "confidence": 0.75,
+        "why": "Requests carry a scope"
+      },
+      {
+        "concept": "On-Demand Rack Maintenance",
+        "requires": "Maintenance Activities",
+        "confidence": 0.75,
+        "why": "Requests select activities"
+      },
+      {
+        "concept": "Maintenance Scope",
+        "requires": "Compute Tray",
+        "confidence": 0.6,
+        "why": "The scope lists rack devices such as compute trays"
+      },
+      {
+        "concept": "Maintenance Scope",
+        "requires": "Power Shelf",
+        "confidence": 0.55,
+        "why": "The scope can list power shelves"
+      },
+      {
+        "concept": "Maintenance Activities",
+        "requires": "Protocol Buffers (protobuf)",
+        "confidence": 0.65,
+        "why": "Activities are protobuf oneof variants"
+      },
+      {
+        "concept": "Maintenance Activities",
+        "requires": "Rack Management Service (RMS)",
+        "confidence": 0.75,
+        "why": "Firmware and NVOS updates run through RMS"
+      },
+      {
+        "concept": "Maintenance Activities",
+        "requires": "SOT JSON",
+        "confidence": 0.75,
+        "why": "Update activities carry SOT JSON"
+      },
+      {
+        "concept": "Maintenance Activities",
+        "requires": "NVOS",
+        "confidence": 0.6,
+        "why": "One activity is the NVOS update"
+      },
+      {
+        "concept": "Maintenance Activities",
+        "requires": "NMX-C",
+        "confidence": 0.6,
+        "why": "One activity configures the NMX cluster"
+      },
+      {
+        "concept": "Component Manager",
+        "requires": "On-Demand Rack Maintenance",
+        "confidence": 0.8,
+        "why": "It delegates compute-tray and switch updates to on-demand maintenance"
+      },
+      {
+        "concept": "Host Reprovision",
+        "requires": "Managed Host State Machine",
+        "confidence": 0.85,
+        "why": "These are managed-host substates"
+      },
+      {
+        "concept": "NMX-C",
+        "requires": "NVLink",
+        "confidence": 0.8,
+        "why": "NMX-C manages NVLink partitions"
+      },
+      {
+        "concept": "SuperNIC Lockdown",
+        "requires": "SuperNIC",
+        "confidence": 0.85,
+        "why": "Lockdown is a SuperNIC feature"
+      },
+      {
+        "concept": "HKDF-SHA256",
+        "requires": "Key Derivation Function (KDF)",
+        "confidence": 0.9,
+        "why": "HKDF is a specific KDF"
+      },
+      {
+        "concept": "Input Key Material (IKM)",
+        "requires": "Key Derivation Function (KDF)",
+        "confidence": 0.8,
+        "why": "IKM is the KDF's secret input"
+      },
+      {
+        "concept": "Input Key Material (IKM)",
+        "requires": "Entropy and Offline Guessing",
+        "confidence": 0.65,
+        "why": "Security depends on a high-entropy IKM"
+      },
+      {
+        "concept": "KDF Context",
+        "requires": "Key Derivation Function (KDF)",
+        "confidence": 0.8,
+        "why": "The context is the KDF's info input"
+      },
+      {
+        "concept": "KDF Context",
+        "requires": "MachineId",
+        "confidence": 0.75,
+        "why": "The context includes the MachineId"
+      },
+      {
+        "concept": "KDF Context",
+        "requires": "MAC Address",
+        "confidence": 0.75,
+        "why": "The context includes the card MAC"
+      },
+      {
+        "concept": "Lockdown IKM Rotation",
+        "requires": "Input Key Material (IKM)",
+        "confidence": 0.9,
+        "why": "Rotation creates new IKM versions"
+      },
+      {
+        "concept": "Lockdown IKM Rotation",
+        "requires": "DPA Interface",
+        "confidence": 0.6,
+        "why": "Migration happens through DPA lock/unlock flows"
+      },
+      {
+        "concept": "Lockdown IKM Rotation",
+        "requires": "SuperNIC Lockdown",
+        "confidence": 0.8,
+        "why": "Rotation re-locks cards with new keys"
+      },
+      {
+        "concept": "NIC Firmware Recovery",
+        "requires": "SuperNIC Lockdown",
+        "confidence": 0.75,
+        "why": "Recovery saves and restores the lockdown policy"
+      },
+      {
+        "concept": "NIC Firmware Recovery",
+        "requires": "Input Key Material (IKM)",
+        "confidence": 0.6,
+        "why": "It freezes the exact IKM version"
+      },
+      {
+        "concept": "DPA Interface",
+        "requires": "SuperNIC",
+        "confidence": 0.7,
+        "why": "DPA interfaces represent SuperNICs"
+      },
+      {
+        "concept": "Input Key Material (IKM)",
+        "requires": "Credential Store",
+        "confidence": 0.6,
+        "why": "IKM versions are stored in the credential store"
+      },
+      {
+        "concept": "Credential Store",
+        "requires": "Key Encryption Key (KEK)",
+        "confidence": 0.5,
+        "why": "The Postgres backend encrypts with KEKs"
+      },
+      {
+        "concept": "Input Key Material (IKM)",
+        "requires": "BMC Site-Wide Root Credential",
+        "confidence": 0.5,
+        "why": "Version 0 is seeded from the BMC root"
+      },
+      {
+        "concept": "Redfish API",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "Redfish is the BMC's API"
+      },
+      {
+        "concept": "Out-of-Band Management (OOB)",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.7,
+        "why": "OOB management usually goes through BMCs"
+      },
+      {
+        "concept": "BMC Discovery",
+        "requires": "DHCP",
+        "confidence": 0.85,
+        "why": "BMCs are discovered through DHCP requests"
+      },
+      {
+        "concept": "BMC Discovery",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "It discovers BMCs"
+      },
+      {
+        "concept": "PXE and iPXE Boot",
+        "requires": "DHCP",
+        "confidence": 0.75,
+        "why": "PXE relies on DHCP to locate the boot server"
+      },
+      {
+        "concept": "BFB (BlueField Bootstream)",
+        "requires": "BlueField",
+        "confidence": 0.7,
+        "why": "It is the BlueField image format"
+      },
+      {
+        "concept": "BlueField Operating Mode",
+        "requires": "BlueField",
+        "confidence": 0.8,
+        "why": "It is the mode of a BlueField card"
+      },
+      {
+        "concept": "BlueField Operating Mode",
+        "requires": "Host DPU Policy",
+        "confidence": 0.6,
+        "why": "It is compared against policy"
+      },
+      {
+        "concept": "Host DPU Policy",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.8,
+        "why": "The policy governs DPU treatment"
+      },
+      {
+        "concept": "Mellanox Device Kind",
+        "requires": "BlueField Operating Mode",
+        "confidence": 0.55,
+        "why": "It is defined in contrast to operating mode"
+      },
+      {
+        "concept": "Zero-DPU Host",
+        "requires": "Host DPU Policy",
+        "confidence": 0.85,
+        "why": "Defined by the ignore/nic policy"
+      },
+      {
+        "concept": "VNI",
+        "requires": "VXLAN",
+        "confidence": 0.85,
+        "why": "The VNI is part of the VXLAN header"
+      },
+      {
+        "concept": "VTEP",
+        "requires": "VXLAN",
+        "confidence": 0.85,
+        "why": "A VTEP encapsulates VXLAN packets"
+      },
+      {
+        "concept": "VXLAN",
+        "requires": "VLAN",
+        "confidence": 0.55,
+        "why": "VXLAN is motivated by VLAN limits"
+      },
+      {
+        "concept": "EVPN",
+        "requires": "BGP",
+        "confidence": 0.8,
+        "why": "EVPN routes are carried in BGP"
+      },
+      {
+        "concept": "EVPN",
+        "requires": "VXLAN",
+        "confidence": 0.7,
+        "why": "EVPN is the control plane for VXLAN"
+      },
+      {
+        "concept": "HBN (Host Based Networking)",
+        "requires": "EVPN",
+        "confidence": 0.7,
+        "why": "HBN runs VXLAN/EVPN routing"
+      },
+      {
+        "concept": "HBN (Host Based Networking)",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.75,
+        "why": "HBN runs on the DPU"
+      },
+      {
+        "concept": "FNN",
+        "requires": "VPC",
+        "confidence": 0.75,
+        "why": "FNN manages VPCs"
+      },
+      {
+        "concept": "FNN",
+        "requires": "HBN (Host Based Networking)",
+        "confidence": 0.65,
+        "why": "It coordinates HBN configuration"
+      },
+      {
+        "concept": "FNN",
+        "requires": "VRF",
+        "confidence": 0.55,
+        "why": "Per-VPC routing uses VRFs and route targets"
+      },
+      {
+        "concept": "Network Segment",
+        "requires": "VXLAN",
+        "confidence": 0.6,
+        "why": "Overlay segments are built on VXLAN"
+      },
+      {
+        "concept": "HostInband Network Segment",
+        "requires": "Network Segment",
+        "confidence": 0.85,
+        "why": "It is a segment type"
+      },
+      {
+        "concept": "HostInband Network Segment",
+        "requires": "Zero-DPU Host",
+        "confidence": 0.7,
+        "why": "It exists for zero-DPU hosts"
+      },
+      {
+        "concept": "Flat VPC",
+        "requires": "VPC",
+        "confidence": 0.85,
+        "why": "It is a VPC type"
+      },
+      {
+        "concept": "Flat VPC",
+        "requires": "HostInband Network Segment",
+        "confidence": 0.8,
+        "why": "It only accepts HostInband segments"
+      },
+      {
+        "concept": "Multi-Tenancy and Isolation",
+        "requires": "VXLAN",
+        "confidence": 0.65,
+        "why": "Ethernet isolation uses VXLAN"
+      },
+      {
+        "concept": "Multi-Tenancy and Isolation",
+        "requires": "InfiniBand Partitioning (P_Key / UFM)",
+        "confidence": 0.6,
+        "why": "InfiniBand isolation is one of the fabrics"
+      },
+      {
+        "concept": "Multi-Tenancy and Isolation",
+        "requires": "NMX-C",
+        "confidence": 0.55,
+        "why": "NVLink isolation goes through NMX-C"
+      },
+      {
+        "concept": "Site Agent",
+        "requires": "Temporal",
+        "confidence": 0.85,
+        "why": "It polls Temporal namespaces"
+      },
+      {
+        "concept": "Site Agent",
+        "requires": "gRPC",
+        "confidence": 0.7,
+        "why": "It translates tasks into gRPC calls to Core"
+      },
+      {
+        "concept": "NICo REST",
+        "requires": "JWT Authentication",
+        "confidence": 0.6,
+        "why": "REST authenticates callers with JWTs"
+      },
+      {
+        "concept": "NICo Core",
+        "requires": "Kubernetes and Helm",
+        "confidence": 0.55,
+        "why": "Core is deployed on Kubernetes via Helm"
+      },
+      {
+        "concept": "dpu-agent",
+        "requires": "gRPC",
+        "confidence": 0.6,
+        "why": "It calls the Core gRPC API"
+      },
+      {
+        "concept": "Data Processing Unit (DPU)",
+        "requires": "BlueField",
+        "confidence": 0.55,
+        "why": "NICo's DPUs are BlueField cards"
+      },
+      {
+        "concept": "SuperNIC Lockdown",
+        "requires": "ASTRA",
+        "confidence": 0.5,
+        "why": "Understanding when NICo manages keys depends on the ASTRA vs non-ASTRA split"
+      }
+    ]
+  }
+}

@@ -1,0 +1,1057 @@
+{
+  "kind": "extract",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "concepts": [
+      {
+        "name": "Finite State Machine (FSM)",
+        "aliases": [
+          "state machine",
+          "state diagram"
+        ],
+        "definition": "A model where an object is always in exactly one of a set of named states and moves between them through defined transitions when conditions are met. NICo uses FSMs to drive each managed host through its lifecycle.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Managed Host",
+        "aliases": [
+          "ManagedHost",
+          "managed host"
+        ],
+        "definition": "NICo's record of a physical server together with its DPUs and BMCs, which NICo discovers, prepares, assigns to tenants and cleans up.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Managed Host Lifecycle",
+        "aliases": [
+          "DpuDiscoveringState",
+          "DPUInit",
+          "HostInit",
+          "Ready",
+          "Assigned",
+          "WaitingForCleanup"
+        ],
+        "definition": "The main sequence of top-level states a managed host goes through: DPU discovery, DPU initialization, host initialization, Ready, Assigned to an instance, and cleanup. There are side paths for validation, reprovisioning, measuring, failure and decommissioning.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "NICo Core",
+        "aliases": [
+          "Core",
+          "api-core",
+          "state controller"
+        ],
+        "definition": "The central NICo service. It persists managed-host state in a database and runs the state-machine handlers, and it can run as several replicas.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Site Explorer",
+        "aliases": [],
+        "definition": "The NICo component that finds BMC endpoints on the site network and creates managed hosts from what it finds. It also chooses settings such as whether DPF is used.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Scout",
+        "aliases": [
+          "scout agent"
+        ],
+        "definition": "The NICo agent that runs on the host. It reports hardware inventory and discovery data to Core and carries out tasks such as NIC firmware dispatch.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Data Processing Unit (DPU)",
+        "aliases": [
+          "DPU",
+          "BlueField",
+          "SmartNIC"
+        ],
+        "definition": "A programmable network card with its own processor and OS (NVIDIA BlueField). NICo uses it to enforce tenant networking for the host. A DPU can also run in plain NIC mode.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "BFB (BlueField Bootstream)",
+        "aliases": [
+          "BFB",
+          "preingestion.bfb"
+        ],
+        "definition": "The image format used to install the operating system and firmware on a BlueField DPU. NICo installs a BFB during DPU initialization, during reprovisioning, and a vanilla preingestion BFB during decommissioning.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "DOCA Platform Framework (DPF)",
+        "aliases": [
+          "DPF"
+        ],
+        "definition": "An NVIDIA framework for provisioning DPUs. When Site Explorer selects it, NICo provisions DPUs through DPF instead of its own BFB install path.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Rshim",
+        "aliases": [
+          "EnableRshim"
+        ],
+        "definition": "A management interface to a BlueField DPU used for things like pushing boot images and reaching the console. NICo enables it during DPU discovery.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Secure Boot",
+        "aliases": [
+          "UEFI Secure Boot"
+        ],
+        "definition": "A firmware feature that only lets signed boot software run. NICo checks it on DPUs and enables or disables it depending on whether BFB install is supported.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Baseboard Management Controller (BMC)",
+        "aliases": [
+          "BMC"
+        ],
+        "definition": "A separate management chip on a server or DPU. It allows remote power control, firmware configuration and monitoring regardless of the host OS.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Redfish API",
+        "aliases": [
+          "Redfish",
+          "libredfish"
+        ],
+        "definition": "A standard REST API that BMCs expose for remote server management. NICo uses it through libredfish for BIOS settings, boot order, power and firmware jobs.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "IPMI over LAN",
+        "aliases": [
+          "IPMI",
+          "EnableIpmiOverLan"
+        ],
+        "definition": "An older remote management protocol for BMCs that works over the network. NICo enables it during host initialization.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "UEFI/BIOS Configuration",
+        "aliases": [
+          "BIOS setup",
+          "UEFI setup",
+          "machine-setup",
+          "BIOS job",
+          "UEFI password"
+        ],
+        "definition": "Applying firmware settings and a UEFI password to a host through the BMC. Some vendors (such as Dell) apply them as scheduled BIOS jobs that need a reboot; NICo polls until setup is confirmed.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Boot Order",
+        "aliases": [
+          "SetBootOrder"
+        ],
+        "definition": "The firmware's ordered list of devices to boot from. NICo sets it so the host boots through the DPU or network as needed.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Host Lockdown",
+        "aliases": [
+          "BMC lockdown",
+          "LockdownHost",
+          "UnlockHost"
+        ],
+        "definition": "A mode that blocks changes to the host's BMC and firmware settings from the host side. NICo turns it off to make changes and turns it back on before tenant use.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "PXE / iPXE Boot",
+        "aliases": [
+          "PXE",
+          "iPXE",
+          "custom iPXE",
+          "discovery image"
+        ],
+        "definition": "Booting a machine over the network. NICo PXE-boots hosts into a discovery image, and tenants can ask for a custom iPXE boot.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Measured Boot Attestation",
+        "aliases": [
+          "attestation",
+          "Measuring",
+          "PostAssignedMeasuring",
+          "golden values",
+          "measurement bundle"
+        ],
+        "definition": "An optional check in which the host reports boot measurements and NICo compares them with a trusted bundle of golden values before the host moves on.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "SKU and BOM Validation",
+        "aliases": [
+          "BomValidating",
+          "Bill of Materials validation",
+          "SKU matching"
+        ],
+        "definition": "A check that compares a host's discovered hardware inventory with an assigned SKU (expected Bill of Materials). The host waits if no SKU is assigned or if the hardware does not match.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Machine Validation",
+        "aliases": [
+          "Validation",
+          "MachineValidating",
+          "validation context",
+          "Discovery context",
+          "Cleanup context"
+        ],
+        "definition": "Test runs on a host, done in a context such as Discovery or Cleanup. A host can skip them by configuration or fail them.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Instance",
+        "aliases": [
+          "tenant instance",
+          "allocation"
+        ],
+        "definition": "A tenant's use of a managed host. Assigning an instance moves the host from Ready to Assigned, and deleting it starts cleanup.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Network Segment and VPC",
+        "aliases": [
+          "network segment",
+          "VPC",
+          "VPC loopback"
+        ],
+        "definition": "Tenant network constructs that the DPUs configure for an instance. Segments must be ready before provisioning can continue.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Network Configuration Version Acknowledgement",
+        "aliases": [
+          "managed-host network config version",
+          "instance network observation",
+          "WaitingForNetworkConfig"
+        ],
+        "definition": "DPU agents report which version of the desired network configuration they have applied. NICo waits until the reported versions match the desired versions before moving on.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Health Reports and Alerts",
+        "aliases": [
+          "aggregate health",
+          "PreventHostStateChanges",
+          "PreventAllocations",
+          "Replace report",
+          "Merge report",
+          "health override"
+        ],
+        "definition": "Health reports from agents and from overrides are combined into an aggregate. Alert classifications in it, such as PreventHostStateChanges, block state transitions. Host Replace reports take precedence over DPU reports.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "BGP Peering with Top-of-Rack Switch",
+        "aliases": [
+          "BgpPeeringTor",
+          "ToR uplink",
+          "p0"
+        ],
+        "definition": "The DPU's BGP session to the rack's switch on its uplink port (p0). A p0 transport failure blocks the PXE restart.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Live Network Update",
+        "aliases": [
+          "NetworkConfigUpdate",
+          "ReleaseOldResources"
+        ],
+        "definition": "Changing an assigned instance's networking without restarting the host. NICo keeps the old resources until every DPU acknowledges the new configuration and health is clear, then releases them in one transaction.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Host Reprovision",
+        "aliases": [
+          "HostReprovision",
+          "host firmware update"
+        ],
+        "definition": "Updating host firmware through the BMC, either by uploading images or by running scripts, followed by a reset and verification. It can run from Ready or Assigned.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "DPU Reprovision",
+        "aliases": [
+          "DPUReprovision"
+        ],
+        "definition": "Reinstalling or updating the DPU OS/firmware (BFB) and then waiting for the network config before rebooting the host. It returns to where it came from.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "WaitingForCleanup (Deprovision Cleanup)",
+        "aliases": [
+          "HostCleanup",
+          "SecureEraseBoss",
+          "CreateBossVolume"
+        ],
+        "definition": "The cleanup after an instance is released. It wipes host storage, including a secure erase and recreation of a BOSS boot volume where present, and then goes back through BOM and machine validation in the Cleanup context.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "BOSS Controller",
+        "aliases": [
+          "Boss",
+          "Boot Optimized Storage Solution"
+        ],
+        "definition": "A Dell boot-drive controller. NICo securely erases it and recreates its volume during cleanup.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "DHCP",
+        "aliases": [
+          "OOB DHCP",
+          "BMC DHCP"
+        ],
+        "definition": "The protocol that assigns IP addresses to network interfaces, including out-of-band management and BMC interfaces.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Out-of-Band (OOB) Interface",
+        "aliases": [
+          "OOB"
+        ],
+        "definition": "A management network interface that is separate from the data network.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Decommissioning",
+        "aliases": [
+          "Decommissioned",
+          "DHCP suppression acknowledgement"
+        ],
+        "definition": "The terminal path from Ready. It resets host and DPU configuration, suppresses DHCP for the host's MACs, factory-resets the BMCs, and deletes per-device credentials.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Failed State and Failure Causes",
+        "aliases": [
+          "Failed",
+          "FailureCause",
+          "BiosSetupFailed",
+          "Assigned/Failed"
+        ],
+        "definition": "A state recording why a host failed, such as BIOS setup, discovery, measurement or validation failures. Some causes recover automatically once the condition clears, others need an admin.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Managed-Host Reset",
+        "aliases": [
+          "Reset",
+          "managed-host reset"
+        ],
+        "definition": "An admin-requested reset that deletes the instance and re-ingests the host. It is the supported way to recover a parked NIC firmware failure.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Force Deletion",
+        "aliases": [
+          "ForceDeletion"
+        ],
+        "definition": "Admin removal of a failed host from NICo. It is refused while NIC firmware work or dispatch obligations are unsettled.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Disable Onboard NICs (Vera Rubin)",
+        "aliases": [
+          "DisableOnboardNics"
+        ],
+        "definition": "A HostInit step only for Vera Rubin hosts with managed DPUs. It enables and then disables the onboard NICs through the BMC, with persisted 10-second waits between the writes.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "NIC Firmware Recovery Engine",
+        "aliases": [
+          "NicFirmwareUpdating",
+          "NIC firmware admission",
+          "nic_firmware_admission_enabled"
+        ],
+        "definition": "An unreleased, disabled-by-default part of the state machine. It checks non-DPU NIC firmware against a baseline during initial preparation and deprovision, and admits and tracks firmware changes so they can be recovered safely.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "NIC Firmware Baseline Policy",
+        "aliases": [
+          "baseline selection",
+          "card/machine/site profile",
+          "nic_firmware_platforms allow-list"
+        ],
+        "definition": "The target firmware chosen per card, machine or site, in that order of precedence. A change only proceeds if the platform (sys_vendor/product_name) and the card (PN/PSID) exactly match the allow-list.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "NIC Firmware Admission",
+        "aliases": [
+          "Pending check",
+          "admitted operation"
+        ],
+        "definition": "Moving a queued NIC check (Pending) into an admitted operation. Admission freezes the targets, artifacts and lockdown policies and reserves an update slot for the host. Without valid evidence and capacity, the check stays Pending.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "NIC Firmware Execution Phases",
+        "aliases": [
+          "ObservingSupervisor",
+          "Unlocking",
+          "UpdatingFirmware",
+          "Rebooting",
+          "Reobserving",
+          "RestoringLockdown"
+        ],
+        "definition": "The steps an admitted operation goes through for each card: observe the supervisor, unlock, flash, then activate by reboot or card reset. It then checks a fresh inventory and restores the original lockdown policies.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Firmware Supervisor and Receipt",
+        "aliases": [
+          "supervisor",
+          "receipt",
+          "supervisor_instance_id",
+          "supervisor journal"
+        ],
+        "definition": "The local daemon that performs firmware work, plus the receipt Core saves that records which work it accepted and the results. Core uses receipts to resume after restarts without repeating writes.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "NIC Readiness Qualification and Restoration Obligations",
+        "aliases": [
+          "restoration obligation",
+          "readiness qualification obligation"
+        ],
+        "definition": "Persisted flags saying a NIC card must be restored to baseline or re-qualified through host preparation before allocation. They survive reset and admission being disabled.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Tracked Dispatch",
+        "aliases": [
+          "nic_firmware_dispatch",
+          "dispatch token",
+          "unresolved dispatch",
+          "sender"
+        ],
+        "definition": "A record (UUID token and origin) that each participating sender writes before sending a power, DPA or MLX command. An unresolved dispatch blocks further progress until the command's effects are proven settled.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Operator Reconciliation",
+        "aliases": [
+          "fencing",
+          "settlement write"
+        ],
+        "definition": "The manual procedure used when evidence is uncertain. The operator fences all original senders, preserves the evidence, confirms that tools and hardware have settled, and then conditionally records settlement for the exact token.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Managed-Machine Update Scheduling Budget",
+        "aliases": [
+          "max_concurrent_machine_updates_absolute",
+          "max_concurrent_machine_updates_percent",
+          "update slot"
+        ],
+        "definition": "A shared limit on how many hosts can do firmware updates at once. If both limits are unset, capacity is zero and changed NIC work stays pending.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Managed Artifact Cache",
+        "aliases": [
+          "artifact digests",
+          "SiteCache"
+        ],
+        "definition": "Storage for firmware artifacts. Admitted operations pin their artifacts by digest so they are not evicted during use.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "SuperNIC Lockdown and IKM Keys",
+        "aliases": [
+          "lockdown key",
+          "IKM version",
+          "SuperNIC"
+        ],
+        "definition": "A NIC feature that locks firmware changes behind a key. Changing a locked card requires its MAC and its settled current IKM key version.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "PN/PSID",
+        "aliases": [
+          "part number",
+          "PSID"
+        ],
+        "definition": "The part number and Parameter-Set ID that identify an NVIDIA NIC model and its firmware configuration. They are used to match cards to the allow-list.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "DMI Platform Identity",
+        "aliases": [
+          "sys_vendor",
+          "product_name",
+          "DMI"
+        ],
+        "definition": "The system vendor and product name that the host firmware reports. NIC firmware policy uses them to identify the platform.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "DPA (Data Path Accelerator)",
+        "aliases": [
+          "DPA",
+          "native DPA agent",
+          "ApplyFirmware"
+        ],
+        "definition": "A NIC subsystem with its own agents and firmware policies. Legacy DPA firmware paths must not overlap with the generic NIC firmware engine.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "MLX Configuration",
+        "aliases": [
+          "mlxconfig",
+          "MLX profile",
+          "FirmwareFlasher"
+        ],
+        "definition": "NVIDIA/Mellanox tools and settings for configuring and flashing NIC firmware. Tracked MLX writes create restoration obligations.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "Clock Synchronization",
+        "aliases": [
+          "NTP",
+          "clock skew"
+        ],
+        "definition": "Keeping system clocks in agreement across machines. Core compares Scout collection times with database times and does not correct for skew, so the clocks must be synchronized.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      },
+      {
+        "name": "State History and Manual Intervention Alerts",
+        "aliases": [
+          "carbide_object_manual_intervention_required",
+          "state SLA"
+        ],
+        "definition": "Diagnostic tools for stuck hosts. State history shows past transitions and errors, and alerts fire when the controller needs an operator to step in.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/managedhost.md"
+        ]
+      }
+    ],
+    "prerequisites": [
+      {
+        "concept": "Managed Host Lifecycle",
+        "requires": "Finite State Machine (FSM)",
+        "confidence": 0.9,
+        "why": "The lifecycle is described as an FSM with states and transitions"
+      },
+      {
+        "concept": "Managed Host Lifecycle",
+        "requires": "Managed Host",
+        "confidence": 0.9,
+        "why": "The lifecycle is the lifecycle of a managed host"
+      },
+      {
+        "concept": "Managed Host",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.7,
+        "why": "A managed host consists of a server plus its DPUs"
+      },
+      {
+        "concept": "Managed Host",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.7,
+        "why": "Managed hosts are discovered and controlled through their BMCs"
+      },
+      {
+        "concept": "Managed Host",
+        "requires": "Site Explorer",
+        "confidence": 0.6,
+        "why": "Site Explorer creates managed hosts"
+      },
+      {
+        "concept": "Redfish API",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "Redfish is the API that BMCs expose"
+      },
+      {
+        "concept": "IPMI over LAN",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.8,
+        "why": "IPMI is a BMC management protocol"
+      },
+      {
+        "concept": "BFB (BlueField Bootstream)",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.85,
+        "why": "BFB is the DPU OS image"
+      },
+      {
+        "concept": "DOCA Platform Framework (DPF)",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.8,
+        "why": "DPF provisions DPUs"
+      },
+      {
+        "concept": "Rshim",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.8,
+        "why": "Rshim is a DPU management interface"
+      },
+      {
+        "concept": "UEFI/BIOS Configuration",
+        "requires": "Redfish API",
+        "confidence": 0.7,
+        "why": "BIOS settings and jobs are applied through the BMC's Redfish API"
+      },
+      {
+        "concept": "Boot Order",
+        "requires": "UEFI/BIOS Configuration",
+        "confidence": 0.6,
+        "why": "Boot order is a firmware setting"
+      },
+      {
+        "concept": "Host Lockdown",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.75,
+        "why": "Lockdown restricts BMC and firmware changes"
+      },
+      {
+        "concept": "Measured Boot Attestation",
+        "requires": "Secure Boot",
+        "confidence": 0.5,
+        "why": "Both deal with trust in boot software"
+      },
+      {
+        "concept": "SKU and BOM Validation",
+        "requires": "Scout",
+        "confidence": 0.6,
+        "why": "BOM validation compares the inventory that Scout reports"
+      },
+      {
+        "concept": "Network Configuration Version Acknowledgement",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.75,
+        "why": "DPU agents send the version acknowledgements"
+      },
+      {
+        "concept": "Network Configuration Version Acknowledgement",
+        "requires": "Network Segment and VPC",
+        "confidence": 0.6,
+        "why": "The configuration being acknowledged is tenant networking"
+      },
+      {
+        "concept": "Live Network Update",
+        "requires": "Network Configuration Version Acknowledgement",
+        "confidence": 0.85,
+        "why": "Old resources are released only after DPUs acknowledge the new configuration"
+      },
+      {
+        "concept": "Live Network Update",
+        "requires": "Health Reports and Alerts",
+        "confidence": 0.7,
+        "why": "Blocking health alerts hold the release of old resources"
+      },
+      {
+        "concept": "Live Network Update",
+        "requires": "Instance",
+        "confidence": 0.7,
+        "why": "It updates an assigned instance's network"
+      },
+      {
+        "concept": "BGP Peering with Top-of-Rack Switch",
+        "requires": "Health Reports and Alerts",
+        "confidence": 0.5,
+        "why": "p0 failures show up as health probe classifications"
+      },
+      {
+        "concept": "PXE / iPXE Boot",
+        "requires": "DHCP",
+        "confidence": 0.6,
+        "why": "Network boot relies on DHCP"
+      },
+      {
+        "concept": "Host Reprovision",
+        "requires": "Redfish API",
+        "confidence": 0.6,
+        "why": "Firmware is uploaded and tracked through BMC tasks"
+      },
+      {
+        "concept": "DPU Reprovision",
+        "requires": "BFB (BlueField Bootstream)",
+        "confidence": 0.8,
+        "why": "DPU reprovisioning installs a BFB"
+      },
+      {
+        "concept": "WaitingForCleanup (Deprovision Cleanup)",
+        "requires": "BOSS Controller",
+        "confidence": 0.6,
+        "why": "Cleanup erases and recreates BOSS volumes"
+      },
+      {
+        "concept": "WaitingForCleanup (Deprovision Cleanup)",
+        "requires": "Machine Validation",
+        "confidence": 0.6,
+        "why": "Cleanup continues into validation in the Cleanup context"
+      },
+      {
+        "concept": "Decommissioning",
+        "requires": "DHCP",
+        "confidence": 0.75,
+        "why": "Decommissioning suppresses DHCP and waits for acknowledgements"
+      },
+      {
+        "concept": "Decommissioning",
+        "requires": "Out-of-Band (OOB) Interface",
+        "confidence": 0.6,
+        "why": "The OOB DHCP wait checks the OOB interface MACs"
+      },
+      {
+        "concept": "Decommissioning",
+        "requires": "Managed Host Lifecycle",
+        "confidence": 0.6,
+        "why": "Decommissioning starts from Ready"
+      },
+      {
+        "concept": "Failed State and Failure Causes",
+        "requires": "Managed Host Lifecycle",
+        "confidence": 0.7,
+        "why": "Recovery goes back into specific lifecycle states"
+      },
+      {
+        "concept": "Force Deletion",
+        "requires": "Failed State and Failure Causes",
+        "confidence": 0.7,
+        "why": "Force deletion is entered from Failed"
+      },
+      {
+        "concept": "NIC Firmware Recovery Engine",
+        "requires": "Managed Host Lifecycle",
+        "confidence": 0.8,
+        "why": "Its entry points hook into HostInit/Discovered and WaitingForCleanup"
+      },
+      {
+        "concept": "NIC Firmware Recovery Engine",
+        "requires": "NICo Core",
+        "confidence": 0.6,
+        "why": "Core runs and persists the engine and its admission settings"
+      },
+      {
+        "concept": "NIC Firmware Baseline Policy",
+        "requires": "PN/PSID",
+        "confidence": 0.8,
+        "why": "Cards are matched to the allow-list by PN/PSID"
+      },
+      {
+        "concept": "NIC Firmware Baseline Policy",
+        "requires": "DMI Platform Identity",
+        "confidence": 0.8,
+        "why": "Platforms are matched by sys_vendor/product_name"
+      },
+      {
+        "concept": "NIC Firmware Admission",
+        "requires": "NIC Firmware Baseline Policy",
+        "confidence": 0.85,
+        "why": "Admission resolves and freezes the baseline targets"
+      },
+      {
+        "concept": "NIC Firmware Admission",
+        "requires": "Managed-Machine Update Scheduling Budget",
+        "confidence": 0.8,
+        "why": "Changed work needs an available update slot"
+      },
+      {
+        "concept": "NIC Firmware Admission",
+        "requires": "Scout",
+        "confidence": 0.6,
+        "why": "Admission needs fresh inventory and capability flags from Scout"
+      },
+      {
+        "concept": "NIC Firmware Execution Phases",
+        "requires": "NIC Firmware Admission",
+        "confidence": 0.85,
+        "why": "The phases belong to an admitted operation"
+      },
+      {
+        "concept": "NIC Firmware Execution Phases",
+        "requires": "Firmware Supervisor and Receipt",
+        "confidence": 0.8,
+        "why": "Each phase observes and depends on supervisor receipts"
+      },
+      {
+        "concept": "NIC Firmware Execution Phases",
+        "requires": "SuperNIC Lockdown and IKM Keys",
+        "confidence": 0.75,
+        "why": "The Unlocking and RestoringLockdown phases operate on card lockdown"
+      },
+      {
+        "concept": "NIC Firmware Execution Phases",
+        "requires": "Clock Synchronization",
+        "confidence": 0.5,
+        "why": "Inventory freshness checks compare timestamps from different hosts"
+      },
+      {
+        "concept": "NIC Readiness Qualification and Restoration Obligations",
+        "requires": "NIC Firmware Baseline Policy",
+        "confidence": 0.7,
+        "why": "Restoration returns cards to the current baseline"
+      },
+      {
+        "concept": "Tracked Dispatch",
+        "requires": "NIC Firmware Recovery Engine",
+        "confidence": 0.7,
+        "why": "Dispatch tracking exists to protect NIC firmware participation"
+      },
+      {
+        "concept": "Tracked Dispatch",
+        "requires": "DPA (Data Path Accelerator)",
+        "confidence": 0.5,
+        "why": "DPA requests are among the tracked senders"
+      },
+      {
+        "concept": "Tracked Dispatch",
+        "requires": "MLX Configuration",
+        "confidence": 0.5,
+        "why": "MLX writes are tracked senders"
+      },
+      {
+        "concept": "Operator Reconciliation",
+        "requires": "Tracked Dispatch",
+        "confidence": 0.85,
+        "why": "Reconciliation settles unresolved dispatch tokens"
+      },
+      {
+        "concept": "Operator Reconciliation",
+        "requires": "Firmware Supervisor and Receipt",
+        "confidence": 0.6,
+        "why": "Unfinished supervisor work requires explicit reconciliation"
+      },
+      {
+        "concept": "Managed-Host Reset",
+        "requires": "NIC Readiness Qualification and Restoration Obligations",
+        "confidence": 0.5,
+        "why": "Reset keeps obligations through re-ingestion"
+      },
+      {
+        "concept": "Disable Onboard NICs (Vera Rubin)",
+        "requires": "Redfish API",
+        "confidence": 0.6,
+        "why": "The NIC settings are written through libredfish to the BMC"
+      }
+    ]
+  }
+}

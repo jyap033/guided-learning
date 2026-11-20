@@ -49,6 +49,7 @@ reversed, mark it `Superseded by D-xxx` and add a new entry.
 | D-019 | Curriculum map as an advance organiser | Proposed |
 | D-020 | Graph extraction: few-shot, doc-order signal, edge confidence | Proposed |
 | D-021 | Features we deliberately won't build | Proposed |
+| D-022 | Every topic gets a mind map, separate from the prerequisite graph | Proposed |
 
 Evidence for D-014 – D-021 is in [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEARNING-METHODS.md).
 
@@ -336,3 +337,22 @@ Evidence for D-014 – D-021 is in [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEA
   product so that effortful features (quizzes, spacing, staged hints) don't
   feel like bad UX.
 - **Consequences:** Keeps scope focused on what works.
+
+## D-022 — Every topic gets a mind map, separate from the prerequisite graph
+- **Status:** Proposed
+- **Date:** 2026-11-20
+- **Context:** Learners need a one-page overview of a topic. A prerequisite
+  DAG answers "what comes first", but a large one is hard to read as an
+  overview. Advance organisers and concept maps improve learning (Ausubel
+  1960; Nesbit & Adesope 2006).
+- **Decision:** Generate a mind map for every topic: a tree of themes →
+  concepts built from `part_of` edges, separate from the `depends_on` DAG.
+  The map is the main overview and navigation. It shows progress per concept
+  and per theme, and draws prerequisite arrows on demand for the selected
+  concept. The CLI outputs Mermaid `mindmap`; the web app renders it
+  interactively. Users can edit it, and edits survive regeneration.
+- **Alternatives considered:** Showing only the DAG (accurate but cluttered);
+  a mind map only, with no DAG (can't order chapters or check prerequisites).
+- **Consequences:** Adds `themes` and `concept_themes` tables plus validation
+  rules (each concept in exactly one theme, about 7 children at most, depth no
+  more than 4). Later: a "build your own map" exercise at chapter end.

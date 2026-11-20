@@ -195,6 +195,77 @@ expectations for what output looks like):
 | 5 | NICo itself | Site Controller architecture, machine lifecycle, tenancy, APIs, deployment |
 | 5 | Capstone | Build something with NICo (see below) |
 
+### 7.1 NICo mind map (first guess)
+
+This is what the generated mind map for a topic looks like (see §8a). It is
+the same first-guess content as the table above, grouped by theme rather than
+by level. GitHub draws it automatically; elsewhere, paste it into
+<https://mermaid.live>.
+
+```mermaid
+mindmap
+  root((NVIDIA NICo))
+    Foundations
+      Linux CLI
+      Processes and services
+      YAML and JSON
+      HTTP and REST APIs
+      Git
+    Networking
+      IP addressing and subnets
+      DHCP
+      DNS
+      VLANs
+      Routing basics
+      Datacenter networking
+        Leaf-spine
+        VXLAN and EVPN overlays
+        Multi-tenancy and isolation
+    Servers and hardware
+      Bare-metal servers
+      BIOS and UEFI
+      Firmware
+      NICs
+      GPUs in servers
+      DPUs and SmartNICs
+        BlueField
+        Offload
+        DPU-enforced isolation
+    Remote management
+      BMC
+      IPMI
+      Redfish API
+      Out-of-band network
+    Provisioning
+      PXE and iPXE
+      TFTP
+      OS imaging
+      cloud-init
+    Containers and Kubernetes
+      Container images
+      containerd and Docker
+      Registries
+      Pods, deployments, services
+      Operators and CRDs
+      HA control plane, 3 or more nodes
+    Security
+      TLS
+      PKI and certificates
+      mTLS
+      Secure and measured boot
+      Zero trust
+    Control planes
+      Control plane vs data plane
+      Reconciliation loops
+      API-driven infrastructure
+    NICo itself
+      Site Controller
+      Machine lifecycle
+      Tenancy
+      NICo APIs
+      Deployment
+```
+
 **Capstone idea (to refine):** stand up a small lab — local Kubernetes cluster
 plus VMs emulating bare-metal hosts with a virtual BMC (Redfish emulator) —
 deploy NICo or its components where feasible, and provision a "machine" end to
@@ -219,11 +290,52 @@ a verification step the learner can run, and common failure hints.
 MVP verification is self-reported plus optional output pasting for AI review;
 automated checking is a later feature.
 
+## 8a. Topic mind map
+
+Every topic gets a **mind map**: the whole subject on one page, grouped by
+theme, with the target topic at the centre. It is the learner's overview and
+navigation, and works as an advance organiser (D-019, D-022).
+
+**Mind map vs prerequisite graph.** They show the same concepts in two ways:
+
+| | Mind map | Prerequisite graph (DAG) |
+|---|---|---|
+| Answers | "What is in this topic, and how is it grouped?" | "What do I need to learn before this?" |
+| Shape | Tree: topic → theme → sub-theme → concept | Directed graph of `depends_on` edges |
+| Built from | `part_of` edges (D-020) and theme clustering | `depends_on` edges |
+| Used for | Overview, navigation, seeing progress | Ordering chapters, placement, gating |
+
+**How it's generated**
+1. After concept extraction (§6.2–6.3), the LLM proposes themes and assigns
+   each concept to one theme (`part_of` edges), nesting up to 3 levels.
+2. Code validates it: every concept appears exactly once, there are no empty
+   themes, there is a limit of about 7 children per node (the LLM regroups if
+   it's over), and the depth is no more than 4.
+3. The tree is stored and rendered. The CLI (M1) outputs it as a Mermaid
+   `mindmap` block; the web app (M3) renders it interactively.
+
+**What the learner can do with it**
+- **See progress:** each concept is coloured by status (unknown / learning /
+  mastered / skipped as known). Each theme shows its completion percentage.
+- **Navigate:** click a concept to open its lesson, or a theme to see its
+  chapters.
+- **See dependencies on demand:** select a concept to show its prerequisites
+  and what it unlocks, drawn as arrows over the map. This keeps the map
+  readable while the DAG is still one click away.
+- **Placement:** mark whole branches as "I know this" during setup; the
+  placement quiz (D-011) then confirms it.
+- **Edit:** move a concept to another theme, rename a theme. Edits are saved
+  with `origin = user_edited` and kept when the map is regenerated.
+- **Build their own (later):** at the end of a chapter, the learner can be
+  asked to arrange that chapter's concepts into a map themselves, then compare
+  it with the generated one. Building concept maps yourself is itself an
+  effective learning activity (Nesbit & Adesope, 2006).
+
 ## 9. Architecture (MVP)
 
 ```
 ┌──────────────────────── Web app (Next.js + TypeScript) ───────────────────────┐
-│  Topic setup · Curriculum map (graph view) · Lesson reader · Checks · Tutor   │
+│  Topic setup · Mind map + prerequisite view · Lesson reader · Checks · Tutor  │
 └───────────────────────────────────┬───────────────────────────────────────────┘
                                     │ API routes / server actions
 ┌───────────────────────────────────▼───────────────────────────────────────────┐
@@ -265,6 +377,8 @@ chunks(id, source_id, text, embedding, position)
 concepts(id, topic_id, name, slug, definition, level, effort_minutes, origin)
 concept_sources(concept_id, chunk_id)
 edges(from_concept_id, to_concept_id, rationale, origin)   -- from = prerequisite
+themes(id, topic_id, parent_theme_id, name, ordinal, origin)   -- mind map tree
+concept_themes(concept_id, theme_id)                            -- part_of; one theme per concept
 chapters(id, topic_id, ordinal, title, summary)
 chapter_concepts(chapter_id, concept_id, ordinal)
 lessons(id, concept_id, body_md, prompt_version, model, generated_at)
@@ -296,7 +410,7 @@ AI-generated curricula can be wrong in subtle ways. Mitigations:
 | Milestone | Scope | Exit criteria |
 |---|---|---|
 | **M0 — Docs** | This design doc + decisions log | Agreed direction |
-| **M1 — Graph CLI** | Ingest NICo docs, extract + expand concepts, output a DAG and chapter list as JSON/Markdown | Graph looks sensible to the pilot user; passes sanity checks |
+| **M1 — Graph CLI** | Ingest NICo docs, extract + expand concepts, output a DAG, a mind map (Mermaid) and a chapter list as JSON/Markdown | Graph looks sensible to the pilot user; passes sanity checks |
 | **M2 — Content CLI** | Generate lessons, checks, and an exercise for the first 2–3 chapters | Pilot user can actually learn from chapter 1–2 |
 | **M3 — Web MVP** | Curriculum map, lesson reader, checks, progress, tutor | Pilot user uses it end-to-end for a week |
 | **M4 — Personalisation** | Placement quiz, skip-known, remediation | Measurably less time on known material |

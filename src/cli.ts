@@ -105,6 +105,17 @@ program
       const major = result.review.issues.filter((i) => i.severity === "major").length;
       log(`chapter ${n}: done (${result.review.verdict}${result.revised ? ", rewritten once" : ""}, ${major} major / ${result.review.issues.length - major} minor issues left) → ${file}`);
     });
+    // index of every chapter written so far
+    const written = cur.chapters.filter((c) => fs.existsSync(path.join(outDir, files.get(c.number) as string)));
+    const index = [
+      `# ${cur.topic.name}: lessons`,
+      "",
+      `${written.length} of ${cur.chapters.length} chapters written. The full plan is in [curriculum.md](../curriculum.md) and the overview in [mindmap.md](../mindmap.md).`,
+      "",
+      ...written.map((c) => `${c.number}. [${c.title}](${files.get(c.number)}) (${c.concepts.length} concepts) · *${c.part}*`),
+      "",
+    ];
+    fs.writeFileSync(path.join(outDir, "README.md"), index.join("\n"));
     log(`AI calls: ${provider.calls} new, ${provider.hits} from cache`);
   });
 

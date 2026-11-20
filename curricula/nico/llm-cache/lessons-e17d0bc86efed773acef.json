@@ -1,0 +1,966 @@
+{
+  "kind": "lessons",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "intro": "NICo (NVIDIA Infra Controller) manages physical servers. You won't get far with it until two kinds of vocabulary feel natural: **hardware** (servers, BMCs, PCIe devices, NUMA nodes, CPU architectures, MAC and PCI addresses) and **data formats** (TOML, YAML, Protocol Buffers, SQL). This chapter covers both. It assumes only that you can program a little and use a terminal.\n\nEach idea here shows up again later in the course. NICo's site configuration is written in TOML. Its Core APIs are defined in Protocol Buffers. It keeps machine state in relational database tables, and you deploy it with Helm charts, which are YAML. When it discovers hardware, it reads MAC addresses, PCIe serial numbers and PCI slot addresses through Redfish, the BMC's HTTP API. It uses them to pair DPUs with hosts, to look up BMC credentials, and to decide which physical InfiniBand port a tenant gets.\n\nThe lessons are short and practical. Each one starts with a question to guess at, then explains the idea, works an example step by step, and gives you problems that come with less and less help. Everything runs on a normal laptop. The chapter ends with a small tool that combines all ten concepts: a toy inventory resolver that reads TOML and YAML, normalises MACs, loads SQLite, sorts PCI addresses the way NICo does, and serialises the results with protobuf.",
+    "objectives": [
+      "Read and write TOML, YAML and Protocol Buffers schemas, and spot the common parsing traps in each",
+      "Model and query inventory data in a relational database with SQL joins and constraints",
+      "Explain how servers are built and managed out of band through a BMC, and match Redfish resources (Systems, Chassis, Managers) to physical parts",
+      "Normalise MAC addresses and explain why NICo uses them as keys for BMC credentials and DPU-host pairing",
+      "Decode PCI addresses, find a device's NUMA node, and map a tenant's device selection to hardware deterministically by sorting PCI slots",
+      "Tell amd64 binaries from arm64 binaries and predict when one will fail to run"
+    ],
+    "lessons": [
+      {
+        "concept": "toml",
+        "prequestions": [
+          {
+            "question": "In this file, what do you think `[server]` does, and what is the full name of `port`?\n```toml\n[server]\nport = 8080\n```",
+            "answer": "`[server]` opens a table (a named group of keys). Every key after it belongs to that table until the next header, so the full name is `server.port`, and its value is the integer 8080."
+          },
+          {
+            "question": "Guess: is `port = \"8080\"` the same as `port = 8080` in TOML?",
+            "answer": "No. The quoted one is a string and the unquoted one is an integer. TOML values have types."
+          }
+        ],
+        "explanation": "**TOML** (Tom's Obvious, Minimal Language) is a configuration format designed to be easy for people to read and to map cleanly onto a dictionary or hash map in code. NICo's site configuration is written in TOML. You'll meet the real site config in a later chapter. Here you learn the format itself.\n\nA TOML file is built from three things:\n\n1. **Key-value pairs**: `name = value`. Keys are on the left. Values are typed:\n   - strings in quotes: `\"lab-1\"`\n   - integers: `42`\n   - floats: `0.5`\n   - booleans: `true` or `false`\n   - dates and times: `2026-11-20T10:00:00Z`\n   - arrays: `[\"a\", \"b\"]`\n   - inline tables: `{ user = \"admin\", port = 443 }`\n2. **Tables**: a header such as `[database]` starts a section. The keys below it belong to that table. Headers can be dotted: `[database.pool]` is a table called `pool` inside `database`. You can also write dotted keys directly: `database.pool.size = 10`.\n3. **Arrays of tables**: `[[machine]]` adds a new item to a list called `machine`. Repeat the header to add another item. This is how you write a list of records, such as several expected machines.\n\nOther rules:\n- `#` starts a comment.\n- Whitespace and indentation don't matter.\n- Defining the same key twice is an **error**. The parser won't quietly overwrite the first value. That strictness is useful for config files.\n\nTOML becomes a plain nested structure. In Python 3.11 and later, the standard library module `tomllib` parses it. The module can read TOML but can't write it, and you must open the file in binary mode (`'rb'`).\n\nWhy use TOML for config rather than JSON? It allows comments, it doesn't need a wall of braces, and it is stricter than YAML, so it has fewer surprises.",
+        "analogy": "TOML is like a filing cabinet. Each `[table]` is a labelled drawer and each `key = value` is a labelled folder inside it. `[[table]]` is a drawer of identical forms where you add one form at a time. The analogy breaks down because real folders can hold anything, while TOML values have strict types (a quoted \"8080\" is not the number 8080), and drawers can sit inside other drawers.",
+        "workedExample": {
+          "title": "Parse a small TOML file and inspect what the program sees",
+          "steps": [
+            {
+              "subgoal": "Write the file",
+              "detail": "```bash\nmkdir -p ~/ch1 && cd ~/ch1\ncat > demo.toml <<'EOF'\n# practice file, not a real NICo config\nsite_name = \"lab-1\"\ndebug = false\n\n[database]\nhost = \"localhost\"\nport = 5432\n\n[[rack]]\nname = \"R01\"\nunits = 42\n\n[[rack]]\nname = \"R02\"\nunits = 48\nEOF\n```"
+            },
+            {
+              "subgoal": "Parse it with Python's tomllib",
+              "detail": "```bash\npython3 -c 'import tomllib,pprint; pprint.pprint(tomllib.load(open(\"demo.toml\",\"rb\")))'\n```\nOutput:\n```\n{'database': {'host': 'localhost', 'port': 5432},\n 'debug': False,\n 'rack': [{'name': 'R01', 'units': 42}, {'name': 'R02', 'units': 48}],\n 'site_name': 'lab-1'}\n```"
+            },
+            {
+              "subgoal": "Check the mapping",
+              "detail": "`[database]` became a nested dictionary. Each `[[rack]]` became one element of the `rack` list. `5432` is an `int` and `false` is a Python `bool`."
+            },
+            {
+              "subgoal": "Break it on purpose",
+              "detail": "Add a second `port = 5433` line under `[database]` and parse again. You get `tomllib.TOMLDecodeError` reporting that the key is defined more than once. The parser rejects the file instead of guessing which value you meant."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so the file parses to `{'bmc': [{'mac': 'B8:3F:D2:90:95:82', 'rack': 'R01'}, {'mac': '7C:C2:55:00:00:01', 'rack': 'R02'}], 'site': {'name': 'lab-1'}}`.",
+          "partialSolution": "[site]\nname = \"lab-1\"\n\n___\nmac = \"B8:3F:D2:90:95:82\"\nrack = \"R01\"\n\n___\nmac = \"7C:C2:55:00:00:01\"\nrack = \"R02\"",
+          "answer": "Both blanks are `[[bmc]]`. Each `[[bmc]]` header adds a new element to the `bmc` array of tables. Writing `[bmc]` twice would be an error, because a table can't be defined twice."
+        },
+        "independentProblem": {
+          "prompt": "Convert this JSON to idiomatic TOML, then prove the two are equivalent with a one-line Python comparison:\n```json\n{\"site\": {\"name\": \"lab-1\", \"tags\": [\"gpu\", \"ib\"]}, \"limits\": {\"max_hosts\": 64, \"dry_run\": true}}\n```",
+          "hints": [
+            "You need two tables, and one key whose value is an array.",
+            "The structure is `[site]` with `name` and `tags = [...]`, then `[limits]` with an integer and a boolean (lowercase `true`).",
+            "Check it with: `python3 -c 'import tomllib,json; print(tomllib.load(open(\"x.toml\",\"rb\")) == json.load(open(\"x.json\")))'`"
+          ],
+          "answer": "```toml\n[site]\nname = \"lab-1\"\ntags = [\"gpu\", \"ib\"]\n\n[limits]\nmax_hosts = 64\ndry_run = true\n```\nThe comparison prints `True`."
+        },
+        "selfExplanation": "Why might a team running hundreds of servers prefer a config format that errors on duplicate keys, rather than one that silently keeps the last value?",
+        "checks": [
+          {
+            "question": "What does a `[[expected_machine]]` header produce when parsed?",
+            "options": [
+              "A single nested table called expected_machine",
+              "A new element appended to a list called expected_machine",
+              "A comment",
+              "A table that overwrites any earlier expected_machine table"
+            ],
+            "answer": "A new element appended to a list called expected_machine",
+            "explanation": "Double brackets mean an array of tables, and each header adds one element. Single brackets make one table. Defining that table twice is an error, not an overwrite."
+          },
+          {
+            "question": "In TOML, what type is `units = \"42\"`?",
+            "options": [
+              "Integer",
+              "String",
+              "Float",
+              "It depends on the parser"
+            ],
+            "answer": "String",
+            "explanation": "Quotes make it a string, and TOML's types are fixed by the spec, not guessed by the parser. If you want a number, leave out the quotes."
+          },
+          {
+            "question": "Which statement about Python's `tomllib` is true?",
+            "options": [
+              "It can read and write TOML",
+              "It reads TOML from a file opened in binary mode",
+              "It needs `pip install toml`",
+              "It returns all values as strings"
+            ],
+            "answer": "It reads TOML from a file opened in binary mode",
+            "explanation": "`tomllib` is in the standard library from Python 3.11 and can only read. `tomllib.load` expects a binary file object, and it returns typed values."
+          }
+        ],
+        "sources": []
+      },
+      {
+        "concept": "protocol-buffers",
+        "prequestions": [
+          {
+            "question": "In the line `string guid = 2;`, what do you think the `2` means? Is it a default value?",
+            "answer": "It isn't a default value. It is the field number, the tag that identifies the field in the encoded binary data. Field names never appear in the binary encoding. Only the numbers do."
+          },
+          {
+            "question": "Guess: if a program sends a protobuf message to another program, does the receiver need the `.proto` file to decode it properly?",
+            "answer": "Yes, or code generated from it. The binary format contains only field numbers and values, so the receiver needs the schema to know what field 2 means."
+          }
+        ],
+        "explanation": "**Protocol Buffers** (protobuf) does two jobs:\n\n1. It is a **schema language**. You describe your data in a `.proto` file.\n2. It is a **serialization format**, a compact binary encoding of that data.\n\nNICo uses protobuf to define its Core APIs. The same definitions are shared with NICo REST (the glossary calls this Core Proto Synchronization), and the gRPC calls you'll meet in a later chapter are built on them.\n\nHere is a real example from NICo's InfiniBand design doc:\n\n```protobuf\nmessage InfinibandInterface {\n  PciDeviceProperties pci_properties = 1;\n  string guid = 2;\n}\n\nmessage PciDeviceProperties {\n  string vendor = 1;\n  string device = 2;\n  string path = 3;\n  sint32 numa_node = 4;\n  optional string description = 5;\n}\n```\n\nThe pieces:\n- A **message** is a record type, like a struct.\n- Each **field** has a type, a name and a **field number**. Types include `string`, integer types, `bool`, `bytes` and other messages (here `pci_properties` is itself a message).\n- `sint32` is a signed 32-bit integer, encoded so that negative numbers stay small on the wire.\n- `optional` lets a reader tell \"not set\" apart from \"set to the empty default\".\n- `repeated` (not shown) makes a field a list.\n\nThe compiler `protoc` turns a `.proto` file into classes for Python, Go, Rust and other languages, so different languages can share one contract.\n\n**The key rule: field numbers are the contract.** In the binary format each field is written as *number + value*, so:\n- Renaming a field doesn't break binary compatibility. The doc proposes renaming `InfinibandInterface` to `InfinibandDevice`, which is safe for the binary format. The JSON mapping does use names, so a rename does matter there.\n- Changing a field's number, or reusing an old number for a different meaning, breaks every existing reader. When you delete a field, mark its number `reserved`.\n- Readers skip fields they don't recognise, so you can add new fields with new numbers without breaking anyone.",
+        "analogy": "A protobuf message is like a customs form where every box has a printed number. The shipper writes in box 2, and the receiving office knows that box 2 means \"GUID\" because both offices use the same form template, the `.proto` file. The analogy breaks down in one place: on a paper form you can see the labels, but in protobuf's binary format the labels are gone and only the box numbers travel.",
+        "workedExample": {
+          "title": "Compile NICo's InfiniBand message and round-trip it in Python",
+          "steps": [
+            {
+              "subgoal": "Install the compiler and runtime",
+              "detail": "```bash\ncd ~/ch1 && python3 -m venv .venv && . .venv/bin/activate\npip install grpcio-tools protobuf\n```\n`grpcio-tools` bundles `protoc`, so you can run it as `python -m grpc_tools.protoc`."
+            },
+            {
+              "subgoal": "Write the schema",
+              "detail": "Save the two messages above into `ib.proto` and add `syntax = \"proto3\";` as the first line."
+            },
+            {
+              "subgoal": "Generate Python code",
+              "detail": "```bash\npython -m grpc_tools.protoc -I. --python_out=. ib.proto\nls ib_pb2.py\n```"
+            },
+            {
+              "subgoal": "Build, serialize and parse a message",
+              "detail": "```python\nimport ib_pb2\nfrom google.protobuf import json_format\nm = ib_pb2.InfinibandInterface(guid=\"1234\")\nm.pci_properties.vendor = \"0x15b3\"\nm.pci_properties.numa_node = 1\ndata = m.SerializeToString()\nprint(len(data), data)\nprint(ib_pb2.InfinibandInterface.FromString(data) == m)  # True\nprint(json_format.MessageToJson(m))\n```"
+            },
+            {
+              "subgoal": "Notice what the encoding contains",
+              "detail": "The bytes are a few dozen at most. The strings `1234` and `0x15b3` appear, but the words `guid` and `vendor` do not. The JSON output shows `pciProperties` and `numaNode`, because protobuf's JSON mapping converts names to lowerCamelCase by default. Pass `preserving_proto_field_name=True` to keep snake_case."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "The NICo doc proposes storing the PCI slot (for example `0000:ca:00.0`) instead of the OS-specific `path`. Add a `slot` string field to `PciDeviceProperties` without breaking existing readers.",
+          "partialSolution": "message PciDeviceProperties {\n  string vendor = 1;\n  string device = 2;\n  string path = 3;\n  sint32 numa_node = 4;\n  optional string description = 5;\n  string slot = ___;\n}",
+          "answer": "`string slot = 6;`. Use a new, never-used number. Old readers skip field 6. Reusing 3 (the number `path` uses) would make old readers treat the slot as a path."
+        },
+        "independentProblem": {
+          "prompt": "Write a proto3 message `PcieDevice` with string fields `id`, `serial_number` and `part_number`, matching the Redfish PCIe fields NICo reads. Compile it, serialize one instance, and show that renaming `part_number` to `pn` in the `.proto` (and regenerating) still parses bytes produced before the rename.",
+          "hints": [
+            "Start with `syntax = \"proto3\";` and give the fields numbers 1 to 3.",
+            "Write `SerializeToString()` output to a file, rename the field, rerun `protoc`, then read the file back with `FromString`.",
+            "After the rename the value reads as `.pn`. It still decodes because field number 3 didn't change."
+          ],
+          "answer": "```protobuf\nsyntax = \"proto3\";\nmessage PcieDevice {\n  string id = 1;\n  string serial_number = 2;\n  string part_number = 3;\n}\n```\nBytes written before the rename decode afterwards, and the value appears under `pn`. Names are not on the binary wire, only field numbers are."
+        },
+        "selfExplanation": "Why do NICo Core and NICo REST share a single synchronized set of `.proto` files instead of each team describing the API in its own docs?",
+        "checks": [
+          {
+            "question": "You delete the field `string path = 3;`. What is the safest follow-up?",
+            "options": [
+              "Give number 3 to the next new field so there are no gaps",
+              "Mark 3 as `reserved` so it is never reused",
+              "Renumber the remaining fields so they are consecutive",
+              "Nothing, because numbers don't matter"
+            ],
+            "answer": "Mark 3 as `reserved` so it is never reused",
+            "explanation": "Old senders may still emit field 3 meaning path. Reusing or renumbering would make readers misinterpret data. Gaps in numbering are harmless."
+          },
+          {
+            "question": "Which change breaks binary compatibility with existing clients?",
+            "options": [
+              "Renaming a field",
+              "Adding a new field with a new number",
+              "Changing an existing field's number",
+              "Adding a comment"
+            ],
+            "answer": "Changing an existing field's number",
+            "explanation": "The binary encoding identifies fields by number. Renames and comments don't touch the wire, and readers skip unknown new numbers."
+          },
+          {
+            "question": "Why is `numa_node` declared as `sint32` rather than an unsigned type?",
+            "options": [
+              "sint32 is the only integer type in proto3",
+              "A NUMA node value may need to be negative (for example -1 for 'unknown'), and sint32 encodes negatives compactly",
+              "Unsigned types can't be serialized",
+              "sint32 means 'string integer'"
+            ],
+            "answer": "A NUMA node value may need to be negative (for example -1 for 'unknown'), and sint32 encodes negatives compactly",
+            "explanation": "Linux reports `-1` for a device's NUMA node when it has no locality information. A signed type can hold that value, and `sint32` uses zigzag encoding so negatives stay small. proto3 has many integer types, including unsigned ones."
+          }
+        ],
+        "sources": [
+          "architecture/infiniband/nic_selection.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "concept": "relational-databases-and-sql",
+        "prequestions": [
+          {
+            "question": "You have a table of machines and a table of network interfaces. How would you record which interfaces belong to which machine?",
+            "answer": "Give each machine a unique id (a primary key), and add a column such as `machine_id` to the interfaces table that refers to it (a foreign key)."
+          },
+          {
+            "question": "Guess: what does `SELECT * FROM machine WHERE rack = 'R01';` return?",
+            "answer": "Every column of every row in the `machine` table whose `rack` column equals 'R01'."
+          }
+        ],
+        "explanation": "A **relational database** stores data in **tables**. Each table has named, typed **columns** and any number of **rows**. You read and change the data with **SQL** (Structured Query Language).\n\nCore ideas:\n- **Primary key**: a column (or set of columns) that uniquely identifies a row, such as `id`.\n- **Foreign key**: a column that points at another table's primary key, for example `interface.machine_id` pointing at `machine.id`. This is the \"relation\" in relational.\n- **Constraints**: rules the database enforces for you, such as `UNIQUE`, `NOT NULL` and `REFERENCES`. If two machines claim the same MAC address, a `UNIQUE` constraint rejects the second insert before bad data spreads.\n- **Transactions**: a group of changes that succeed or fail together (`BEGIN` ... `COMMIT`).\n\nThe common statements are `CREATE TABLE`, `INSERT`, `SELECT ... WHERE`, `UPDATE`, `DELETE`, and **`JOIN`**, which combines rows from two tables on a matching column.\n\nWhere NICo fits: during machine ingestion NICo stores discovered network interface data in its `machine` and `machine_topologies` tables. It keeps the *observed* network state on the Machine record in the database so its workflows all read from one source of truth instead of calling external services. NICo REST runs PostgreSQL, with a migration component that evolves the schema over time. You'll deploy PostgreSQL in a later chapter.\n\nFor practice you'll use **SQLite**. It is a full SQL database in a single file and is built into Python's standard library, so there's nothing to install. Most of the SQL you write here runs unchanged on PostgreSQL.",
+        "analogy": "A relational database is a set of spreadsheets that know how to cross-reference each other. Each sheet is a table, and a `machine_id` column works like a hyperlink to a row on another sheet. The analogy breaks down because a spreadsheet lets you type anything anywhere, while a database enforces types and constraints and can roll back a half-finished change.",
+        "workedExample": {
+          "title": "Model machines and their interfaces in SQLite",
+          "steps": [
+            {
+              "subgoal": "Create the schema",
+              "detail": "```python\n# db.py\nimport sqlite3\ndb = sqlite3.connect(\"lab.db\")\ndb.execute(\"PRAGMA foreign_keys = ON\")\ndb.executescript(\"\"\"\nDROP TABLE IF EXISTS interface; DROP TABLE IF EXISTS machine;\nCREATE TABLE machine (id INTEGER PRIMARY KEY, serial TEXT UNIQUE NOT NULL, rack TEXT);\nCREATE TABLE interface (\n  id INTEGER PRIMARY KEY,\n  machine_id INTEGER NOT NULL REFERENCES machine(id),\n  mac TEXT UNIQUE NOT NULL);\n\"\"\")\n```"
+            },
+            {
+              "subgoal": "Insert rows",
+              "detail": "```python\ndb.execute(\"INSERT INTO machine (id, serial, rack) VALUES (1,'J1234XY','R01'),(2,'K9999ZZ','R02')\")\ndb.execute(\"INSERT INTO interface (machine_id, mac) VALUES (1,'B8:3F:D2:90:95:82'),(1,'B8:3F:D2:90:95:83')\")\ndb.commit()\n```"
+            },
+            {
+              "subgoal": "Join the tables",
+              "detail": "```python\nfor row in db.execute(\"\"\"\n  SELECT m.serial, m.rack, i.mac FROM machine m\n  JOIN interface i ON i.machine_id = m.id ORDER BY i.mac\"\"\"):\n    print(row)\n```\nThis prints two rows for `J1234XY`. `K9999ZZ` has no interfaces, so an inner `JOIN` leaves it out."
+            },
+            {
+              "subgoal": "Watch a constraint protect you",
+              "detail": "```python\ndb.execute(\"INSERT INTO interface (machine_id, mac) VALUES (2,'B8:3F:D2:90:95:82')\")\n```\nThis raises `sqlite3.IntegrityError: UNIQUE constraint failed: interface.mac`. The database refuses to let two machines claim one MAC."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Count the interfaces each machine has, including machines with zero interfaces.",
+          "partialSolution": "SELECT m.serial, COUNT(i.id) AS n\nFROM machine m\n___ interface i ON i.machine_id = m.id\n___ m.serial;",
+          "answer": "`LEFT JOIN` and `GROUP BY`. `LEFT JOIN` keeps machines with no matching interfaces, and `COUNT(i.id)` counts 0 for them. `GROUP BY m.serial` produces one row per machine: J1234XY 2, K9999ZZ 0."
+        },
+        "independentProblem": {
+          "prompt": "Write one SQL query that lists the serial of every machine that has no interfaces at all. Run it against `lab.db`.",
+          "hints": [
+            "You need every machine row, whether or not it has a match, so think about which JOIN keeps unmatched rows.",
+            "After a LEFT JOIN, the interface columns are NULL for machines with no match.",
+            "`... LEFT JOIN interface i ON i.machine_id = m.id WHERE i.id IS NULL`"
+          ],
+          "answer": "```sql\nSELECT m.serial FROM machine m\nLEFT JOIN interface i ON i.machine_id = m.id\nWHERE i.id IS NULL;\n```\nReturns `K9999ZZ`."
+        },
+        "selfExplanation": "NICo caches observed network state in its database and has its workflows read that copy instead of querying external services directly. In your own words, why does that make the workflows more deterministic?",
+        "checks": [
+          {
+            "question": "What does a foreign key do?",
+            "options": [
+              "Encrypts a column",
+              "Makes a column refer to a primary key in another table, so the database can enforce the link",
+              "Makes a column unique",
+              "Speeds up every query automatically"
+            ],
+            "answer": "Makes a column refer to a primary key in another table, so the database can enforce the link",
+            "explanation": "Uniqueness is a separate `UNIQUE` constraint. Indexes, not foreign keys, are what speed up lookups, and a foreign key has nothing to do with encryption."
+          },
+          {
+            "question": "An inner JOIN between machine and interface returns which machines?",
+            "options": [
+              "All machines",
+              "Only machines with at least one matching interface",
+              "Only machines without interfaces",
+              "Only the first machine"
+            ],
+            "answer": "Only machines with at least one matching interface",
+            "explanation": "An inner JOIN keeps only rows that match on both sides. To keep unmatched machines, use LEFT JOIN."
+          },
+          {
+            "question": "Why put a UNIQUE constraint on `interface.mac` instead of checking for duplicates in application code?",
+            "options": [
+              "SQL can't check duplicates any other way",
+              "The database enforces it for every writer, even under concurrent inserts",
+              "It makes the column hold numbers",
+              "UNIQUE also creates a foreign key"
+            ],
+            "answer": "The database enforces it for every writer, even under concurrent inserts",
+            "explanation": "A check in application code can race with another writer, or be skipped by a different program. A constraint in the database applies to every write."
+          }
+        ],
+        "sources": [
+          "architecture/networking_integrations.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "concept": "yaml",
+        "prequestions": [
+          {
+            "question": "In YAML, what is the difference between `- web` and `web:`?",
+            "answer": "`- web` is an item in a list (a sequence). `web:` is a key in a mapping, and its value follows on the same line or indented below."
+          },
+          {
+            "question": "Guess: what does the YAML `country: no` turn into when loaded by Python's PyYAML?",
+            "answer": "`{'country': False}`. YAML 1.1 parsers like PyYAML treat `no` as a boolean. This is the famous \"Norway problem\"."
+          }
+        ],
+        "explanation": "**YAML** is a human-readable data format where **indentation shows structure**. It's the language of Kubernetes manifests and Helm values files. NICo Core and NICo REST are both deployed through Helm charts, which you'll use in a later chapter.\n\nThe three building blocks:\n- **Mappings** (key-value pairs): `name: lab-1`. Indent child keys under a parent:\n  ```yaml\n  database:\n    host: localhost\n    port: 5432\n  ```\n- **Sequences** (lists): one `- item` per line, or `[a, b]` inline.\n- **Scalars**: strings, numbers, booleans and null (`null` or `~`).\n\nRules and features:\n- Indent with **spaces only**. Tabs are illegal. Siblings must line up exactly.\n- `#` starts a comment.\n- `|` keeps a multi-line string's line breaks, and `>` folds the lines into one.\n- `---` separates multiple documents in one file. Kubernetes uses this constantly.\n- JSON is, for practical purposes, valid YAML.\n\n**The big trap is implicit typing.** YAML guesses a type for unquoted values:\n- `no`, `off` and `yes` may become booleans.\n- `1.10` becomes the float `1.1`, so a version number gets mangled.\n- `0123` may become an octal number.\n- With YAML 1.1 parsers such as PyYAML, colon-separated digits like `12:30` can become a base-60 number.\n- An unquoted `guid: 1234` is an integer, not a string.\n\nThe fix is simple: **quote anything that must stay a string**, such as IDs, versions, MAC addresses and PCI addresses.\n\nCompared with TOML, YAML is more compact for deeply nested data but more forgiving, and that forgiveness is exactly what lets silent mistakes through.",
+        "analogy": "YAML is like an outline in a word processor: indentation shows what belongs under what. The analogy breaks down because a word processor never changes your text, while YAML quietly turns `no` into false and `1.10` into 1.1 unless you quote them.",
+        "workedExample": {
+          "title": "Load YAML and catch the implicit-typing traps",
+          "steps": [
+            {
+              "subgoal": "Install a parser",
+              "detail": "```bash\npip install pyyaml\n```"
+            },
+            {
+              "subgoal": "Write a values file",
+              "detail": "```bash\ncat > values.yaml <<'EOF'\nimage:\n  tag: 1.10\nreplicas: 3\nregion: no\nguid: 1234\nslot: 0000:00:01.0\nhosts:\n  - name: alpha\n    mac: \"b8:3f:d2:90:95:82\"\n  - name: beta\n    mac: \"b8:3f:d2:90:95:83\"\nEOF\n```"
+            },
+            {
+              "subgoal": "Load it",
+              "detail": "```bash\npython3 -c 'import yaml,pprint; pprint.pprint(yaml.safe_load(open(\"values.yaml\")))'\n```"
+            },
+            {
+              "subgoal": "Read the result critically",
+              "detail": "- `tag` is `1.1` (a float).\n- `region` is `False`.\n- `guid` is the int `1234`.\n- `slot` is not the string you wrote. PyYAML reads the colon-separated digits as a base-60 number.\n- `hosts` is a list of two dicts.\n\nNone of these surprises produce an error. Quote them all (`tag: \"1.10\"`, `region: \"no\"`, `guid: \"1234\"`, `slot: \"0000:00:01.0\"`) and reload: every one is now a string."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this YAML so it loads as `{'racks': [{'name': 'R01', 'units': 42}, {'name': 'R02', 'units': 48}]}`.",
+          "partialSolution": "racks:\n  ___ name: R01\n    units: 42\n  - name: R02\n  ___units: 48",
+          "answer": "The first blank is `- ` (a dash and a space, starting a list item). The second blank is two spaces, so `units` lines up under `name` (four spaces in total). Sibling keys of a list item must align with the first key after the dash."
+        },
+        "independentProblem": {
+          "prompt": "This file fails to load. Find both problems, fix them, and make sure `version` loads as the string \"2.10\".\n```yaml\nservice:\n  name: api\n\tport: 8080\n  version: 2.10\n```",
+          "hints": [
+            "Read the error message: it names the line and column.",
+            "One line is indented with a tab character, which YAML forbids.",
+            "Replace the tab with two spaces, and quote the version."
+          ],
+          "answer": "```yaml\nservice:\n  name: api\n  port: 8080\n  version: \"2.10\"\n```"
+        },
+        "selfExplanation": "Why is it good practice to quote MAC addresses, GUIDs and version numbers in YAML even when they happen to load correctly today?",
+        "checks": [
+          {
+            "question": "What does PyYAML produce for `tag: 1.10`?",
+            "options": [
+              "The string \"1.10\"",
+              "The float 1.1",
+              "An error",
+              "The integer 110"
+            ],
+            "answer": "The float 1.1",
+            "explanation": "Unquoted, `1.10` matches the float pattern, and the trailing zero is lost. Quote it to keep it a string."
+          },
+          {
+            "question": "Which is legal YAML indentation?",
+            "options": [
+              "Tabs only",
+              "Spaces only",
+              "A mix of tabs and spaces",
+              "Any whitespace, since indentation is decorative"
+            ],
+            "answer": "Spaces only",
+            "explanation": "YAML forbids tabs for indentation, and the indentation is the structure, not decoration."
+          },
+          {
+            "question": "What does `---` mean in a YAML file?",
+            "options": [
+              "A comment",
+              "The start of a new document in the same file",
+              "An empty list",
+              "A horizontal rule with no meaning"
+            ],
+            "answer": "The start of a new document in the same file",
+            "explanation": "Kubernetes and Helm output often put several manifests in one file separated by `---`. Comments start with `#`."
+          }
+        ],
+        "sources": [
+          "glossary.md"
+        ]
+      },
+      {
+        "concept": "mac-address",
+        "prequestions": [
+          {
+            "question": "How many bits is a standard Ethernet MAC address, and how is it usually written?",
+            "answer": "48 bits, written as six two-digit hex bytes, for example `B8:3F:D2:90:95:82`."
+          },
+          {
+            "question": "Are `b8-3f-d2-90-95-82` and `B83FD2909582` the same MAC address?",
+            "answer": "Yes. Only the separators and letter case differ. Code that compares raw strings would wrongly call them different."
+          }
+        ],
+        "explanation": "A **MAC address** (Media Access Control address) is the hardware address of a network interface. Every Ethernet port has one: on your laptop, on a server's NIC, on a DPU and on a BMC.\n\nFacts to know:\n- It is **48 bits**, written as 6 hex bytes. Formats vary: `B8:3F:D2:90:95:82`, `b8-3f-d2-90-95-82`, `b83f.d290.9582`, or `B83FD2909582`. Case doesn't matter.\n- The first 3 bytes are usually the **OUI**, a prefix assigned to the manufacturer.\n- In the first byte, bit 0 (value 1) set means **multicast**. Bit 1 (value 2) set means **locally administered**: software chose the address rather than the factory. Docker's `02:42:...` addresses are an example.\n- MACs work at layer 2, on the local link. An **IP address** is a different thing: it is assigned by configuration (often DHCP) and is routable.\n\n**Why NICo cares.** A MAC is stable hardware identity that is visible before any OS is installed, so NICo uses it as a key in several places:\n- **BMC discovery:** when a BMC requests an IP over DHCP, NICo cross-references its MAC against the expected machine table to look up initial credentials.\n- **Redfish:** the BMC's `MACAddress` (under `Managers/{id}/EthernetInterfaces`) is *Critical* for BMC identification and credential storage and lookup. The system NIC `MACAddress` is *Critical* for DPU-host pairing. NICo accepts both `MACAddress` and `MacAddress` spellings, because vendors differ.\n- **Boot options:** NICo extracts a MAC from a UEFI device path such as `.../MAC(B83FD2909582,0x1)` and reformats `B83FD2909582` as `B8:3F:D2:90:95:82`.\n- **Switches:** a switch that declares a MAC already owned by another switch enters the `Error` state.\n\nThe lesson: **normalise MACs to a single canonical form before you compare or store them.**",
+        "analogy": "A MAC address is like a car's VIN: it is stamped at the factory and identifies the hardware no matter where it is parked. An IP address is more like a parking-space number. The analogy breaks down because a MAC can be changed in software (locally administered addresses), while a VIN legally can't.",
+        "workedExample": {
+          "title": "Find, normalise and extract MAC addresses",
+          "steps": [
+            {
+              "subgoal": "List your own MACs",
+              "detail": "Linux: `ip -br link` (the third column is the MAC). macOS: `ifconfig | grep ether`."
+            },
+            {
+              "subgoal": "Write a normaliser",
+              "detail": "```python\nimport re\ndef norm_mac(s: str) -> str:\n    h = re.sub(r'[^0-9a-fA-F]', '', s).upper()\n    if len(h) != 12:\n        raise ValueError(f'not a MAC: {s!r}')\n    return ':'.join(h[i:i+2] for i in range(0, 12, 2))\n\nfor s in ['b8-3f-d2-90-95-82', 'b83f.d290.9582', 'B83FD2909582']:\n    print(norm_mac(s))   # all B8:3F:D2:90:95:82\n```"
+            },
+            {
+              "subgoal": "Pull a MAC out of a UEFI device path",
+              "detail": "Using the Redfish BootOption sample from NICo's docs:\n```python\npath = 'PciRoot(0x2)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(B83FD2909582,0x1)'\nm = re.search(r'MAC\\(([0-9A-Fa-f]+),', path)\nprint(norm_mac(m.group(1)))  # B8:3F:D2:90:95:82\n```"
+            },
+            {
+              "subgoal": "Read the special bits",
+              "detail": "```python\nfirst = int('B8', 16)          # 0b10111000\nprint(bool(first & 1), bool(first & 2))  # False False: unicast, universal\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the dictionary lookup so BMC credentials are found no matter how the MAC was formatted.",
+          "partialSolution": "creds = {norm_mac('B8:3F:D2:90:95:82'): ('admin', 'secret')}\n\ndef lookup(mac_from_dhcp):\n    return creds.get(___)\n\nprint(lookup('b8-3f-d2-90-95-82'))",
+          "answer": "`norm_mac(mac_from_dhcp)`. Normalise on both sides, when you store and when you look up. That way `('admin', 'secret')` is found whatever format arrives."
+        },
+        "independentProblem": {
+          "prompt": "For each MAC, say whether it is unicast or multicast and universal or locally administered: `02:42:ac:11:00:02`, `B8:3F:D2:90:95:82`, `01:00:5e:00:00:fb`.",
+          "hints": [
+            "Look only at the first byte.",
+            "Bit value 1 is the multicast flag and bit value 2 is the locally-administered flag.",
+            "0x02 = 0b00000010, 0xB8 = 0b10111000, 0x01 = 0b00000001."
+          ],
+          "answer": "`02:42:...` is unicast and locally administered (a Docker-generated address). `B8:3F:...` is unicast and universal (factory-assigned). `01:00:5e:...` is multicast and universal (an IPv4 multicast MAC)."
+        },
+        "selfExplanation": "NICo looks up a BMC's initial credentials by MAC address rather than by IP address. Why is the MAC the better key at the moment a brand-new BMC first appears on the network?",
+        "checks": [
+          {
+            "question": "Which Redfish field does NICo treat as Critical for BMC identification and credential lookup?",
+            "options": [
+              "Managers/{id} FirmwareVersion",
+              "Managers/{id}/EthernetInterfaces/{id} MACAddress",
+              "Systems/{id} PowerState",
+              "Chassis/{id} Model"
+            ],
+            "answer": "Managers/{id}/EthernetInterfaces/{id} MACAddress",
+            "explanation": "The endpoints reference marks the BMC's MACAddress as Critical for identification and credential storage. FirmwareVersion and PowerState are Required, used for tracking and health, not identity. Model is only Recommended."
+          },
+          {
+            "question": "Your code compares `b8:3f:d2:90:95:82` with `B8-3F-D2-90-95-82` using `==` and gets False. What is the right fix?",
+            "options": [
+              "Lowercase one side only",
+              "Normalise both to one canonical form before comparing",
+              "Compare only the first 3 bytes",
+              "Use the IP address instead"
+            ],
+            "answer": "Normalise both to one canonical form before comparing",
+            "explanation": "Case and separators both differ, so you need full normalisation on both sides. Comparing only the OUI matches every device from the same vendor."
+          },
+          {
+            "question": "Which statement is true?",
+            "options": [
+              "A MAC address is routable across the internet",
+              "A MAC address can never be changed",
+              "A locally administered MAC has bit value 2 set in its first byte",
+              "MACs are 32 bits long"
+            ],
+            "answer": "A locally administered MAC has bit value 2 set in its first byte",
+            "explanation": "MACs are 48-bit, link-local identifiers. They can be overridden in software, and the locally-administered bit signals that."
+          }
+        ],
+        "sources": [
+          "glossary.md",
+          "architecture/redfish/endpoints_reference.md",
+          "architecture/state_machines/switch.md"
+        ]
+      },
+      {
+        "concept": "pcie-device",
+        "prequestions": [
+          {
+            "question": "Name three kinds of hardware you'd expect to be plugged into a server's PCIe slots.",
+            "answer": "Network cards (NICs), DPUs, GPUs, NVMe SSDs and storage controllers are all typical."
+          },
+          {
+            "question": "Guess: if a dual-port network card is plugged into one slot, does the OS see one PCIe device or two?",
+            "answer": "Often two: one PCI function per port, such as `ca:00.0` and `ca:00.1`. They share a serial number."
+          }
+        ],
+        "explanation": "**PCI Express (PCIe)** is the high-speed bus that connects a server's CPUs to add-in hardware. It is made of point-to-point **lanes** (x1, x4, x8, x16), and more lanes means more bandwidth. A **PCIe device** is anything attached this way: NICs, DPUs (such as NVIDIA BlueField), GPUs, NVMe drives. Devices can sit in physical slots or be soldered onto the motherboard.\n\nEvery PCIe device reports identity registers:\n- **Vendor ID** and **device ID**, for example `0x15b3` (Mellanox) and `0x101b` (ConnectX-6), as they appear in NICo's discovery data.\n- A class (network controller, InfiniBand controller, and so on).\n\nOne physical card can expose several **functions**, each appearing as its own PCI device. NICo's InfiniBand design relies on this: each port of a dual-port ConnectX-6 shows up as a separate device. Both ports report the same serial number, though.\n\nOn Linux:\n- `lspci` lists devices.\n- `lspci -nn` adds the numeric IDs.\n- `/sys/bus/pci/devices/` exposes each device as files.\n\nOn macOS, `system_profiler SPPCIDataType` shows similar information.\n\n**How NICo uses PCIe devices.** The host's BMC exposes PCIe devices through Redfish. On most vendors they're linked from `Systems/{id}`. Supermicro lists them under `Chassis/{id}/PCIeDevices` instead. Two fields are marked **Critical**:\n- `SerialNumber`: the **primary DPU-host pairing path**. NICo matches a PCIe device's serial seen by the host BMC against the DPU's own system serial number, and that match proves the DPU is installed in that host. A network adapter `SerialNumber` is the fallback path.\n- `PartNumber`: used to recognise BlueField models (BF2, BF3, BF3 SuperNIC).\n\nSerials in the Redfish samples sometimes contain stray whitespace, and NICo trims it.",
+        "analogy": "PCIe is like the sockets on a power strip that is wired straight to the CPU. Each plugged-in device has a label (its vendor and device ID) that the host can read. The analogy breaks down because one plug can present itself as several separate devices (functions), and lanes carry data at different widths rather than just power.",
+        "workedExample": {
+          "title": "Inspect PCIe devices locally and pair a DPU from Redfish data",
+          "steps": [
+            {
+              "subgoal": "List devices with IDs",
+              "detail": "Linux: `lspci -nn | head`. A line like `00:02.0 VGA compatible controller [0300]: Intel ... [8086:46a6]` shows the class `[0300]`, the vendor `8086` (Intel) and the device ID `46a6`.\n\n(In a VM or container you may see virtual devices. That's fine.)"
+            },
+            {
+              "subgoal": "Read the same data from sysfs",
+              "detail": "```bash\nd=$(ls /sys/bus/pci/devices | head -1)\ncat /sys/bus/pci/devices/$d/vendor /sys/bus/pci/devices/$d/device\n```"
+            },
+            {
+              "subgoal": "Mock the Redfish views",
+              "detail": "Imagine what the **host** BMC reports:\n```json\n{\"Id\": \"236-0\", \"SerialNumber\": \" MT2243X01234 \", \"PartNumber\": \"900-9D3B6-00CV-AA0\"}\n```\nand what the **DPU's** BMC reports for its own system serial: `MT2243X01234`."
+            },
+            {
+              "subgoal": "Pair them the way NICo describes",
+              "detail": "```python\nhost_pcie = [{\"Id\": \"236-0\", \"SerialNumber\": \" MT2243X01234 \"}]\ndpu_serials = {\"MT2243X01234\": \"dpu-A\"}\nfor dev in host_pcie:\n    s = dev[\"SerialNumber\"].strip()\n    if s in dpu_serials:\n        print(f\"host PCIe {dev['Id']} is {dpu_serials[s]}\")\n```\nWithout `.strip()` the match would fail."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Only BlueField cards should be considered for pairing. Complete the filter using the part number prefix `900-9D3B6` from the docs' Chassis sample. Treat the prefix as illustrative: NICo's real `is_bluefield_model()` logic covers more cases.",
+          "partialSolution": "def candidates(devs):\n    return [d for d in devs\n            if d.get('PartNumber', '').strip().upper().startswith(___)]",
+          "answer": "`'900-9D3B6'`. The filter keeps devices whose cleaned part number starts with the BlueField prefix. Normalise case and whitespace first, just as you did for serials."
+        },
+        "independentProblem": {
+          "prompt": "Host BMC PCIe list: `[{Id:'a', SerialNumber:'MT001'}, {Id:'b', SerialNumber:'MT002 '}, {Id:'c', SerialNumber:'GPU77'}]`. DPU system serials: `dpu-1 → 'MT002'`, `dpu-2 → 'MT009'`. Which DPUs pair with this host, and which do not?",
+          "hints": [
+            "Pairing means the host sees a PCIe device whose serial equals the DPU's serial.",
+            "Trim whitespace before comparing.",
+            "MT002 (device b) matches dpu-1. Nothing in the host's list equals MT009."
+          ],
+          "answer": "dpu-1 pairs with this host through PCIe device `b`, once its trailing space is trimmed. dpu-2 doesn't pair: it's in some other host, or the host BMC can't see it."
+        },
+        "selfExplanation": "NICo pairs a DPU with a host by matching a serial number seen from two different BMCs. Why does matching from two independent viewpoints give stronger evidence than trusting either BMC alone?",
+        "checks": [
+          {
+            "question": "Which Redfish PCIe device field is NICo's primary DPU-host pairing key?",
+            "options": [
+              "Id",
+              "SerialNumber",
+              "Model",
+              "FirmwareVersion"
+            ],
+            "answer": "SerialNumber",
+            "explanation": "The endpoints reference marks PCIe SerialNumber as Critical and the primary pairing path. Id is used only for tracking. PartNumber, also Critical, identifies BlueField models but doesn't pair anything."
+          },
+          {
+            "question": "On a Supermicro host, where does NICo find PCIe devices?",
+            "options": [
+              "Systems/{id} PCIeDevices array",
+              "Chassis/{id}/PCIeDevices",
+              "Managers/{id}/PCIeDevices",
+              "UpdateService/FirmwareInventory"
+            ],
+            "answer": "Chassis/{id}/PCIeDevices",
+            "explanation": "Supermicro uses the chassis path. Other vendors embed PCIeDevices links in the Systems/{id} response."
+          },
+          {
+            "question": "A dual-port ConnectX-6 appears as `ca:00.0` and `ca:00.1`. What do the two have in common?",
+            "options": [
+              "Nothing, they are different cards",
+              "The same serial number",
+              "Different vendor IDs",
+              "Different PCI bus numbers"
+            ],
+            "answer": "The same serial number",
+            "explanation": "They are two functions of one card, on the same bus and device number, with the same vendor ID. NICo's doc notes that both report the same serial."
+          }
+        ],
+        "sources": [
+          "architecture/redfish/endpoints_reference.md",
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "concept": "numa-node",
+        "prequestions": [
+          {
+            "question": "In a server with two CPU sockets, can every core reach every byte of memory equally fast?",
+            "answer": "No. Each socket has its own memory. Reaching the other socket's memory goes over an interconnect and is slower. That is non-uniform memory access."
+          },
+          {
+            "question": "Guess: does a NIC or GPU \"belong\" to a particular CPU socket?",
+            "answer": "Yes. Each PCIe device hangs off one socket's PCIe lanes, so it is local to that socket's NUMA node."
+          }
+        ],
+        "explanation": "**NUMA** stands for Non-Uniform Memory Access. In a multi-socket server, each CPU socket has its own memory controllers and its own PCIe lanes. A **NUMA node** is one of these locality domains: a group of CPU cores, the memory attached to them, and the devices wired to them.\n\nAccessing something on your own node is **local** and fast. Accessing another node's memory or devices is **remote**: the traffic crosses the inter-socket link, which adds latency and competes for bandwidth.\n\nThis matters a lot for GPU servers. When a GPU sends data straight to an InfiniBand NIC (as RDMA traffic does), it's best if both sit on the **same NUMA node**. Otherwise every packet takes the long way across the socket interconnect.\n\nOn Linux:\n- `lscpu | grep -i numa` shows the node count and which CPUs belong to each node.\n- `numactl --hardware` shows memory per node and the relative \"distances\" between nodes.\n- `cat /sys/bus/pci/devices/<addr>/numa_node` gives a device's node. `-1` means the kernel has no locality information, which is common on laptops and VMs, where there's effectively a single node.\n\n**In NICo:** the hardware discovery message `PciDeviceProperties` includes a `numa_node` field (`sint32`). In the doc's example, both ConnectX-6 ports are on `numa_node: 1`. NICo's designers discussed letting tenants select InfiniBand devices by NUMA node and decided against it, because it would add yet another API selector. Instead, the mapping from selection to hardware is identical across all machines of one instance type. A tenant can therefore test on one instance, find the device choice with good GPU locality, and reuse that exact configuration everywhere.",
+        "analogy": "A two-socket server is like a two-building office with a footbridge. Your desk, your filing cabinet and your printer are fastest if they're all in your building. You can use a printer in the other building, but every trip crosses the bridge. The analogy breaks down because the footbridge in a server is still extremely fast in human terms. The cost shows up only at high data rates, which is exactly where GPUs and InfiniBand operate.",
+        "workedExample": {
+          "title": "Discover NUMA layout and device locality",
+          "steps": [
+            {
+              "subgoal": "Count NUMA nodes",
+              "detail": "```bash\nlscpu | grep -i numa\n```\nA laptop typically shows `NUMA node(s): 1`. A two-socket server shows 2 or more."
+            },
+            {
+              "subgoal": "Check memory per node (optional)",
+              "detail": "```bash\nnumactl --hardware   # install with: sudo apt install numactl\n```"
+            },
+            {
+              "subgoal": "Read each PCI device's node",
+              "detail": "```bash\nfor d in /sys/bus/pci/devices/*; do\n  echo \"$(basename $d) numa=$(cat $d/numa_node)\"\ndone | head\n```\nOn a laptop expect `-1` or `0` everywhere. On a GPU server you'd see some devices on 0 and some on 1."
+            },
+            {
+              "subgoal": "Interpret NICo's discovery data",
+              "detail": "In the doc's ConnectX-6 example both ports report `\"numa_node\": 1`. A GPU also on node 1 is local to them, and a GPU on node 0 is remote."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Group discovered devices by NUMA node so you can see which NICs are local to which GPUs.",
+          "partialSolution": "from collections import defaultdict\ndevs = [('gpu0','0000:17:00.0',0), ('ib0','0000:ca:00.0',1), ('gpu1','0000:e9:00.0',1)]\nby_node = defaultdict(list)\nfor name, slot, node in devs:\n    by_node[___].append(name)\nprint(dict(by_node))",
+          "answer": "`node`. The output is `{0: ['gpu0'], 1: ['ib0', 'gpu1']}`, so ib0 is local to gpu1 and remote from gpu0."
+        },
+        "independentProblem": {
+          "prompt": "Your training job pins a GPU on NUMA node 1. The InfiniBand devices are: `0000:cb:00.0` (node 0), `0000:cd:00.0` (node 0), `0000:ea:00.0` (node 1), `0000:eb:00.0` (node 1). Which devices give local access, and how would a NICo tenant lock this choice in across many machines?",
+          "hints": [
+            "Local means the same NUMA node as the GPU.",
+            "Two devices are on node 1.",
+            "NICo doesn't offer a NUMA selector. Remember the test-instance approach and why it works."
+          ],
+          "answer": "`0000:ea:00.0` and `0000:eb:00.0` are local. The tenant creates a test instance, finds which device selection lands on those slots, and reuses that configuration. Because NICo maps selections to hardware identically for every machine of the instance type, the choice carries over."
+        },
+        "selfExplanation": "Why would putting a GPU and its InfiniBand NIC on different NUMA nodes hurt performance even though the server still works correctly?",
+        "checks": [
+          {
+            "question": "What is a NUMA node?",
+            "options": [
+              "A Kubernetes worker node",
+              "A CPU-and-memory locality domain, with the devices attached to it",
+              "A single CPU core",
+              "A network switch port"
+            ],
+            "answer": "A CPU-and-memory locality domain, with the devices attached to it",
+            "explanation": "Despite the word \"node\", it isn't a separate machine. It's a group of cores, memory and PCIe lanes within one server."
+          },
+          {
+            "question": "`cat /sys/bus/pci/devices/0000:00:02.0/numa_node` prints `-1`. What does that most likely mean?",
+            "options": [
+              "The device is broken",
+              "The kernel has no NUMA locality info for it, typical on single-node machines",
+              "It's on the last NUMA node",
+              "The device is remote from every CPU"
+            ],
+            "answer": "The kernel has no NUMA locality info for it, typical on single-node machines",
+            "explanation": "`-1` is Linux's \"unknown or not applicable\" value. It's common on laptops and VMs."
+          },
+          {
+            "question": "How does NICo's InfiniBand design let tenants get good GPU-NIC locality without a NUMA selector in the API?",
+            "options": [
+              "NICo always places NICs on node 0",
+              "Device mapping is the same across an instance type, so a configuration found on one test instance carries over",
+              "Tenants edit the NUMA field directly",
+              "NICo hides NUMA entirely from discovery"
+            ],
+            "answer": "Device mapping is the same across an instance type, so a configuration found on one test instance carries over",
+            "explanation": "The doc describes exactly this approach. Discovery data does include `numa_node`, so it isn't hidden, and tenants can't edit it."
+          }
+        ],
+        "sources": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "concept": "cpu-architectures",
+        "prequestions": [
+          {
+            "question": "You compile a Go program natively on an Apple Silicon Mac and copy the binary to an Intel Linux server. Will it run?",
+            "answer": "No, for two reasons: the binary is for a different OS (macOS rather than Linux) and a different CPU architecture (arm64 rather than amd64)."
+          },
+          {
+            "question": "Are `x86_64` and `amd64` different architectures?",
+            "answer": "No. They are two names for the same 64-bit x86 instruction set. Likewise `aarch64` and `arm64` mean the same thing."
+          }
+        ],
+        "explanation": "A CPU **architecture**, or **instruction set architecture (ISA)**, is the set of machine instructions a processor understands. Compiled programs are just bytes of those instructions, so **a binary built for one ISA can't run natively on another**.\n\nTwo architectures dominate servers today:\n- **amd64**, also written x86_64, x86-64 or x64: Intel and AMD processors.\n- **arm64**, also written aarch64 or ARMv8-A 64-bit: Apple Silicon, AWS Graviton, NVIDIA Grace, and the Arm cores on BlueField DPUs.\n\nDifferent tools print different names for the same thing:\n- `uname -m` prints `x86_64` or `aarch64` on Linux, and `arm64` on macOS.\n- Docker uses `linux/amd64` and `linux/arm64`.\n- Debian packages use `amd64` and `arm64`.\n\nWhat runs where:\n- **Compiled binaries** (C, Go, Rust) are tied to one architecture and one OS.\n- **Interpreted code** (Python, shell) is portable, *but* any compiled extension it uses (a Python wheel with C code, for example) is not.\n- **Container images** are per architecture. A \"multi-arch\" image is really an index pointing at one image per architecture. Run the wrong one and you see `exec format error`.\n- **Emulation** (QEMU with Linux binfmt) can run foreign binaries slowly. That is a later chapter.\n\n**Why NICo cares:** a ManagedHost mixes architectures. The Host is typically an x86 machine, while the BlueField DPU attached to it has its own Arm processor and its own operating system. Anything that runs on the DPU (agents, containers, images) must be built for arm64, even when the host and the control plane are amd64.",
+        "analogy": "An ISA is like a language. A binary is a book written in French, and an amd64 CPU only reads English. A translator (an emulator) can read it aloud, but slowly. The analogy breaks down because human languages overlap and you can sometimes guess the meaning, while a CPU given the wrong instruction set simply refuses to start the program.",
+        "workedExample": {
+          "title": "Identify architectures and see a mismatch",
+          "steps": [
+            {
+              "subgoal": "Check your machine",
+              "detail": "```bash\nuname -m          # x86_64, aarch64, or arm64 (macOS)\nfile /bin/ls      # e.g. 'ELF 64-bit LSB pie executable, x86-64' or 'Mach-O 64-bit executable arm64'\n```"
+            },
+            {
+              "subgoal": "Inspect a container image's architecture",
+              "detail": "```bash\ndocker pull alpine:3.20\ndocker image inspect alpine:3.20 --format '{{.Os}}/{{.Architecture}}'\n```\nDocker pulled the variant that matches your host."
+            },
+            {
+              "subgoal": "Request the other architecture",
+              "detail": "```bash\ndocker run --rm --platform linux/arm64 alpine:3.20 uname -m   # on an amd64 host\n```\nIf emulation is set up (Docker Desktop includes it), this prints `aarch64`. Otherwise you get `exec format error`, which is proof the binary is foreign to your CPU."
+            },
+            {
+              "subgoal": "Map back to NICo",
+              "detail": "That `aarch64` is what software running on a BlueField DPU's Arm cores would report. A host-side tool would report `x86_64`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Map `uname -m` output to a Docker platform string.",
+          "partialSolution": "def docker_platform(uname_m):\n    return {\n        'x86_64': 'linux/amd64',\n        'aarch64': ___,\n        'arm64': 'linux/arm64',\n    }[uname_m]",
+          "answer": "`'linux/arm64'`. `aarch64` (Linux) and `arm64` (macOS) name the same ISA."
+        },
+        "independentProblem": {
+          "prompt": "You're shipping (a) a Go CLI that operators run on amd64 Linux workstations and on M-series Macs, and (b) an agent container that runs on BlueField DPUs. List the OS/arch targets each artifact needs.",
+          "hints": [
+            "Each artifact needs one build per OS and architecture combination it runs on.",
+            "Macs run darwin and the workstations run linux. The DPU's processor is Arm.",
+            "Go uses GOOS/GOARCH, for example GOOS=darwin GOARCH=arm64."
+          ],
+          "answer": "(a) `linux/amd64` and `darwin/arm64`, two binaries. (b) `linux/arm64` for the DPU. You can also publish a multi-arch image if the agent ever needs to run on amd64."
+        },
+        "selfExplanation": "Why does a Python script usually run on both amd64 and arm64, while a `pip`-installed package can still fail with an architecture error?",
+        "checks": [
+          {
+            "question": "Which pair names the same architecture?",
+            "options": [
+              "amd64 and arm64",
+              "x86_64 and amd64",
+              "aarch64 and x86_64",
+              "arm64 and i386"
+            ],
+            "answer": "x86_64 and amd64",
+            "explanation": "The names look similar but amd64 and arm64 are different ISAs. x86_64 and amd64 are the same, and so are aarch64 and arm64."
+          },
+          {
+            "question": "Running a container prints `exec format error`. Most likely cause?",
+            "options": [
+              "The image is corrupted",
+              "The image's binaries are for a different CPU architecture than the host",
+              "Missing network access",
+              "Wrong file permissions"
+            ],
+            "answer": "The image's binaries are for a different CPU architecture than the host",
+            "explanation": "That message is the kernel refusing a binary for a foreign ISA, with no emulator set up to run it."
+          },
+          {
+            "question": "In a NICo ManagedHost, which component needs arm64 software?",
+            "options": [
+              "The x86 Host",
+              "The BlueField DPU",
+              "Neither; everything is amd64",
+              "Only the BMC web UI"
+            ],
+            "answer": "The BlueField DPU",
+            "explanation": "The glossary describes the DPU as having its own Arm processor and OS. The Host is typically x86."
+          }
+        ],
+        "sources": [
+          "glossary.md"
+        ]
+      },
+      {
+        "concept": "server-hardware-basics",
+        "prequestions": [
+          {
+            "question": "Guess: what is a BMC, and why might a server have one even when it has no operating system installed?",
+            "answer": "A Baseboard Management Controller is a small, separate computer on the server's board, with its own network port. It can power the server on and off, read sensors, and change firmware settings without any host OS, which is how NICo manages machines remotely."
+          },
+          {
+            "question": "What does \"1U\" mean when describing a server?",
+            "answer": "One rack unit, 1.75 inches (44.45 mm) of vertical space in a standard 19-inch rack."
+          }
+        ],
+        "explanation": "A rack server is a computer built for density, remote management and uptime. Its parts:\n- **CPUs**: one or more sockets, each with many cores.\n- **Memory**: DIMMs attached to each socket (this is where NUMA comes from).\n- **Drives**: NVMe SSDs on PCIe, or SATA/SAS drives behind a controller.\n- **NICs**, plus GPUs and DPUs, on PCIe.\n- **Redundant power supplies** and fans.\n- **Firmware** everywhere: the system BIOS/UEFI that boots the machine, plus separate firmware on the BMC, on NICs and DPUs, and on other components.\n\nThe defining extra is the **BMC (Baseboard Management Controller)**, a tiny independent computer on the motherboard. It runs whenever the server has power, even when the server itself is \"off\". It has its own network port and offers:\n- power control and sensor readings (temperature, fans, power draw)\n- firmware updates and BIOS settings\n- a remote console\n- the **Redfish** HTTP API for programmatic control\n\nManaging a machine through the BMC is called **out-of-band (OOB)**. Managing it from inside the running OS is **in-band**. NICo uses OOB access to discover, power-cycle and repair machines even when the tenant OS is broken.\n\n**Racks:** servers mount in 19-inch racks measured in **rack units (U)**, 1.75 inches each, typically 42U or more. A **top-of-rack (ToR) switch** connects the servers in a rack to the datacenter network, and power distribution units supply power. Some racks also contain power shelves and NVSwitch trays.\n\n**How NICo sees it.** Redfish splits a machine into three resource types:\n- **Systems**: the computer as a whole, with its serial number, power state, boot order and PCIe devices. `SerialNumber` is critical for generating NICo's machine ID.\n- **Chassis**: physical enclosures and cards. A DPU appears as `Card1`, and power shelves and switches have their own IDs.\n- **Managers**: the BMCs themselves.\n\nA NICo **ManagedHost** is one Host plus its DPUs. In the common case that's two BMCs: the host's and the DPU's.",
+        "analogy": "The BMC is like a building's caretaker who lives on site with their own phone line. Even when the building is closed and dark, you can call them to switch the lights on, check the boiler, or let someone in. The analogy breaks down because the caretaker can't see what happens inside the tenant's rooms (the OS), and because the BMC is reached over a separate management network, not the tenant's network.",
+        "workedExample": {
+          "title": "Inventory your own machine, then map it to Redfish",
+          "steps": [
+            {
+              "subgoal": "CPUs and memory",
+              "detail": "```bash\nlscpu | head -15     # sockets, cores, NUMA\nfree -h               # memory\n```\nOn macOS, use `sysctl -n machdep.cpu.brand_string; sysctl hw.memsize`."
+            },
+            {
+              "subgoal": "Drives and NICs",
+              "detail": "```bash\nlsblk -d -o NAME,SIZE,MODEL   # drives\nip -br link                   # NICs and their MACs\n```"
+            },
+            {
+              "subgoal": "System identity (firmware tables)",
+              "detail": "```bash\nsudo dmidecode -t system | grep -E 'Manufacturer|Product|Serial'\n```\nThis is the in-band view of the serial number. A BMC reports the same value out of band as `SerialNumber` in `GET /redfish/v1/Systems/{id}`."
+            },
+            {
+              "subgoal": "Read a Redfish Systems response",
+              "detail": "From NICo's docs sample: `\"Id\": \"System.Embedded.1\"`, `\"SerialNumber\": \"J1234XY\"`, `\"PowerState\": \"On\"`, `\"Model\": \"PowerEdge R750\"`, a `Boot.BootOrder` list, and a `PCIeDevices` array of links. Each field corresponds to something you just found locally."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in which Redfish collection under `/redfish/v1/` you would GET for each item.",
+          "partialSolution": "Host serial number & power state  -> /redfish/v1/Systems/{id}\nBMC firmware version               -> /redfish/v1/___/{id}\nBMC MAC address                    -> /redfish/v1/Managers/{id}/EthernetInterfaces/{id}\nDPU card serial (Card1)            -> /redfish/v1/___/{id}",
+          "answer": "`Managers` (the BMC itself) and `Chassis` (physical cards and enclosures, where a DPU appears as `Card1`)."
+        },
+        "independentProblem": {
+          "prompt": "A tenant's OS has crashed and won't respond to SSH. List three things NICo can still do to that machine, and name the component that makes them possible.",
+          "hints": [
+            "SSH is in-band. What path doesn't depend on the OS?",
+            "Think about which component stays powered and has its own network port.",
+            "Look at the Redfish actions: ComputerSystem.Reset, boot source override, sensors."
+          ],
+          "answer": "Through the BMC, out of band over Redfish, NICo can still: power-cycle or reset the system (`ComputerSystem.Reset`), override the boot source to reinstall over the network, and read health sensors and event logs. The BMC runs independently of the host OS."
+        },
+        "selfExplanation": "Why does a bare-metal provisioning system need an out-of-band management path rather than relying on an agent installed in the server's operating system?",
+        "checks": [
+          {
+            "question": "Which Redfish resource type represents the BMC itself?",
+            "options": [
+              "Systems",
+              "Chassis",
+              "Managers",
+              "UpdateService"
+            ],
+            "answer": "Managers",
+            "explanation": "Systems is the computer, Chassis the physical enclosures and cards, and Managers the BMCs. UpdateService handles firmware updates."
+          },
+          {
+            "question": "In the common NICo setup of one host with one DPU, how many BMCs make up a ManagedHost?",
+            "options": [
+              "One",
+              "Two",
+              "Zero",
+              "One per PCIe slot"
+            ],
+            "answer": "Two",
+            "explanation": "The host has a BMC and the DPU has its own separate BMC, as the glossary states."
+          },
+          {
+            "question": "Which statement about out-of-band management is true?",
+            "options": [
+              "It requires the host OS to be running",
+              "It uses an endpoint independent of the host OS, typically the BMC",
+              "It is only used for monitoring, never for power control",
+              "It goes over the tenant's network"
+            ],
+            "answer": "It uses an endpoint independent of the host OS, typically the BMC",
+            "explanation": "OOB management works even when the OS is down, includes power control, and normally runs over a dedicated management network."
+          }
+        ],
+        "sources": [
+          "glossary.md",
+          "architecture/redfish/endpoints_reference.md"
+        ]
+      },
+      {
+        "concept": "pci-device-and-slot-address",
+        "prequestions": [
+          {
+            "question": "In the PCI address `0000:ca:00.1`, what do you think the final `1` identifies?",
+            "answer": "The function number. Here it is the second port of a dual-port card, while `.0` is the first port."
+          },
+          {
+            "question": "Is `ca` in `0000:ca:00.0` a decimal or a hexadecimal number? What is it in decimal?",
+            "answer": "Hexadecimal. 0xca = 202, which is why Linux names that InfiniBand port `ibp202s0f0`."
+          }
+        ],
+        "explanation": "Every PCI or PCIe function has an address in the form **`DDDD:BB:DD.F`**:\n- **Domain**: 4 hex digits, usually `0000`. Large servers can have several domains.\n- **Bus**: 2 hex digits, `00` to `ff`.\n- **Device**: 2 hex digits, `00` to `1f`.\n- **Function**: 1 digit, `0` to `7`.\n\nYou'll also see the shorthand **BDF** (bus:device.function). `lspci` drops the domain unless you pass `-D`.\n\nLinux's predictable interface names encode the address in **decimal**: `ibp202s0f0` means bus 202 (0xca), slot (device) 0, function 0. NICo's docs often call this address the device's **slot**, as in `\"slot\": \"0000:ca:00.0\"`. Don't confuse it with a physical slot number printed on the motherboard.\n\n**Why NICo cares.** A tenant selects an InfiniBand device by `device` name, `fabric` and `device_instance` (0, 1, ...). NICo has to turn that into exactly one piece of hardware, and do it the same way on every machine of the instance type. The design:\n1. Filter the discovered devices by device name and fabric.\n2. **Sort by PCI slot** and pick the N-th.\n\nWhy the slot rather than the GUID? GUIDs differ from card to card, so sorting by GUID could pick slot 4 on one machine and slot 5 on another. PCI slots are deterministic for machines with identical hardware, so a selection always lands on the same physical position. The design also proposes persisting the slot instead of the OS-specific sysfs `path`, because the path changes depending on which driver the discovery image uses.\n\n**A sorting trap:** sorting addresses as strings only works if every address is zero-padded and in the same letter case. `\"0000:EA:00.0\" < \"0000:cb:00.0\"` as strings, because uppercase letters sort before lowercase. Parse the address into integers `(domain, bus, device, function)` and sort the tuples.",
+        "analogy": "A PCI address is like a postal address: country (domain), street (bus), house number (device), flat number (function). Sorting by address walks the street in a fixed order, which is the same in every identical town. Sorting by GUID is like sorting by the residents' names: it changes whenever people move. The analogy breaks down because PCI \"house numbers\" are written in hex and can be renumbered if the hardware or BIOS settings change.",
+        "workedExample": {
+          "title": "Resolve a tenant's device_instance using NICo's Example 2",
+          "steps": [
+            {
+              "subgoal": "Lay out the discovered devices",
+              "detail": "All four are `MT28908 Family [ConnectX-6]`:\n- `1234` IbFabric1 `0000:cb:00.0`\n- `2345` IbFabric2 `0000:cd:00.0`\n- `3456` IbFabric1 `0000:ea:00.0`\n- `4567` IbFabric2 `0000:eb:00.0`"
+            },
+            {
+              "subgoal": "Parse addresses robustly",
+              "detail": "```python\ndef pci_key(s):\n    dom, bus, rest = s.split(':')\n    dev, fn = rest.split('.')\n    return (int(dom,16), int(bus,16), int(dev,16), int(fn,16))\nprint(pci_key('0000:ca:00.1'))  # (0, 202, 0, 1)\n```"
+            },
+            {
+              "subgoal": "Filter, sort, index",
+              "detail": "```python\ndevs = [('1234','IbFabric1','0000:cb:00.0'), ('2345','IbFabric2','0000:cd:00.0'),\n        ('3456','IbFabric1','0000:ea:00.0'), ('4567','IbFabric2','0000:eb:00.0')]\ndef select(fabric, instance):\n    c = sorted((d for d in devs if d[1]==fabric), key=lambda d: pci_key(d[2]))\n    return c[instance][0]\nprint(select('IbFabric1',0), select('IbFabric1',1))  # 1234 3456\nprint(select('IbFabric2',0), select('IbFabric2',1))  # 2345 4567\n```\nThis matches the doc's stated results."
+            },
+            {
+              "subgoal": "Derive the Linux name",
+              "detail": "`0000:ca:00.0` → bus 0xca = 202, device 0, function 0 → `ibp202s0f0`. That is the name in the doc's `/sys/class/infiniband` listing."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the function that builds the Linux-style InfiniBand name from a PCI address (domain 0000 assumed).",
+          "partialSolution": "def ib_name(addr):\n    _, bus, rest = addr.split(':')\n    dev, fn = rest.split('.')\n    return f\"ibp{___}s{int(dev,16)}f{int(fn,16)}\"\n\nprint(ib_name('0000:ca:00.1'))  # ibp202s0f1",
+          "answer": "`int(bus, 16)`. The bus is hex in the address but decimal in the interface name."
+        },
+        "independentProblem": {
+          "prompt": "Devices of the same model and fabric are discovered with these slots: `0000:EB:00.0`, `0000:3b:00.0`, `0000:ca:00.1`, `0000:ca:00.0`. Which one is `device_instance: 2`? What would a naive string sort pick instead?",
+          "hints": [
+            "Convert each bus to decimal: 0xEB, 0x3b, 0xca.",
+            "Parsed order: 3b (59), then ca:00.0, then ca:00.1, then EB (235).",
+            "As strings, uppercase 'E' (0x45) sorts before '3'? No: digits sort before uppercase letters, which sort before lowercase. So the string order is 3b, EB, ca.0, ca.1."
+          ],
+          "answer": "Parsed sort: `0000:3b:00.0`, `0000:ca:00.0`, `0000:ca:00.1`, `0000:EB:00.0`, so instance 2 is `0000:ca:00.1`. A naive string sort gives `3b`, `EB`, `ca:00.0`, `ca:00.1` and picks `0000:ca:00.0`, which is the wrong port."
+        },
+        "selfExplanation": "Why does NICo sort InfiniBand devices by PCI slot rather than by GUID when mapping a tenant's `device_instance` to hardware?",
+        "checks": [
+          {
+            "question": "In `0000:ca:00.0`, which part is the bus number?",
+            "options": [
+              "0000",
+              "ca",
+              "00",
+              "0"
+            ],
+            "answer": "ca",
+            "explanation": "The format is domain:bus:device.function. `0000` is the domain, `00` the device and `0` the function."
+          },
+          {
+            "question": "Why does NICo prefer the PCI slot over the sysfs `path` for storing device location?",
+            "options": [
+              "Paths are longer",
+              "The path depends on the OS and which driver the discovery image uses, while the slot is more stable",
+              "Slots include the GUID",
+              "Paths can't be stored in protobuf"
+            ],
+            "answer": "The path depends on the OS and which driver the discovery image uses, while the slot is more stable",
+            "explanation": "The doc says the path is OS- and driver-specific. Length and protobuf support aren't the issue."
+          },
+          {
+            "question": "Two identical machines have different GUIDs on their ConnectX-6 ports. What happens if device_instance is resolved by sorting on GUID?",
+            "options": [
+              "The same physical port is always selected",
+              "The selection may land on different physical slots on different machines",
+              "NICo rejects the request",
+              "GUIDs are identical across machines, so nothing changes"
+            ],
+            "answer": "The selection may land on different physical slots on different machines",
+            "explanation": "GUIDs vary from card to card, so the sort order changes between machines. PCI slots are deterministic across identical hardware, which is why NICo sorts by slot."
+          }
+        ],
+        "sources": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Build a toy site-inventory resolver",
+      "goal": "Write a small Python tool that:\n- reads a practice site file (TOML) and discovered-hardware data (YAML)\n- normalises MAC addresses\n- loads everything into SQLite and reports matched, missing and unexpected BMCs\n- resolves a tenant InfiniBand selection by sorting PCI addresses\n- checks NUMA locality against the GPU\n- serialises the device list with Protocol Buffers\n\nThe file formats are made up for practice. They are not NICo's real schemas.",
+      "whyItMatters": "This is a laptop-sized version of jobs NICo does during ingestion. It cross-references BMC MACs against expected machines to find credentials, stores the discovered hardware in tables, and maps a tenant's (device, fabric, device_instance) selection to exactly one PCI slot. The traps built into the data (mixed MAC formats, YAML typing, mixed-case hex) are the kind that break real inventory tooling.",
+      "setup": [
+        "Python 3.11 or newer (for tomllib): `python3 --version`",
+        "A virtualenv with `pip install pyyaml grpcio-tools protobuf`",
+        "Optional, for the stretch goal: Docker or Podman"
+      ],
+      "steps": [
+        {
+          "subgoal": "Create the input files",
+          "detail": "```bash\nmkdir -p ~/inventory && cd ~/inventory\ncat > site.toml <<'EOF'\n# Practice file, NOT NICo's real site-config schema\nsite_name = \"lab-1\"\n\n[[expected_machine]]\nbmc_mac = \"B8:3F:D2:90:95:82\"\nserial = \"J1234XY\"\nrack = \"R01\"\n\n[[expected_machine]]\nbmc_mac = \"7c:c2:55:00:00:01\"\nserial = \"K9999ZZ\"\nrack = \"R02\"\nEOF\n\ncat > hardware.yaml <<'EOF'\ndiscovered:\n  - bmc_mac: \"b8-3f-d2-90-95-82\"\n    host_serial: \"J1234XY\"\n    arch: \"x86_64\"\n    gpus:\n      - slot: \"0000:e9:00.0\"\n        numa_node: 1\n    ib_devices:\n      - {guid: \"4567\", fabric: \"IbFabric2\", slot: \"0000:eb:00.0\", numa_node: 1, device: \"MT28908 Family [ConnectX-6]\"}\n      - {guid: \"3456\", fabric: \"IbFabric1\", slot: \"0000:EA:00.0\", numa_node: 1, device: \"MT28908 Family [ConnectX-6]\"}\n      - {guid: \"2345\", fabric: \"IbFabric2\", slot: \"0000:cd:00.0\", numa_node: 0, device: \"MT28908 Family [ConnectX-6]\"}\n      - {guid: \"1234\", fabric: \"IbFabric1\", slot: \"0000:cb:00.0\", numa_node: 0, device: \"MT28908 Family [ConnectX-6]\"}\n  - bmc_mac: \"0242.ac11.0002\"\n    host_serial: \"UNKNOWN1\"\n    arch: \"aarch64\"\n    gpus: []\n    ib_devices: []\nEOF\n```\nThe uppercase `EA` slot and the unordered list are deliberate."
+        },
+        {
+          "subgoal": "Load and normalise",
+          "detail": "In `resolve.py`:\n- Load `site.toml` with `tomllib` (open it with `'rb'`).\n- Load `hardware.yaml` with `yaml.safe_load`.\n- Write `norm_mac()` (strip every non-hex character, uppercase, add colons) and apply it to every MAC from both files.\n- Raise an error if any MAC doesn't end up with exactly 12 hex digits."
+        },
+        {
+          "subgoal": "Store in SQLite and reconcile",
+          "detail": "Create an in-memory database (`sqlite3.connect(':memory:')`) with three tables:\n- `expected_machine(bmc_mac TEXT PRIMARY KEY, serial TEXT, rack TEXT)`\n- `discovered_bmc(bmc_mac TEXT PRIMARY KEY, host_serial TEXT, arch TEXT)`\n- `ib_device(guid TEXT PRIMARY KEY, host_serial TEXT, fabric TEXT, slot TEXT, numa_node INTEGER, device TEXT)`\n\nThen use SQL, not Python loops:\n- A `JOIN` on `bmc_mac` to find **matched** BMCs.\n- A `LEFT JOIN ... WHERE ... IS NULL` to find **missing** (expected but not discovered) and **unexpected** (discovered but not expected) BMCs."
+        },
+        {
+          "subgoal": "Resolve the tenant selection",
+          "detail": "Add a CLI: `--device`, `--fabric`, `--instance`.\n1. Select the matching `ib_device` rows.\n2. Sort them in Python with a `pci_key()` that parses `domain:bus:device.function` into an integer tuple.\n3. Pick the N-th row.\n4. Print the GUID, the canonical lowercase slot, the Linux name (`ibp{bus_decimal}s{dev}f{fn}`) and the NUMA node."
+        },
+        {
+          "subgoal": "Check NUMA locality",
+          "detail": "Compare the chosen device's `numa_node` with the host's GPU `numa_node`. Print `numa: local to GPU` or `numa: REMOTE from GPU`."
+        },
+        {
+          "subgoal": "Serialise with protobuf",
+          "detail": "Write `inv.proto`:\n```protobuf\nsyntax = \"proto3\";\nmessage PciDeviceProperties { string slot = 1; string device = 2; sint32 numa_node = 3; }\nmessage InfinibandDevice { PciDeviceProperties pci_properties = 1; string guid = 2; string fabric = 3; }\nmessage InfinibandDeviceList { repeated InfinibandDevice devices = 1; }\n```\nCompile it with `python -m grpc_tools.protoc -I. --python_out=. inv.proto`.\n\nThen:\n1. Build an `InfinibandDeviceList` from the database, sorted by slot.\n2. Write it to `devices.bin`.\n3. Read the file back and assert the decoded message equals the original.\n4. Print `protobuf: N devices, B bytes, round-trip OK`."
+        },
+        {
+          "subgoal": "Report the architecture",
+          "detail": "Print `platform.machine()` for the machine running the tool. For each discovered BMC, also print its host's `arch`, and flag `aarch64` hosts as needing arm64 builds."
+        }
+      ],
+      "verify": "Run:\n```bash\npython3 resolve.py --device \"MT28908 Family [ConnectX-6]\" --fabric IbFabric1 --instance 1\n```\nThe output must contain these lines (extra lines are fine):\n```\nmatched: B8:3F:D2:90:95:82 serial=J1234XY rack=R01\nmissing: 7C:C2:55:00:00:01\nunexpected: 02:42:AC:11:00:02\nselection: guid=3456 slot=0000:ea:00.0 name=ibp234s0f0 numa=1\nnuma: local to GPU\nprotobuf: 4 devices, <some> bytes, round-trip OK\n```\nAlso check that `--fabric IbFabric2 --instance 0` gives `guid=2345`, `numa: REMOTE from GPU`. If you get `guid=1234` for the first command, you're string-sorting the slots.",
+      "hints": [
+        "`TOMLDecodeError` or `TypeError: file must be opened in binary mode`: `tomllib.load` needs `open(path, 'rb')`.",
+        "GUIDs come out as ints, or a slot like `0000:00:01.0` comes out as a number: an unquoted YAML value was implicitly typed. Keep every ID and address quoted in YAML.",
+        "Every BMC shows as both missing and unexpected: you normalised MACs in only one of the two files. Normalise before inserting into SQLite.",
+        "The selection for IbFabric1 instance 1 returns 1234: you sorted slots as strings and uppercase `EA` sorted first. Sort with the parsed integer tuple, and lowercase the slot for display.",
+        "`ModuleNotFoundError: inv_pb2`: run `protoc` from the same directory as `resolve.py`, or add that directory to the path.",
+        "`sqlite3.IntegrityError` on insert: a primary key is duplicated. Check that you aren't loading the data twice."
+      ],
+      "stretch": "Package the tool in a container and build it for both `linux/amd64` and `linux/arm64`. For example, use `docker buildx build --platform linux/amd64,linux/arm64 .`, or Podman with `--platform`. Run the non-native image with `--platform` and confirm that `platform.machine()` prints the other architecture (under QEMU emulation) while the resolver output stays identical. Then add a check that rejects the inventory if two discovered BMCs normalise to the same MAC, to mirror NICo's switch rule that a MAC owned by another device is an error."
+    }
+  }
+}

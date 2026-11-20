@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "`docker logs api | tail -5` (step 'Exercise the HTTP API') and `docker logs api | tail -1` (stretch) won't work as intended: Python's http.server writes its request log to stderr, and `docker logs` passes the container's stderr to the terminal's stderr, so the pipe to `tail` never sees those lines. The learner gets the whole log unfiltered, and `tail -1` won't isolate far's request line.",
+        "fix": "Merge stderr into the pipe: `docker logs api 2>&1 | tail -5` and `docker logs api 2>&1 | tail -1`."
+      }
+    ]
+  }
+}

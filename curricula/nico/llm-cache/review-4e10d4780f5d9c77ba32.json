@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "ip-addressing-basics",
+        "severity": "major",
+        "problem": "The worked example step 'See the 32 bits behind the dots' gives the integer for 10.180.126.160 as 179600032. The correct value is 10·16777216 + 180·65536 + 126·256 + 160 = 179601056. Learners running the command will get output that doesn't match the lesson.",
+        "fix": "Change the expected output to `00001010101101000111111010100000 179601056`."
+      },
+      {
+        "where": "ip-addressing-basics",
+        "severity": "major",
+        "problem": "The independent problem answer says 160 (10100000) and 176 (10110000) differ in 'the 5th bit from the left' of the last octet. They differ in the 4th bit (the bits are worth 128, 64, 32, 16). The value given (16) is right, but the bit position the question asks for is wrong.",
+        "fix": "Change it to 'the 4th bit from the left of the last octet (the 16s bit)'."
+      },
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "The stretch exercise adds the reverse route on `mgmt`, but the test traffic is far → api. `api` is the container that has to send replies back to 172.28.6.0/24. Without a route on `api`, the replies go to the Docker host gateway, where Docker's inter-network isolation drops them. Also, the api firewall drops far's TCP 8080 traffic and UDP traceroute probes until fw.nft is extended. So 'the API sees far's real IP in its logs' and a full traceroute can't succeed in the order written.",
+        "fix": "Tell learners to add `ip route add 172.28.6.0/24 via <router's 172.28.5.x address>` on `api` (which already has NET_ADMIN) instead of mgmt. Move the fw.nft extension for 172.28.6.0/24 before the log and traceroute checks, or use `traceroute -I`/`-T -p 8080` and note that the firewall affects the probes."
+      }
+    ]
+  }
+}

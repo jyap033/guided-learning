@@ -1,0 +1,40 @@
+{
+  "kind": "review",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "intro",
+        "severity": "major",
+        "problem": "Claims NICo reads 'PCI slot addresses through Redfish' and uses them to decide which physical InfiniBand port a tenant gets. The nic_selection doc says InfiniBand device data, including PCI slot and numa_node, is collected in-band by the nico-scout tool. The endpoints reference doesn't mention PCI slot addresses from Redfish for this purpose.",
+        "fix": "Say that MAC addresses and PCIe serial numbers come from Redfish out of band, and that InfiniBand PCI slot addresses come from in-band discovery (scout) and are used to map a tenant's device selection."
+      },
+      {
+        "where": "pcie-device",
+        "severity": "minor",
+        "problem": "'Serials in the Redfish samples sometimes contain stray whitespace, and NICo trims it.' None of the doc samples contain whitespace. The docs only note 'Whitespace trimmed' for the Chassis SerialNumber and the NetworkAdapters SerialNumber, not the PCIe device SerialNumber, so the worked example's 'pair them the way NICo describes' with .strip() on a PCIe serial goes beyond what the docs say.",
+        "fix": "Reword: 'The endpoints reference notes that NICo trims whitespace from Chassis and network adapter serials. Trimming defensively before comparing is good practice.' Drop the claim about the samples."
+      },
+      {
+        "where": "cpu-architectures",
+        "severity": "minor",
+        "problem": "The example output for `file /bin/ls` on macOS ('Mach-O 64-bit executable arm64') is inaccurate. On macOS, /bin/ls is a universal binary, and `file` reports 'Mach-O universal binary with 2 architectures [x86_64 ...] [arm64e ...]'.",
+        "fix": "Show the universal-binary output for macOS, or use a Linux-only example, and mention that macOS ships fat binaries."
+      },
+      {
+        "where": "pci-device-and-slot-address",
+        "severity": "minor",
+        "problem": "Independent problem hint 3 ('As strings, uppercase 'E' (0x45) sorts before '3'? No: ...') states a wrong idea as a question and then corrects it. That is confusing for a hint.",
+        "fix": "State it directly: 'In ASCII, digits sort before uppercase letters, which sort before lowercase, so the string order is 3b, EB, ca:00.0, ca:00.1.'"
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "inv.proto reuses the message name PciDeviceProperties but renumbers its fields (slot=1, device=2, numa_node=3), while NICo's real message has vendor=1, device=2, path=3, numa_node=4. Right after the lesson teaches that 'field numbers are the contract' (and the completion problem adds slot=6), this can confuse learners.",
+        "fix": "Rename the toy messages (for example ToyPciProps) or keep NICo's numbers and add slot = 6, and note that the toy schema is not wire-compatible with NICo's."
+      }
+    ]
+  }
+}

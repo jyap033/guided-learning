@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "network-interface-card",
+        "severity": "minor",
+        "problem": "Independent problem answer (a) gives `enp65s0f1` for a ConnectX-6 Dx port. On current systemd with mlx5_core, Mellanox ports usually get a phys_port_name suffix (e.g. `enp65s0f1np1`), so a learner checking real hardware will see a name that doesn't match the answer.",
+        "fix": "Add a note to the answer: with mlx5 the kernel often adds a port suffix, so the actual name may be `enp65s0f1np1`. The bus/slot/function part is still derived as shown."
+      },
+      {
+        "where": "network-interface-card",
+        "severity": "minor",
+        "problem": "The claim that `eth0`-style names are 'now used mostly inside VMs and containers' is inaccurate for VMs. Many KVM and cloud VMs use predictable names such as `ens3`, `ens4`, `ens5` or `enp1s0`.",
+        "fix": "Say the old `eth0` style is now seen mainly inside containers and on some VMs or systems where predictable naming is turned off."
+      },
+      {
+        "where": "network-interface-card",
+        "severity": "minor",
+        "problem": "The explanation and the BMC check say the host can't see the BMC at all. The dedicated port is invisible, but the BMC itself often appears in `lspci` (e.g. an ASPEED VGA controller) and many BMCs give the host a USB network interface (Redfish host interface). This makes the 'only in lspci' option look plausible to a careful learner.",
+        "fix": "Make clear that the host can't see the dedicated management port as one of its network interfaces, while noting that the BMC may still show up as other devices. Alternatively, reword the check to ask specifically about the host's network interfaces in `ip link`."
+      }
+    ]
+  }
+}

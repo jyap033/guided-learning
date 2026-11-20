@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "yaml",
+        "severity": "minor",
+        "problem": "Completion problem template is `  ___ name: R01`, with a space already after the blank, but the answer says the blank is a dash and a space. Filled in literally, this gives `  -  name: R01`, so `name` sits at column 5 while the next line `    units: 42` is at column 4. The indentation no longer lines up, and the file won't load as the stated dict. The answer's alignment explanation (four spaces in total) only works if the blank is just `-`.",
+        "fix": "Change the first blank's answer to `-` (the template already has the space), or remove the space after the blank in the template: `  ___name: R01`."
+      }
+    ]
+  }
+}

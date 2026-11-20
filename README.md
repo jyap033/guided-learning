@@ -17,7 +17,15 @@ Pilot topic: **NVIDIA NICo** (NVIDIA Infra Controller).
 - `curricula/<topic>/report.md`: counts, checks and warnings
 - `curricula/<topic>/graph.json`: the full concept graph
 
-Lessons, quizzes and exercises come in M2.
+**M2 — lessons (started).** `gl lessons <topic> --chapters 1-3` writes chapters
+into `curricula/<topic>/chapters/`. Each chapter has an intro, and for every concept:
+questions to try first, an explanation, a worked example, a problem to finish, a
+problem to solve alone with hints, a "why" prompt and quiz questions, with
+answers hidden until clicked. It ends with a build task you can do on a laptop.
+An AI review pass checks each chapter against the docs; major problems trigger
+one rewrite, and remaining notes are listed at the end of the chapter.
+
+NICo chapters written so far: [1–3](curricula/nico/chapters/README.md).
 
 ## Run it
 
@@ -33,6 +41,10 @@ npm install
 
 ```bash
 npm run gl -- build nico
+```
+
+```bash
+npm run gl -- lessons nico --chapters 1-3
 ```
 
 The first run fetches the NICo docs at the commit pinned in

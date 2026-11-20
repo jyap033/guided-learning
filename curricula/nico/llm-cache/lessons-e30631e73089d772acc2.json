@@ -1,0 +1,593 @@
+{
+  "kind": "lessons",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "intro": "NICo is a network-heavy system. Before it can provision a single bare-metal machine, it has to hand out IP addresses to BMCs and DPUs, run DHCP, DNS and PXE services that machines reach over the network, route traffic between tenant networks, and expose REST and gRPC APIs that you call with an access token. Every page of the NICo deployment docs assumes you can read lines like \"a `/31` point-to-point subnet\", \"a `/27` pool\", \"advertise `/32` loopbacks\" or \"`Authorization: Bearer $TOKEN`\" without stopping.\n\nThis chapter builds that vocabulary from the bottom up. It starts with HTTP, the protocol you'll use to talk to NICo's REST API. Then it covers how machines are addressed (IP addresses), how frames move inside one local network (Layer 2 Ethernet and switches), and how packets move between networks (subnets, gateways and routers). It ends with how to size address blocks with CIDR notation, including the `/31` and `/32` blocks NICo uses everywhere, and how firewall rules decide which traffic is allowed.\n\nYou already know what a NIC and a MAC address are (Chapter 1) and how to work in a Linux shell and run containers (Chapter 2). This chapter puts those to work. Each lesson has commands you can run on your own laptop. The closing build task wires everything together in a small Docker lab: a token-protected API on a subnet you design, with a firewall in front of it.",
+    "objectives": [
+      "Make authenticated HTTP API calls with curl and read the status codes and headers that come back",
+      "Read an IPv4 address, tell private addresses from public ones, and inspect your own machine's addresses and routes",
+      "Explain how a switch learns MAC addresses, and predict where it will forward a frame",
+      "Work out whether a packet is delivered directly or through a gateway, and which route a router picks",
+      "Size and split IP blocks in CIDR notation, including /31 point-to-point links and /32 host addresses, as NICo's address pools require",
+      "Write and order default-deny firewall rules by address, protocol and port, then test them"
+    ],
+    "lessons": [
+      {
+        "concept": "http-and-web-apis",
+        "prequestions": [
+          {
+            "question": "An API returns either 401 or 403. Which one means \"I don't know who you are\", and which means \"I know who you are, but you're not allowed\"?",
+            "answer": "401 Unauthorized means the server couldn't authenticate you: the credentials are missing, expired or invalid. 403 Forbidden means it knows who you are but won't let you do this."
+          },
+          {
+            "question": "Guess: where in an HTTP request does an access token usually go: in the URL, in a header, or in the response?",
+            "answer": "In a request header, usually `Authorization: Bearer <token>`. Putting tokens in URLs is discouraged because URLs end up in logs."
+          }
+        ],
+        "explanation": "**HTTP** (HyperText Transfer Protocol) is a request/response protocol. A **client** (curl, a browser, `nicocli`) sends a **request**, and a **server** sends back a **response**. A **web API** is a set of HTTP endpoints built for programs to call rather than for people to read.\n\n**Anatomy of a URL**: `http://localhost:8388/v2/org/ncx/nico/user/current`\n- `http` is the **scheme**. `https` means HTTP wrapped in TLS encryption.\n- `localhost` is the **host**, meaning which machine to talk to.\n- `8388` is the **port**. One machine runs many programs, and the port number picks which one gets the request. The defaults are 80 for HTTP and 443 for HTTPS.\n- `/v2/org/...` is the **path**, meaning which resource you want. An optional `?key=value` **query string** can follow it.\n\n**A request** contains:\n1. A **method** saying what you want to do: `GET` (read), `POST` (create or act), `PUT`/`PATCH` (update), `DELETE`.\n2. **Headers**, which are `Name: value` metadata lines such as `Content-Type: application/json` (the format of the body), `Accept` (the format you want back) and `Authorization` (who you are).\n3. An optional **body**, usually JSON.\n\n**A response** contains a **status code**, headers and an optional body. The first digit of the code tells you the category:\n- `2xx` success (`200 OK`, `201 Created`, `204 No Content`)\n- `3xx` redirect (go somewhere else)\n- `4xx` your request was wrong (`400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`)\n- `5xx` the server failed (`500`, `502`, `503`)\n\n**Tokens.** HTTP is *stateless*: the server doesn't remember you between requests, so every request has to prove who you are. A common way is a **bearer token**, a string you get from an identity provider and send as `Authorization: Bearer <token>`. Whoever *bears* (holds) it gets in, so treat it like a password. Many tokens are **JWTs** (JSON Web Tokens), signed JSON documents that contain claims such as the issuer (`iss`). Chapter 19 covers them in depth.\n\nThis is exactly how you talk to NICo REST. You get a token from Keycloak's token endpoint using the `client_credentials` grant, then send it in the `Authorization` header. The docs warn that a token fetched through a port-forward to `localhost` carries the wrong `iss` claim and \"will be rejected\". The docs also note that until you make the one-time org bootstrap call, site operations return **404**.",
+        "analogy": "An HTTP request is like a form you hand in at a government office counter. The method is the box you tick (\"request a copy\" or \"file a new application\"), the path is which department's file you mean, the headers are the details on the envelope, and the token is the ID badge you show every single time, because the clerk has no memory of you. The reply comes back with a stamp: approved (2xx), you filled it in wrong (4xx), or our system is down (5xx). Where it breaks down: a real clerk might recognise your face. An HTTP server only trusts the badge, and anyone holding a copy of the badge gets the same service as you.",
+        "workedExample": {
+          "title": "Inspect real HTTP requests and responses on your laptop",
+          "steps": [
+            {
+              "subgoal": "Start a throwaway HTTP server",
+              "detail": "Python ships with a basic file server. In one terminal, run:\n```bash\nmkdir -p ~/httplab && cd ~/httplab\necho '{\"hello\": \"world\"}' > data.json\npython3 -m http.server 8000\n```\nIt now listens on port 8000 and serves files from this directory."
+            },
+            {
+              "subgoal": "Send a GET and read the response",
+              "detail": "In a second terminal:\n```bash\ncurl -i http://localhost:8000/data.json\n```\n`-i` prints the response headers. You'll see something like:\n```\nHTTP/1.0 200 OK\nServer: SimpleHTTP/0.6 Python/3.12.3\nContent-type: application/json\nContent-Length: 19\n\n{\"hello\": \"world\"}\n```\nThe first line is the status code, then come the headers, then a blank line, then the body."
+            },
+            {
+              "subgoal": "Trigger a 4xx error",
+              "detail": "```bash\ncurl -i http://localhost:8000/does-not-exist\n```\nYou get `404 File not found`. The request reached the server fine. The resource just doesn't exist. A 4xx code is an answer from the server, not a network failure."
+            },
+            {
+              "subgoal": "See the request you sent, including a custom header",
+              "detail": "```bash\ncurl -v -H 'Authorization: Bearer demo-token' http://localhost:8000/data.json\n```\n`-v` (verbose) shows lines starting with `>`. These are your request: `> GET /data.json HTTP/1.1`, `> Host: localhost:8000`, `> Authorization: Bearer demo-token`. This file server ignores the header, but a real API like NICo REST checks it on every request."
+            },
+            {
+              "subgoal": "Pull out just the status code (handy in scripts)",
+              "detail": "```bash\ncurl -s -o /dev/null -w '%{http_code}\\n' http://localhost:8000/data.json\n```\nThis prints `200`. `-o /dev/null` throws away the body and `-w` prints the code. You'll use this pattern in the build task."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "The NICo Quick Start bootstraps the org with one authenticated GET to the port-forwarded REST API, then pretty-prints the JSON. Fill in the blanks.",
+          "partialSolution": "TOKEN=$(helm-prereqs/keycloak/get-token.sh)\n\ncurl -sS -H \"___: ___ $TOKEN\" \\\n    http://localhost:8388/v2/org/ncx/nico/service-account/current \\\n    | python3 -m json.tool",
+          "answer": "The header is `Authorization: Bearer $TOKEN`:\n```bash\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n    http://localhost:8388/v2/org/ncx/nico/service-account/current \\\n    | python3 -m json.tool\n```\nThe header name is `Authorization` and the scheme is `Bearer`. Without this header the server can't authenticate you and you'd expect a 401."
+        },
+        "independentProblem": {
+          "prompt": "With `python3 -m http.server 8000` still running, write one curl command that sends a **POST** with the JSON body `{\"name\":\"node1\"}` and a correct `Content-Type` header to `http://localhost:8000/data.json`, and prints only the status code. Predict the code first, then run it and explain what it means.",
+          "hints": [
+            "You need `-X POST` (or just `--data`, which implies POST), a `-H` for the content type, and the `-w '%{http_code}'` trick from the worked example.",
+            "The content type for JSON is `application/json`. The body goes in `--data '{\"name\":\"node1\"}'`.",
+            "Python's simple file server only implements GET and HEAD. Look up the 5xx code that means \"the server doesn't support this method at all\"."
+          ],
+          "answer": "```bash\ncurl -s -o /dev/null -w '%{http_code}\\n' -X POST \\\n  -H 'Content-Type: application/json' \\\n  --data '{\"name\":\"node1\"}' http://localhost:8000/data.json\n```\nIt prints `501` (Not Implemented). Your request was well-formed and reached the server, but this server has no handler for POST. Compare that with 404 (the path doesn't exist) and 405 (some APIs use it to mean the method isn't allowed on this particular resource). The server log in the first terminal also shows `Unsupported method ('POST')`."
+        },
+        "selfExplanation": "HTTP is stateless. Explain in your own words why that forces every NICo REST request to carry the token, and why that makes a leaked token dangerous.",
+        "checks": [
+          {
+            "question": "You call a NICo REST endpoint with a token you fetched through `kubectl port-forward` to Keycloak on localhost, and you get a 401. What is the most likely cause?",
+            "options": [
+              "The token's issuer (`iss`) claim doesn't match what nico-rest-api expects, so the token is rejected",
+              "Your user is authenticated but lacks permission for that resource",
+              "The endpoint path doesn't exist",
+              "The NICo REST pod has crashed"
+            ],
+            "answer": "The token's issuer (`iss`) claim doesn't match what nico-rest-api expects, so the token is rejected",
+            "explanation": "The Quick Start warns that tokens requested against a port-forwarded localhost Keycloak carry an `iss` claim that nico-rest-api doesn't expect, so they're rejected. A rejected credential gives 401. A permission problem would be 403, a missing path 404, and a crashed server a 5xx code or a connection error, not a clean 401."
+          },
+          {
+            "question": "Which part of an HTTP request carries a bearer token?",
+            "options": [
+              "The Authorization request header",
+              "The status code",
+              "The URL's port number",
+              "The Content-Type header"
+            ],
+            "answer": "The Authorization request header",
+            "explanation": "Tokens go in `Authorization: Bearer <token>`. Status codes only appear in responses. The port picks which program receives the request. Content-Type describes the format of the body, not who you are."
+          },
+          {
+            "question": "Before the one-time org bootstrap call, NICo REST site operations return 404. Is that a network problem, an authentication problem, or something else? Answer briefly.",
+            "options": [],
+            "answer": "Something else. The server received the request and answered it, and as far as it knows the resource doesn't exist yet. Calling `GET .../service-account/current` lazily creates the org's provider, tenant and account.",
+            "explanation": "Any status code proves the request got through the network. 404 is not about authentication either: that would be 401 or 403. The resource simply hasn't been created yet."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "ip-addressing-basics",
+        "prequestions": [
+          {
+            "question": "How many bits long is an IPv4 address?",
+            "answer": "32 bits, written as four 8-bit numbers (octets) from 0 to 255, such as 10.180.126.160."
+          },
+          {
+            "question": "Can a machine on the public internet send packets straight to 10.1.2.3?",
+            "answer": "No. 10.0.0.0/8 is a private range (RFC 1918). It's only meaningful inside a private network, and internet routers don't carry routes to it."
+          }
+        ],
+        "explanation": "An **IP address** is a logical address given to a network interface so that packets can find it, even across many networks. It's different from the **MAC address** you met in Chapter 1:\n\n| | MAC address | IP address |\n|---|---|---|\n| Set by | Manufacturer (burned in) | Configuration or DHCP |\n| Scope | One local network | Across networks |\n| Structure | Flat | Hierarchical (network part + host part) |\n\n**IPv4** addresses are 32 bits, written in **dotted decimal**: four **octets** (bytes) separated by dots. `10.180.126.160` in binary is `00001010.10110100.01111110.10100000`.\n\nAn IP address belongs to an *interface*, not to a machine. One server can have several. The NICo docs count 3 management IPs for a node with a DPU: one for the host BMC, one for the DPU's ARM OS and one for the DPU BMC. A machine without a DPU needs only the host BMC's IP.\n\n**Network part and host part.** The leading bits of an address name the network and the rest name a host on that network. The split is written as a **prefix length**. `10.180.126.160/28` means \"the first 28 bits are the network\". Lesson 5 covers this in depth.\n\n**Special ranges worth knowing:**\n- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`: **private** addresses for internal networks. Datacenter fabrics, including the NICo docs' examples, use them heavily.\n- `127.0.0.0/8`: **loopback**, meaning \"this machine itself\" (`127.0.0.1` is `localhost`).\n- `169.254.0.0/16`: **link-local**, which a machine gives itself when DHCP fails.\n- `0.0.0.0`: \"any address\" or \"unspecified\". `255.255.255.255`: broadcast to the local network.\n\n**How addresses get assigned.** Either **statically** (typed into config) or dynamically by **DHCP**, where a server hands out addresses (Chapter 8). NICo uses both. The docs say control-plane node IPs are \"allocated statically at OS install time\", while BMCs on the management network get theirs via DHCP.\n\n**IPv6** addresses are 128 bits, written in hex groups separated by colons (`2001:db8::1`). `::1` is loopback. The ideas are the same, there are just far more addresses. NICo supports IPv6 in places, but this course focuses on IPv4.",
+        "analogy": "A MAC address is like a person's passport number: fixed, unique, and useless for finding where they live. An IP address is like a postal address: it has a hierarchy (country, city, street, house) that lets mail be routed step by step, and it changes when the person moves. Where it breaks down: one network interface can have several IP addresses at once, and private addresses like 10.x.x.x are reused in thousands of separate networks, as if every city had its own \"1 Main Street\".",
+        "workedExample": {
+          "title": "Find and dissect your own IP addresses",
+          "steps": [
+            {
+              "subgoal": "List your interfaces and their IPv4 addresses",
+              "detail": "Linux:\n```bash\nip -4 addr show\n```\nmacOS:\n```bash\nifconfig | grep 'inet '\n```\nYou'll see `127.0.0.1` on the loopback interface (`lo` / `lo0`) and probably a private address such as `192.168.1.23/24` on your Wi-Fi or Ethernet interface. The `/24` is the prefix length."
+            },
+            {
+              "subgoal": "Classify addresses with Python's ipaddress module",
+              "detail": "```bash\npython3 - <<'EOF'\nimport ipaddress\nfor a in [\"127.0.0.1\", \"10.180.126.160\", \"192.168.1.23\", \"169.254.10.5\", \"8.8.8.8\"]:\n    ip = ipaddress.ip_address(a)\n    print(f\"{a:16} private={ip.is_private!s:5} loopback={ip.is_loopback!s:5} link_local={ip.is_link_local}\")\nEOF\n```\n`8.8.8.8` is the only public one."
+            },
+            {
+              "subgoal": "See the 32 bits behind the dots",
+              "detail": "```bash\npython3 -c \"import ipaddress; ip=ipaddress.ip_address('10.180.126.160'); print(f'{int(ip):032b}', int(ip))\"\n```\nOutput: `00001010101101000111111010100000 179600032`. An IPv4 address is really just a 32-bit integer. The dots are only there to help humans read it."
+            },
+            {
+              "subgoal": "Split the address into network and host parts",
+              "detail": "```bash\npython3 -c \"import ipaddress; i=ipaddress.ip_interface('10.180.126.160/28'); print(i.network, i.ip)\"\n```\nThis prints `10.180.126.160/28 10.180.126.160`. With `/28`, the first 28 bits name the network and the last 4 bits number the hosts inside it."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Finish this script so it reports, for each address, whether it is private and whether it is loopback.",
+          "partialSolution": "import ipaddress\n\nfor a in [\"10.0.0.5\", \"127.0.0.1\", \"1.1.1.1\"]:\n    ip = ipaddress.___(a)\n    print(a, \"private:\", ip.___, \"loopback:\", ip.is_loopback)",
+          "answer": "```python\nimport ipaddress\n\nfor a in [\"10.0.0.5\", \"127.0.0.1\", \"1.1.1.1\"]:\n    ip = ipaddress.ip_address(a)\n    print(a, \"private:\", ip.is_private, \"loopback:\", ip.is_loopback)\n```\nOutput: `10.0.0.5` is private, `127.0.0.1` is loopback (Python also reports it as private), and `1.1.1.1` is neither."
+        },
+        "independentProblem": {
+          "prompt": "The NICo Quick Start's example MetalLB config uses `10.180.126.160` as the start of the internal VIP pool and `10.180.126.176` as the start of the external one. Write both addresses in binary and find exactly which bit differs between them. What is that bit worth in decimal?",
+          "hints": [
+            "Only the last octet differs (160 vs 176), so you only need to convert those two bytes.",
+            "160 = 128 + 32 and 176 = 128 + 32 + 16. Write each as 8 bits.",
+            "Compare `10100000` with `10110000`."
+          ],
+          "answer": "160 = `10100000` and 176 = `10110000`. They differ in one bit: the 5th bit from the left of the last octet, which is worth **16**. That's why each pool is a /28 (16 addresses). The two blocks sit right next to each other: .160–.175 and .176–.191."
+        },
+        "selfExplanation": "Why does a network need IP addresses at all when every NIC already has a globally unique MAC address? Explain using the idea of hierarchy.",
+        "checks": [
+          {
+            "question": "According to the NICo network prerequisites, how many management-network IPs does a managed host with one DPU need?",
+            "options": [
+              "3",
+              "1",
+              "2",
+              "4"
+            ],
+            "answer": "3",
+            "explanation": "The rule is 1 for the host BMC plus 2 per DPU (the DPU ARM OS and the DPU BMC), so 1 + 2 = 3. Answering 1 forgets the DPU. Answering 2 counts the DPU as a single device, but it has its own BMC and its own OS."
+          },
+          {
+            "question": "You move a server's NIC from one office network to another. What changes?",
+            "options": [
+              "Its IP address, typically; the MAC address stays the same",
+              "Its MAC address; the IP stays the same",
+              "Both always change",
+              "Neither changes"
+            ],
+            "answer": "Its IP address, typically; the MAC address stays the same",
+            "explanation": "The MAC is burned into the hardware. The IP is logical and belongs to the network it's attached to, so a new network (usually via DHCP) gives the interface a new IP."
+          },
+          {
+            "question": "Which of these is a private (RFC 1918) address: 172.20.1.1, 172.40.1.1, or 11.0.0.1?",
+            "options": [],
+            "answer": "172.20.1.1. The private 172 range is 172.16.0.0/12, which covers 172.16.0.0–172.31.255.255.",
+            "explanation": "172.40.1.1 is outside 172.16–172.31, and 11.0.0.1 is outside 10.0.0.0/8, so both are public addresses. Mistaking \"any 172.x\" for private is a common error."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "concept": "layer-2-ethernet-networking",
+        "prequestions": [
+          {
+            "question": "A switch receives a frame addressed to a MAC address it has never seen. What do you think it does with it?",
+            "answer": "It floods the frame out of every port except the one it came in on, and hopes the destination answers."
+          },
+          {
+            "question": "Does a basic Ethernet switch read the IP addresses inside the traffic it forwards?",
+            "answer": "No. A Layer 2 switch only looks at the Ethernet header, mainly the destination and source MAC addresses."
+          }
+        ],
+        "explanation": "Networking is usually described in **layers**. Each layer solves one problem and relies on the layer below it:\n- **Layer 1, physical**: cables, light and voltage.\n- **Layer 2, data link**: delivery between NICs on the *same* local network, using **MAC addresses**. Ethernet lives here.\n- **Layer 3, network**: delivery across networks, using **IP addresses** (next lesson).\n\n**Ethernet frames.** At Layer 2 data travels in **frames**. A frame has a header (destination MAC, source MAC, and an **EtherType** saying what the payload is, such as IPv4), a payload, and a checksum. The largest payload a link allows is its **MTU** (maximum transmission unit). The default is 1500 bytes. \"Jumbo frames\" use 9000. The NICo docs advise 9000 \"only if underlay supports it end-to-end\", because a single 1500-byte hop in the path breaks the larger frames.\n\n**How a switch works.** A **switch** is a box with many ports that forwards frames between them. It keeps a **MAC address table** (also called a CAM table or FDB) that maps each MAC to a port:\n1. **Learn**: when a frame arrives, the switch records *source MAC → incoming port*.\n2. **Forward**: if the destination MAC is in the table, the frame goes out of that one port.\n3. **Flood**: if the destination is unknown, or is the **broadcast** address `ff:ff:ff:ff:ff:ff`, the frame goes out of every port except the one it came in on.\n4. **Age out**: entries are forgotten after a while (often around 5 minutes) so that moved devices get relearned.\n\nAll the ports a broadcast can reach make up one **broadcast domain**, also called a **Layer 2 segment**. Hosts on the same segment are **L2-adjacent**: they can reach each other directly by MAC. Wiring switches in a loop makes floods circulate forever (a *broadcast storm*), so real networks run loop-prevention protocols. VLANs, which split one switch into several segments, come in Chapter 10.\n\nA **Linux bridge** is a switch in software. Docker's `docker0` is one.\n\n**Why NICo cares.** MAC addresses are flat, with no hierarchy, and flooding doesn't scale. So large fabrics keep Layer 2 segments small and route between them instead. NICo's FNN tenant model goes all the way: the docs say interfaces in the same VPC are *not* L2-adjacent, and cluster software \"must not depend on broadcast discovery, ARP between nodes, or an L2-advertised service VIP\". The BMC MAC address you'll put in `expected_machines.json` is a Layer 2 identity, and NICo uses it to recognise each machine.",
+        "analogy": "A switch is like a new mailroom clerk who doesn't know where anyone sits. Every time a letter arrives, the clerk notes which desk the *sender* handed it in from. If the clerk knows where the recipient sits, the letter goes straight there. If not, the clerk walks to every desk and shouts the name. Where it breaks down: names (MACs) give no clue about location, so this only works for one floor. You can't run a city's mail by shouting at every desk, which is why routing by IP (Layer 3) exists.",
+        "workedExample": {
+          "title": "Trace a switch learning MAC addresses",
+          "steps": [
+            {
+              "subgoal": "Set the scene",
+              "detail": "A 4-port switch with an empty MAC table. Port 1: host A (`aa:aa:aa:aa:aa:01`), port 2: host B (`...:02`), port 3: host C (`...:03`), port 4: host D (`...:04`)."
+            },
+            {
+              "subgoal": "Frame 1: A sends to B",
+              "detail": "The switch learns `A → port 1`. B is unknown, so it **floods** the frame out of ports 2, 3 and 4. C and D see that the destination MAC isn't theirs and discard it.\n\nTable: `{A: 1}`"
+            },
+            {
+              "subgoal": "Frame 2: B replies to A",
+              "detail": "The switch learns `B → port 2`. A is known, so the frame goes **only out of port 1**.\n\nTable: `{A: 1, B: 2}`"
+            },
+            {
+              "subgoal": "Frame 3: C broadcasts to ff:ff:ff:ff:ff:ff",
+              "detail": "The switch learns `C → port 3`. Broadcasts are always flooded, so the frame goes out of ports 1, 2 and 4.\n\nTable: `{A: 1, B: 2, C: 3}`. D still isn't in the table because D hasn't sent anything yet."
+            },
+            {
+              "subgoal": "Look at the real thing on your machine",
+              "detail": "Your NIC's MAC address:\n```bash\nip link show        # Linux: look for 'link/ether xx:xx:...'\nifconfig en0 | grep ether   # macOS\n```\nMACs your machine has recently talked to on the local segment:\n```bash\nip neigh            # Linux\narp -a              # macOS\n```\nOn Linux with Docker running, `bridge fdb show br docker0` shows the software switch's own MAC table."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Continuing the worked example (table `{A: 1, B: 2, C: 3}`), D now sends a frame to C. Fill in what the switch does.",
+          "partialSolution": "Learn:    D → port ___\nForward:  destination C is ___ (known/unknown), so send out port(s) ___\nTable:    {A: 1, B: 2, C: 3, ___}",
+          "answer": "Learn: `D → port 4`. Forward: C is **known**, so the frame goes out of **port 3 only**. Table: `{A: 1, B: 2, C: 3, D: 4}`."
+        },
+        "independentProblem": {
+          "prompt": "Write a small Python function `switch(frames)` that simulates a learning switch. `frames` is a list of `(in_port, src_mac, dst_mac)` tuples. The switch has ports 1–4. For each frame, print the list of ports it goes out of. Test it with the worked example's frames.",
+          "hints": [
+            "Keep a dict `table = {}` that maps MAC to port. Update it with the source MAC *before* you decide where the frame goes.",
+            "If `dst` is the broadcast address or isn't in `table`, the output is every port except `in_port`. Otherwise it's `[table[dst]]`.",
+            "Edge case: if the known port for `dst` equals `in_port`, a real switch drops the frame (filtering). Return an empty list."
+          ],
+          "answer": "```python\nBCAST = \"ff:ff:ff:ff:ff:ff\"\nPORTS = [1, 2, 3, 4]\n\ndef switch(frames):\n    table = {}\n    for in_port, src, dst in frames:\n        table[src] = in_port                      # learn\n        if dst == BCAST or dst not in table:\n            out = [p for p in PORTS if p != in_port]  # flood\n        elif table[dst] == in_port:\n            out = []                              # filter\n        else:\n            out = [table[dst]]                    # forward\n        print(f\"{src} -> {dst}: out {out}\")\n    return table\n\nA, B, C, D = (f\"aa:aa:aa:aa:aa:0{i}\" for i in range(1, 5))\nprint(switch([(1, A, B), (2, B, A), (3, C, BCAST), (4, D, C)]))\n```\nOutputs: `[2, 3, 4]`, `[1]`, `[1, 2, 4]`, `[3]`, then the final table `{A: 1, B: 2, C: 3, D: 4}`."
+        },
+        "selfExplanation": "Explain why a switch learns from the *source* MAC of each frame rather than the destination, and what would go wrong if it learned from the destination instead.",
+        "checks": [
+          {
+            "question": "Host A sends a broadcast frame on an 8-port switch where every host is already in the MAC table. Where does the frame go?",
+            "options": [
+              "Out of all 7 other ports",
+              "Only to the port of the host that will answer",
+              "Nowhere, because broadcasts are dropped",
+              "Back out of A's port only"
+            ],
+            "answer": "Out of all 7 other ports",
+            "explanation": "Broadcasts are always flooded within the segment, however full the table is. The table only helps with unicast frames to known MACs. The switch can't know which host will answer."
+          },
+          {
+            "question": "What does a Layer 2 switch use to decide where to send a frame?",
+            "options": [
+              "The destination MAC address",
+              "The destination IP address",
+              "The TCP port number",
+              "The source IP address"
+            ],
+            "answer": "The destination MAC address",
+            "explanation": "A Layer 2 switch reads only the Ethernet header. IP addresses are Layer 3 and are used by routers, and ports are Layer 4. A common misconception is that switches route by IP. Plain switches don't."
+          },
+          {
+            "question": "The NICo docs say two instance interfaces allocated from the same VPC prefix are *not* L2-adjacent. In one sentence, what can't they do as a result?",
+            "options": [],
+            "answer": "They can't reach each other directly by MAC on a shared segment. Broadcasts and ARP from one never reach the other, so all their traffic has to be routed.",
+            "explanation": "L2-adjacent means \"in the same broadcast domain\". If they aren't, MAC-based discovery (ARP, broadcast service discovery) fails, which is why the docs tell you to choose cluster software that works over routed connectivity."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "ip-networking-fundamentals",
+        "prequestions": [
+          {
+            "question": "Your laptop is 192.168.1.20/24. It sends a packet to 192.168.1.50 and another to 8.8.8.8. Which of the two goes through your router?",
+            "answer": "Only the one to 8.8.8.8. 192.168.1.50 is in the same subnet, so it's delivered directly over Layer 2. 8.8.8.8 is outside it, so the packet goes to the default gateway."
+          },
+          {
+            "question": "When a packet passes through a router, which addresses change: the IP addresses, the MAC addresses, or both?",
+            "answer": "The MAC addresses. The router builds a new Ethernet frame for the next hop. The source and destination IPs stay the same end to end (unless NAT is involved)."
+          }
+        ],
+        "explanation": "Lesson 2 gave machines IP addresses and Lesson 3 moved frames within one segment. This lesson joins them.\n\n**Packets inside frames.** An IP **packet** (Layer 3) holds the source and destination IPs and the data. To cross a cable it's wrapped in an Ethernet **frame** (Layer 2). The frame gets the packet to the next device. The IP header gets it to the final destination.\n\n**A subnet** is a group of addresses that share a network prefix, such as `192.168.1.0/24`. They usually sit on one L2 segment, so hosts in the subnet reach each other directly.\n\n**The sending host's decision**, made for every packet:\n1. Is the destination inside my subnet? (Apply my prefix length and compare.)\n2. **Yes**: find the destination's MAC with **ARP** (Address Resolution Protocol: a broadcast asking \"who has 192.168.1.50?\", answered by the owner's unicast reply), then send the frame straight to it.\n3. **No**: send it to my **default gateway**, the router's IP on my subnet. ARP finds the *gateway's* MAC. The frame is addressed to the gateway, but the packet's destination IP is still the far host.\n\n**Routers** have interfaces on several subnets and a **routing table** of `prefix → next hop or interface` entries. For each packet a router:\n- picks the matching route with the **longest prefix** (the most specific one wins; `0.0.0.0/0`, the **default route**, matches everything),\n- decrements the packet's **TTL** (time to live), discarding it at 0 so that loops can't run forever,\n- builds a fresh frame for the next hop.\n\nRoutes are configured statically or learned from routing protocols such as BGP (Chapter 9). Any Linux box can act as a router once `net.ipv4.ip_forward=1` is set. NICo's Quick Start requires that setting on every Kubernetes node, because pod traffic gets routed through the node.\n\n**Tools:** `ping` (sends ICMP echo to test reachability), `traceroute` (lists every router hop), `ip route` (shows the routing table).\n\n**In NICo:** the admin network config needs a `gateway` whenever an IPv4 prefix is present. In FNN VPCs each instance interface sits on its own tiny subnet with its DPU acting as the gateway, so instance-to-instance traffic is **routed** even within one VPC. The docs warn not to depend on ARP between nodes.",
+        "analogy": "Sending a packet is like posting a letter. If it's for a neighbour on your street (your subnet), you walk it over yourself. Otherwise you drop it at the local post office (the gateway), which looks only at the destination city, passes it to the next sorting office, and so on. Where it breaks down: at each post office the letter (IP packet) is put into a brand-new outer envelope (Ethernet frame) addressed only to the next office. Real mail keeps one envelope all the way.",
+        "workedExample": {
+          "title": "Read your machine's routing decisions",
+          "steps": [
+            {
+              "subgoal": "Show the routing table",
+              "detail": "Linux:\n```bash\nip route\n```\nTypical output:\n```\ndefault via 192.168.1.1 dev wlp2s0 proto dhcp metric 600\n192.168.1.0/24 dev wlp2s0 proto kernel scope link src 192.168.1.23\n```\nLine 2 says \"my own subnet is directly attached, no gateway needed\". Line 1 is the default route: \"everything else goes via the router at 192.168.1.1\".\n\nmacOS: `netstat -rn -f inet`."
+            },
+            {
+              "subgoal": "Ask the kernel how it would reach a remote IP",
+              "detail": "```bash\nip route get 1.1.1.1\n# 1.1.1.1 via 192.168.1.1 dev wlp2s0 src 192.168.1.23\n```\nThe word `via` means it goes through a gateway. On macOS: `route -n get 1.1.1.1` and look at the `gateway:` line."
+            },
+            {
+              "subgoal": "Compare with a local IP",
+              "detail": "```bash\nip route get 192.168.1.1\n# 192.168.1.1 dev wlp2s0 src 192.168.1.23\n```\nThere's no `via`, so this address is reached directly on the segment. (Use your own gateway's address.)"
+            },
+            {
+              "subgoal": "See the ARP result for the gateway",
+              "detail": "```bash\nping -c 1 192.168.1.1 >/dev/null; ip neigh     # macOS: arp -a\n```\nYou'll see `192.168.1.1 lladdr xx:xx:... REACHABLE`. That's the MAC your laptop puts on *every* frame bound for the internet."
+            },
+            {
+              "subgoal": "Count the routers on the way out",
+              "detail": "```bash\ntraceroute -n 1.1.1.1      # Linux may need: sudo apt install traceroute\n```\nEach line is one router hop. The first is your gateway."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Finish this Python function that decides whether a host delivers a packet directly or sends it to its gateway.",
+          "partialSolution": "import ipaddress\n\ndef next_hop(my_iface: str, gateway: str, dst: str) -> str:\n    iface = ipaddress.ip_interface(my_iface)       # e.g. \"192.168.1.20/24\"\n    if ipaddress.ip_address(dst) ___ iface.___:\n        return f\"direct: ARP for {dst}\"\n    return f\"via gateway: ARP for {gateway}\"\n\nprint(next_hop(\"192.168.1.20/24\", \"192.168.1.1\", \"192.168.1.50\"))\nprint(next_hop(\"192.168.1.20/24\", \"192.168.1.1\", \"8.8.8.8\"))",
+          "answer": "```python\n    if ipaddress.ip_address(dst) in iface.network:\n```\nThe blanks are `in` and `network`. The first call prints `direct: ARP for 192.168.1.50` and the second prints `via gateway: ARP for 192.168.1.1`."
+        },
+        "independentProblem": {
+          "prompt": "A router has this table:\n```\n10.0.0.0/8       via 172.16.0.1  (A)\n10.180.0.0/16    via 172.16.0.2  (B)\n10.180.126.0/24  via 172.16.0.3  (C)\n0.0.0.0/0        via 172.16.0.254 (D)\n```\nWhich next hop does it pick for (1) 10.180.126.170, (2) 10.180.9.9, (3) 10.9.9.9, (4) 192.0.2.10? Then check your answers with Python.",
+          "hints": [
+            "Find every route whose prefix contains the address, then pick the one with the largest /number.",
+            "10.180.126.170 is inside all four prefixes. The /24 is the most specific.",
+            "In Python: `[n for n in nets if ip in n]`, then `max(..., key=lambda n: n.prefixlen)`."
+          ],
+          "answer": "(1) C, (2) B, (3) A, (4) D.\n```python\nimport ipaddress as ia\nroutes = {\"10.0.0.0/8\": \"A\", \"10.180.0.0/16\": \"B\", \"10.180.126.0/24\": \"C\", \"0.0.0.0/0\": \"D\"}\nfor d in [\"10.180.126.170\", \"10.180.9.9\", \"10.9.9.9\", \"192.0.2.10\"]:\n    ip = ia.ip_address(d)\n    best = max((ia.ip_network(p) for p in routes if ip in ia.ip_network(p)), key=lambda n: n.prefixlen)\n    print(d, \"->\", routes[str(best)])\n```"
+        },
+        "selfExplanation": "When your laptop sends a packet to 8.8.8.8, the Ethernet frame is addressed to your router's MAC, but the IP header says 8.8.8.8. Explain why both addresses are needed and what each one is for.",
+        "checks": [
+          {
+            "question": "A packet crosses three routers from host X to host Y. Which statement is true?",
+            "options": [
+              "Source and destination IPs stay the same; the frame's MAC addresses are rewritten at each hop",
+              "Source and destination MACs stay the same; the IPs are rewritten at each hop",
+              "Both are rewritten at each hop",
+              "Neither changes"
+            ],
+            "answer": "Source and destination IPs stay the same; the frame's MAC addresses are rewritten at each hop",
+            "explanation": "MAC addresses only mean something on one segment, so every router builds a new frame for the next link. IPs identify the endpoints end to end. NAT is the exception, and it isn't happening here."
+          },
+          {
+            "question": "Why does NICo's Quick Start require `net.ipv4.ip_forward=1` on every Kubernetes node?",
+            "options": [
+              "So the node can route packets between interfaces, for example to and from pods, instead of dropping packets not addressed to itself",
+              "So the node can get an IP address by DHCP",
+              "So the node's MAC address becomes forwardable",
+              "So the node can resolve DNS names"
+            ],
+            "answer": "So the node can route packets between interfaces, for example to and from pods, instead of dropping packets not addressed to itself",
+            "explanation": "`ip_forward` turns a Linux host into a router. Without it, packets that arrive for some other IP (such as a pod's) are discarded. DHCP, MACs and DNS are unrelated to this setting."
+          },
+          {
+            "question": "In a NICo FNN VPC, two instance interfaces got addresses from the same VPC prefix. Will one instance ARP for the other's MAC directly?",
+            "options": [
+              "No. Each interface is on its own point-to-point subnet with the DPU as gateway, so traffic is routed through the DPU",
+              "Yes, because sharing a prefix means sharing a segment",
+              "Yes, but only for broadcast traffic",
+              "Only if the MTU is 9000"
+            ],
+            "answer": "No. Each interface is on its own point-to-point subnet with the DPU as gateway, so traffic is routed through the DPU",
+            "explanation": "The docs say allocating from the same VPC prefix \"does not make them L2-adjacent\". Each interface's /31 links it to its DPU gateway, and the host ARPs only for that gateway. Thinking \"same prefix means same segment\" is exactly the misconception the docs warn about."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "cidr-prefixes-and-31-point-to-point-subnets",
+        "prequestions": [
+          {
+            "question": "How many IPv4 addresses are in a /24? And in a /31?",
+            "answer": "A /24 has 2^(32−24) = 256 addresses. A /31 has 2^1 = 2."
+          },
+          {
+            "question": "Guess: why would a network engineer ever want a subnet with only two addresses?",
+            "answer": "For a point-to-point link between exactly two devices, such as a host and its DPU or a server and a switch. Two ends need only two addresses, so nothing is wasted."
+          }
+        ],
+        "explanation": "**CIDR** (Classless Inter-Domain Routing) notation writes a block of addresses as `address/prefix-length`. The prefix length `n` is the number of fixed network bits. The remaining `32 − n` bits number the hosts, so the block holds **2^(32−n) addresses**.\n\n| Prefix | Addresses | | Prefix | Addresses |\n|---|---|---|---|---|\n| /24 | 256 | | /28 | 16 |\n| /25 | 128 | | /29 | 8 |\n| /26 | 64 | | /30 | 4 |\n| /27 | 32 | | /31 | 2 |\n| | | | /32 | 1 |\n\nEach step of one bit halves or doubles the size. The same idea is sometimes written as a **netmask**: /24 is `255.255.255.0`.\n\n**Alignment.** A block has to start at a multiple of its size. `10.0.0.16/28` is valid (16 is a multiple of 16), but `10.0.0.20/28` isn't a proper network: it has \"host bits set\".\n\n**Reserved addresses.** In a normal subnet the first address is the **network address** and the last is the **broadcast address**, so usable hosts = 2^(32−n) − 2. A /24 has 254 usable hosts, a /30 has 2. One usable address normally goes to the gateway too. The NICo admin network pool must cover \"one usable IP per managed server, plus any required network and broadcast addresses\".\n\n**/31, point-to-point.** A link with exactly two ends has no need for broadcast, so RFC 3021 lets *both* addresses in a /31 be used. That halves the cost of every link compared with a /30. NICo leans on this heavily: each control-plane node gets a /31 between its host OS and DPU, each tenant interface gets its own /31 to its DPU gateway, and the docs state \"the minimum individual prefix size is /31\".\n\n**/32, a single host.** A /32 names exactly one address. It's used for **loopback addresses**: a stable identity on a router or DPU that isn't tied to any physical port. Routes to a /32 are host routes. In NICo, \"DPUs advertise /32 loopbacks for VXLAN tunnel endpoints\", and there's one per DPU from the DPU loopback pool.\n\n**Sizing.** To size a pool, count the addresses you need and round up to the next power of two. The NICo docs give one formula, `(servers + DPUs) * 2 + 2`. With 10 servers and 10 DPUs that's 42 addresses, which needs a /26 (64), because a /27 (32) is too small.",
+        "analogy": "CIDR is like selling land along a numbered street in lots whose size must be a power of two and which must start on a matching boundary: 16-plot lots start at plot 0, 16, 32 and so on. A /31 is a semi-detached pair with no shared driveway to set aside, and a /32 is one plot. Where it breaks down: real land can be sold in any size at any boundary. IP blocks can't, because routers match them using fixed bit masks.",
+        "workedExample": {
+          "title": "Size and carve a NICo-style address plan",
+          "steps": [
+            {
+              "subgoal": "Count what you need",
+              "detail": "Say you have 8 servers, each with 1 DPU (8 DPUs). The first prefix in the NICo network prerequisites is sized with `(servers + DPUs) * 2 + 2` = (8 + 8) × 2 + 2 = **34 addresses**."
+            },
+            {
+              "subgoal": "Round up to a power of two",
+              "detail": "A /27 gives 32, which is too small. A /26 gives 64, which fits. Check with Python:\n```bash\npython3 -c \"import math; n=34; print('/%d' % (32 - math.ceil(math.log2(n))))\"\n# /26\n```"
+            },
+            {
+              "subgoal": "Pick an aligned block and check its range",
+              "detail": "```bash\npython3 - <<'EOF'\nimport ipaddress\nnet = ipaddress.ip_network(\"10.50.0.64/26\")\nprint(net.network_address, \"-\", net.broadcast_address, net.num_addresses)\nEOF\n# 10.50.0.64 - 10.50.0.127 64\n```\n64 is a multiple of 64, so the block is aligned. Try `ip_network(\"10.50.0.70/26\")` and you'll get `ValueError: ... has host bits set`."
+            },
+            {
+              "subgoal": "Carve it into /31 point-to-point links",
+              "detail": "```bash\npython3 - <<'EOF'\nimport ipaddress\nlinks = list(ipaddress.ip_network(\"10.50.0.64/26\").subnets(new_prefix=31))\nprint(len(links), \"links\")\nfor l in links[:3]:\n    a, b = list(l)          # both addresses are usable in a /31\n    print(l, \"host side:\", a, \" DPU side:\", b)\nEOF\n```\nThe output starts with `32 links`, then `10.50.0.64/31 host side: 10.50.0.64  DPU side: 10.50.0.65`, and so on."
+            },
+            {
+              "subgoal": "Give each DPU a /32 loopback",
+              "detail": "```bash\npython3 -c \"import ipaddress as i; print([str(n) for n in list(i.ip_network('10.60.0.0/29').subnets(new_prefix=32))])\"\n```\nThat's 8 single-host /32s, `10.60.0.0/32` to `10.60.0.7/32`, one per DPU, like NICo's DPU loopback pool."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Split `192.168.100.0/29` into point-to-point links and print each link's two addresses.",
+          "partialSolution": "import ipaddress\n\nblock = ipaddress.ip_network(\"192.168.100.0/29\")\nfor link in block.subnets(new_prefix=___):\n    a, b = list(link)\n    print(link, a, b)\n# How many lines will this print? ___",
+          "answer": "`new_prefix=31`. A /29 has 8 addresses, so it holds 8 / 2 = **4** /31 links: `.0/31` (.0, .1), `.2/31` (.2, .3), `.4/31` (.4, .5), `.6/31` (.6, .7)."
+        },
+        "independentProblem": {
+          "prompt": "The NICo docs say a host with one DPU, using the PF and one VF, uses two /31 subnets per tenant network (one per interface). You have 20 such hosts and one tenant network. What is the smallest single CIDR block that holds the whole tenant pool? Prove it with Python by carving the block into /31s and counting them.",
+          "hints": [
+            "Start with the number of /31s: hosts × interfaces per host.",
+            "Every /31 is 2 addresses. Multiply, then round up to the next power of two.",
+            "40 links × 2 = 80 addresses. A /26 (64) is too small."
+          ],
+          "answer": "20 hosts × 2 interfaces = 40 /31s = 80 addresses, which rounds up to 128, a **/25**.\n```python\nimport ipaddress\nprint(len(list(ipaddress.ip_network(\"10.70.0.0/25\").subnets(new_prefix=31))))  # 64 >= 40\nprint(len(list(ipaddress.ip_network(\"10.70.0.0/26\").subnets(new_prefix=31))))  # 32 < 40, too small\n```\nA second tenant network needs its own pool of the same size, as the docs say: \"provide separate pools, each sized for all servers\"."
+        },
+        "selfExplanation": "A normal /30 point-to-point link wastes half its addresses. Explain why a /31 can safely use both of its addresses, and why that matters when NICo hands out a link for every tenant interface on every host.",
+        "checks": [
+          {
+            "question": "Which addresses are usable in `10.0.0.8/31`?",
+            "options": [
+              "10.0.0.8 and 10.0.0.9",
+              "Only 10.0.0.9",
+              "None; network and broadcast use both",
+              "10.0.0.8, 10.0.0.9 and 10.0.0.10"
+            ],
+            "answer": "10.0.0.8 and 10.0.0.9",
+            "explanation": "RFC 3021 treats both /31 addresses as usable because a point-to-point link needs no network or broadcast address. Applying the usual \"minus 2\" rule to a /31 is the classic mistake, and a /31 can't contain a third address."
+          },
+          {
+            "question": "NICo's docs say DPUs advertise `/32` loopbacks. What does a /32 represent?",
+            "options": [
+              "A single host address, a stable identity not tied to one physical link",
+              "A 32-address pool",
+              "A point-to-point link",
+              "The whole IPv4 address space"
+            ],
+            "answer": "A single host address, a stable identity not tied to one physical link",
+            "explanation": "/32 means all 32 bits are fixed, which leaves exactly one address. \"32 addresses\" mixes up the prefix length with the size: that would be a /27. A point-to-point link is a /31, and the whole space is /0."
+          },
+          {
+            "question": "The docs suggest a /27 for the control-plane service IP pool. How many addresses is that, and is `10.1.1.40/27` a correctly aligned network?",
+            "options": [],
+            "answer": "32 addresses. 10.1.1.40/27 is not aligned, because 40 isn't a multiple of 32. The aligned /27 containing .40 is 10.1.1.32/27 (.32–.63).",
+            "explanation": "Size is 2^(32−27) = 32. A /27 must start at 0, 32, 64 and so on in the last octet. Python's `ip_network('10.1.1.40/27')` raises \"has host bits set\"."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "concept": "firewall-rules",
+        "prequestions": [
+          {
+            "question": "A packet arrives and none of the firewall's rules match it. What happens?",
+            "answer": "The chain's default policy decides. A secure firewall's default is to drop (default deny), so anything not explicitly allowed is blocked."
+          },
+          {
+            "question": "Guess: if a firewall allows outbound connections from your server but blocks all inbound traffic, can the server still get replies to its own requests?",
+            "answer": "Yes, with a stateful firewall. It tracks connections and lets reply packets of established connections back in."
+          }
+        ],
+        "explanation": "A **firewall** inspects packets and applies **rules** that allow or deny them. It can run on the host itself (Linux's **nftables** or the older **iptables**) or as a device in the network.\n\n**Ports and protocols.** On top of IP, most traffic uses **TCP** (reliable connections) or **UDP** (single datagrams). Both carry a 16-bit **port** number that says which program should receive the data. You met ports in the HTTP lesson. Common ones:\n\n| Port | Service |\n|---|---|\n| TCP 22 | SSH |\n| UDP/TCP 53 | DNS |\n| UDP 67/68 | DHCP server/client |\n| TCP 80 / 443 | HTTP / HTTPS |\n| TCP 6443 | Kubernetes API server (default) |\n| TCP 10250 | kubelet |\n\n**ICMP** (used by ping) has no ports.\n\n**A rule** matches on some combination of these fields and gives an **action**:\n- direction or hook: inbound (`input`), outbound (`output`), or passing through (`forward`)\n- source and/or destination address, often written as a CIDR\n- protocol and destination port\n- action: **accept**, **drop** (silently discard, so the sender waits until it times out), or **reject** (discard and send back an error, so the sender fails at once)\n\n**Order and defaults.** In nftables and iptables, rules in a chain are checked top to bottom, and the **first match wins**. Packets that match nothing get the chain's **policy**. Good practice is **default deny**: set the policy to drop and add narrow accept rules. Watch out: cloud security groups (Chapter 38) often work differently, as an unordered set of allow rules.\n\n**Stateful filtering.** **Connection tracking** remembers flows, so one rule (`ct state established,related accept`) lets in the replies to connections you started. Without it you'd need a matching rule for every return path.\n\n**In NICo.** The network prerequisites recommend exactly this posture for site controllers: \"Allow K8s control-plane and node ports per chosen CNI, plus SSH from a secure management network. Block everything else by default.\" NICo also applies the idea on tenants' behalf. The `deny_prefixes` setting in `siteConfig` lists \"CIDRs instances must not reach (OOB, control plane, management)\", so tenant machines can't touch the BMCs or the control plane.",
+        "analogy": "A firewall is like a building's security desk with a printed list of rules: \"Couriers to the loading dock: allowed. Visitors from Acme to floor 3: allowed. Everyone else: turned away.\" The guard reads the list top to bottom and acts on the first line that fits. A stateful guard also remembers who left to fetch lunch and lets them back in. Where it breaks down: the guard only checks the label on the outside (addresses, ports, protocol). A firewall rule doesn't judge whether the content is malicious, so a permitted port can still carry an attack.",
+        "workedExample": {
+          "title": "Write and test a default-deny ruleset for a site-controller-like host",
+          "steps": [
+            {
+              "subgoal": "State the policy in plain words",
+              "detail": "Management network: `10.10.0.0/24`. Cluster nodes: `10.20.0.0/24`.\n1. Allow replies to connections we started.\n2. Allow loopback traffic.\n3. Allow SSH (TCP 22) **only** from the management network.\n4. Allow the Kubernetes API (TCP 6443) from cluster nodes.\n5. Drop everything else."
+            },
+            {
+              "subgoal": "Translate it to nftables",
+              "detail": "Save as `fw.nft`:\n```\ntable inet demo {\n  chain input {\n    type filter hook input priority 0; policy drop;\n    ct state established,related accept\n    iif \"lo\" accept\n    ip saddr 10.10.0.0/24 tcp dport 22 accept\n    ip saddr 10.20.0.0/24 tcp dport 6443 accept\n  }\n}\n```\n`policy drop` is the default deny. Each line is one rule, checked in order."
+            },
+            {
+              "subgoal": "Load it safely in a container (not on your laptop)",
+              "detail": "Experimenting on your own host's firewall can cut off your network, so use a throwaway container:\n```bash\ndocker run --rm -it --cap-add NET_ADMIN -v \"$PWD/fw.nft:/fw.nft\" alpine:3.20 sh -c \\\n  'apk add -q nftables && nft -f /fw.nft && nft list ruleset'\n```\n`--cap-add NET_ADMIN` lets the container change its *own* network namespace only. Your host is untouched."
+            },
+            {
+              "subgoal": "Predict the verdict for sample packets",
+              "detail": "| Packet | Verdict | Why |\n|---|---|---|\n| TCP 10.10.0.5 → port 22 | accept | rule 3 |\n| TCP 10.99.0.5 → port 22 | drop | wrong source, falls to the policy |\n| TCP 10.20.0.7 → port 6443 | accept | rule 4 |\n| UDP 10.20.0.7 → port 53 | drop | no rule for it |\n| Reply to our own `apt` download | accept | rule 1 (established) |"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Add an nftables rule that allows HTTPS to the NICo REST ingress only from the client network `10.30.0.0/23`.",
+          "partialSolution": "    ip saddr ___ tcp dport ___ accept",
+          "answer": "```\n    ip saddr 10.30.0.0/23 tcp dport 443 accept\n```\nA /23 covers 512 addresses, 10.30.0.0–10.30.1.255. HTTPS is TCP 443."
+        },
+        "independentProblem": {
+          "prompt": "A colleague wrote this chain, and nobody can reach the web server on port 443. Explain why, then rewrite it so that HTTPS from anywhere and SSH from 10.10.0.0/24 work and everything else is dropped.\n```\nchain input {\n  type filter hook input priority 0; policy accept;\n  ip saddr 0.0.0.0/0 drop\n  tcp dport 443 accept\n  ip saddr 10.10.0.0/24 tcp dport 22 accept\n}\n```",
+          "hints": [
+            "Rules are evaluated top to bottom, and the first match wins. Which rule does a port-443 packet match first?",
+            "`0.0.0.0/0` matches every IPv4 source. Putting a drop-everything rule as an explicit line also hides the fact that the policy is `accept`.",
+            "Move the deny into `policy drop`, put the accepts in the body, and remember the established/related rule for return traffic."
+          ],
+          "answer": "The first rule, `ip saddr 0.0.0.0/0 drop`, matches every IPv4 packet, so the accept rules below it are never reached. (IPv6 packets would fall through to `policy accept`, which is a second bug.) Fixed version:\n```\nchain input {\n  type filter hook input priority 0; policy drop;\n  ct state established,related accept\n  iif \"lo\" accept\n  tcp dport 443 accept\n  ip saddr 10.10.0.0/24 tcp dport 22 accept\n}\n```"
+        },
+        "selfExplanation": "Explain why \"default deny plus specific allows\" is safer than \"default allow plus specific denies\", especially on a NICo control-plane host that serves DHCP, DNS, PXE and APIs to many networks.",
+        "checks": [
+          {
+            "question": "Your curl to a server hangs for 30 seconds and then times out, rather than failing at once with \"connection refused\". What is the most likely firewall action?",
+            "options": [
+              "A drop rule (or drop policy) is discarding the packets silently",
+              "A reject rule is sending back an error",
+              "An accept rule matched",
+              "The server returned HTTP 403"
+            ],
+            "answer": "A drop rule (or drop policy) is discarding the packets silently",
+            "explanation": "Drop gives the client no answer, so it waits until it times out. Reject sends back an error (TCP reset or ICMP), which fails at once with \"connection refused\". An HTTP 403 means you did reach the server."
+          },
+          {
+            "question": "Why do default-deny rulesets usually start with `ct state established,related accept`?",
+            "options": [
+              "So replies to connections the host started (and to allowed inbound connections) get back in without a rule for every return path",
+              "So that every new inbound connection is allowed",
+              "To speed up DNS lookups",
+              "Because nftables requires it syntactically"
+            ],
+            "answer": "So replies to connections the host started (and to allowed inbound connections) get back in without a rule for every return path",
+            "explanation": "Connection tracking recognises packets that belong to existing flows. It doesn't allow *new* inbound connections, which is the tempting misreading, and nftables doesn't require it syntactically."
+          },
+          {
+            "question": "What does NICo's `deny_prefixes` site setting describe, in terms of this lesson?",
+            "options": [],
+            "answer": "A list of destination CIDRs that tenant instances must not reach, such as the OOB/BMC, control-plane and management networks. In effect, deny rules keyed on destination address.",
+            "explanation": "The Quick Start describes `deny_prefixes` as \"CIDRs instances must not reach (OOB, control plane, management)\". It's the same allow/deny idea, applied to tenant traffic by destination prefix."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "getting-started/quick-start.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Mini site-controller network lab: a token-protected API on a subnet you design, behind a firewall",
+      "goal": "Build a small Docker network on a subnet you choose with static IPs. On it, run a Python HTTP API that needs a bearer token, plus two client containers. Explore the Layer 2 and Layer 3 behaviour between them, then add a default-deny firewall so that only the \"management\" client can reach the API port.",
+      "whyItMatters": "This is NICo's control-plane pattern in miniature. NICo services such as nico-api, DHCP and PXE sit on planned IP addresses, clients call REST APIs with `Authorization: Bearer` tokens, and the docs recommend allowing only the needed ports from trusted networks and blocking everything else. Doing it once by hand makes the address pools, VIPs, status codes and firewall guidance in the NICo deployment docs concrete.",
+      "setup": [
+        "Docker (Docker Desktop on macOS, or Docker Engine on Linux). Podman 4+ also works: replace `docker` with `podman`",
+        "Python 3 on your laptop, for the address-planning script",
+        "About 100 MB of disk for an Alpine-based image",
+        "A free private subnet. The steps use 172.28.5.0/24; pick another if it clashes with your LAN or VPN"
+      ],
+      "steps": [
+        {
+          "subgoal": "Plan the addresses",
+          "detail": "Create a working directory and a planning script:\n```bash\nmkdir -p ~/nicolab && cd ~/nicolab\ncat > plan.py <<'EOF'\nimport ipaddress as ia\nlab = ia.ip_network(\"172.28.5.0/24\")\nprint(\"lab:\", lab, \"size\", lab.num_addresses, \"usable\", lab.num_addresses - 2)\nplan = {\"gateway\": \"172.28.5.1\", \"api\": \"172.28.5.10\", \"mgmt\": \"172.28.5.20\", \"other\": \"172.28.5.30\"}\nfor name, ip in plan.items():\n    assert ia.ip_address(ip) in lab, name\n    print(f\"{name:8} {ip}\")\n# Paper exercise: carve point-to-point links and loopbacks like NICo does\nlinks = list(ia.ip_network(\"10.99.0.0/29\").subnets(new_prefix=31))\nprint(\"p2p links:\", [f\"{l} ({l[0]} <-> {l[1]})\" for l in links])\nprint(\"loopbacks:\", [str(n) for n in ia.ip_network(\"10.99.1.0/30\").subnets(new_prefix=32)])\nEOF\npython3 plan.py\n```\nYou should see 4 /31 links and 4 /32 loopbacks."
+        },
+        {
+          "subgoal": "Write the token-protected API",
+          "detail": "```bash\ncat > api.py <<'EOF'\nimport json\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n\nTOKEN = \"lab-token\"\nMACHINES = [{\"id\": \"m1\", \"bmc_mac\": \"C4:5A:B1:C8:38:0D\", \"state\": \"Ready\"}]\n\nclass Handler(BaseHTTPRequestHandler):\n    def send_json(self, code, body):\n        data = json.dumps(body).encode()\n        self.send_response(code)\n        self.send_header(\"Content-Type\", \"application/json\")\n        self.send_header(\"Content-Length\", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\n    def do_GET(self):\n        if self.path == \"/v1/health\":\n            return self.send_json(200, {\"status\": \"ok\"})\n        if self.path == \"/v1/machines\":\n            if self.headers.get(\"Authorization\") != f\"Bearer {TOKEN}\":\n                return self.send_json(401, {\"error\": \"missing or invalid token\"})\n            return self.send_json(200, {\"machines\": MACHINES})\n        self.send_json(404, {\"error\": \"not found\"})\n\nHTTPServer((\"0.0.0.0\", 8080), Handler).serve_forever()\nEOF\n\ncat > Dockerfile <<'EOF'\nFROM alpine:3.20\nRUN apk add --no-cache python3 curl nftables iproute2 iputils\nWORKDIR /app\nCOPY api.py /app/api.py\nEOF\ndocker build -t nicolab .\n```"
+        },
+        {
+          "subgoal": "Create the subnet and start the containers on static IPs",
+          "detail": "```bash\ndocker network create --subnet 172.28.5.0/24 --gateway 172.28.5.1 nicolab\ndocker run -d --name api   --network nicolab --ip 172.28.5.10 --cap-add NET_ADMIN nicolab python3 -u /app/api.py\ndocker run -d --name mgmt  --network nicolab --ip 172.28.5.20 nicolab sleep infinity\ndocker run -d --name other --network nicolab --ip 172.28.5.30 nicolab sleep infinity\ndocker ps --format '{{.Names}}\\t{{.Status}}'\n```\nThe Docker network is a Linux bridge, which is a software Layer 2 switch, and the `--gateway` is the router address for this subnet."
+        },
+        {
+          "subgoal": "Observe Layer 2 and Layer 3 from inside a client",
+          "detail": "```bash\ndocker exec mgmt ip -4 addr show eth0      # 172.28.5.20/24\ndocker exec mgmt ip route                  # default via 172.28.5.1; 172.28.5.0/24 is directly attached\ndocker exec mgmt ip route get 172.28.5.10  # no 'via': same subnet, delivered directly\ndocker exec mgmt ip route get 1.1.1.1      # 'via 172.28.5.1': goes to the gateway\ndocker exec mgmt ping -c 2 172.28.5.10\ndocker exec mgmt ip neigh                  # api's MAC, learned via ARP\ndocker exec api ip link show eth0          # compare: the same MAC on the api side\n```\nWrite down which addresses are Layer 2 (MAC) and which are Layer 3 (IP)."
+        },
+        {
+          "subgoal": "Exercise the HTTP API and its status codes",
+          "detail": "```bash\nAPI=http://172.28.5.10:8080\ndocker exec mgmt curl -s -i $API/v1/health\ndocker exec mgmt curl -s -o /dev/null -w '%{http_code}\\n' $API/v1/machines                                    # 401\ndocker exec mgmt curl -s -o /dev/null -w '%{http_code}\\n' -H 'Authorization: Bearer lab-token' $API/v1/machines  # 200\ndocker exec mgmt curl -s -o /dev/null -w '%{http_code}\\n' $API/v1/nope                                         # 404\ndocker exec other curl -s -o /dev/null -w '%{http_code}\\n' $API/v1/health                                      # 200 (no firewall yet)\ndocker logs api | tail -5\n```"
+        },
+        {
+          "subgoal": "Add a default-deny firewall on the API container",
+          "detail": "Allow ICMP from anyone (so ping still works) and TCP 8080 only from the mgmt client. Drop the rest.\n```bash\ncat > fw.nft <<'EOF'\ntable inet lab {\n  chain input {\n    type filter hook input priority 0; policy drop;\n    ct state established,related accept\n    iif \"lo\" accept\n    ip protocol icmp accept\n    ip saddr 172.28.5.20 tcp dport 8080 accept\n  }\n}\nEOF\ndocker exec -i api nft -f - < fw.nft\ndocker exec api nft list ruleset\n```\nThe container's ruleset now matches your file, and your laptop's own firewall is untouched."
+        }
+      ],
+      "verify": "Run:\n```bash\nAPI=http://172.28.5.10:8080\ndocker exec mgmt  curl -s -o /dev/null -w 'mgmt+token: %{http_code}\\n' -H 'Authorization: Bearer lab-token' $API/v1/machines\ndocker exec mgmt  curl -s -o /dev/null -w 'mgmt no token: %{http_code}\\n' $API/v1/machines\ndocker exec other ping -c 1 -W 2 172.28.5.10 >/dev/null && echo 'other ping: ok'\ndocker exec other curl -s -m 3 -o /dev/null -w 'other http: %{http_code}\\n' $API/v1/health; echo \"other curl exit=$?\"\n```\nYou're done when you see `mgmt+token: 200`, `mgmt no token: 401`, `other ping: ok`, `other http: 000` and `other curl exit=28`. Exit code 28 is a timeout, which shows the packets were silently dropped by the firewall rather than refused. ICMP still gets through, so the block is specific to TCP port 8080.",
+      "hints": [
+        "`Error response from daemon: Pool overlaps with other one on this address space`: another Docker network or your LAN/VPN already uses 172.28.5.0/24. Pick another private /24 (such as 172.29.77.0/24) and update every IP in the steps and in plan.py.",
+        "`nft: Operation not permitted`: the api container was started without `--cap-add NET_ADMIN`. Run `docker rm -f api` and start it again with the flag.",
+        "`Could not process rule: No such file or directory` from nft: your kernel or VM lacks nf_tables. Add `iptables` to the Dockerfile and use `iptables -P INPUT DROP; iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT; iptables -A INPUT -i lo -j ACCEPT; iptables -A INPUT -p icmp -j ACCEPT; iptables -A INPUT -s 172.28.5.20 -p tcp --dport 8080 -j ACCEPT`.",
+        "curl exit code 7 (connection refused) instead of 28: something sent back a reset. Either the API isn't running (`docker logs api`) or your rule uses reject instead of drop.",
+        "mgmt is also blocked after you add the firewall: check the source address in the accept rule matches `docker exec mgmt ip -4 addr` exactly. Rules match on the packet's real source IP.",
+        "Podman rootless: static `--ip` needs a user-defined network (`podman network create --subnet ...`). Netavark, the default in Podman 4+, supports it."
+      ],
+      "stretch": "Add routing. Create a second network `nicolab2` on 172.28.6.0/24 and start a `router` container attached to both networks (`docker network connect`), with `--cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1`. Start a `far` client on nicolab2 with NET_ADMIN, and add a route on it: `ip route add 172.28.5.0/24 via <router's 172.28.6.x address>`. Also add the reverse route on `mgmt` (restart it with NET_ADMIN). Then show with `traceroute -n` and `ip neigh` that `far` → `api` crosses one router hop, that `far` only ever ARPs for the router's MAC, and that the API sees `far`'s real IP in its logs. Finally, extend `fw.nft` so `far`'s whole subnet (a CIDR rule) can reach `/v1/health`, and explain why a host firewall can't filter by URL path."
+    }
+  }
+}

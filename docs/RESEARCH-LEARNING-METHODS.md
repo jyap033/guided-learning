@@ -36,6 +36,76 @@
 The current design already does #6 well, does #1 and #3 partly, and is
 missing #2, #4 and #5. Section 4 lists the changes.
 
+## Mind map
+
+GitHub draws this automatically. Elsewhere, paste it into
+<https://mermaid.live>.
+
+```mermaid
+mindmap
+  root((How to learn hard technical topics))
+    Remember it
+      Practice testing
+        Quizzes are the lesson
+        Roediger and Karpicke 2006
+      Spaced review
+        Expanding schedule
+        Cepeda et al 2006
+      Interleaving
+        Mix topics in review
+      Pretesting
+        Guess before the lesson
+    Right amount of guidance
+      Worked examples first
+        Sweller and Cooper 1985
+      Fade guidance as skill grows
+        Expertise reversal
+      Productive failure
+        Short attempt, then teach
+        Conceptual ideas only
+      No unguided discovery
+        Kirschner et al 2006
+    Mastery and feedback
+      Master before moving on
+        Bloom 1984
+        Kulik et al 1990
+      Feedback on every step
+        VanLehn 2011
+      Knowledge tracing
+        Mastery per concept
+    Active and constructive
+      Self-explanation
+      Ask why
+      ICAP framework
+    Build real things
+      Whole tasks, simple to complex
+        4C/ID model
+      Concepts just in time
+      Cognitive apprenticeship
+      Subgoal labels
+    Big picture
+      Advance organisers
+      Concept maps
+      Placement using the prerequisite map
+        Knowledge space theory
+    AI tutors
+      No guardrails harms learning
+        Bastani 2025
+      Guardrailed tutor beats class
+        Kestin 2025
+      Staged hints, no answers
+    AI-built prerequisite maps
+      Recursive tracing to what you know
+        RPKT 2025
+      Use the order the docs teach in
+      Few-shot prompts
+      Drop ambiguous edges
+    Avoid
+      Learning styles
+      Rereading and highlighting
+      Summary-only lessons
+```
+
 ---
 
 ## 1. What works: the evidence

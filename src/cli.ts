@@ -9,7 +9,8 @@ import { ClaudeCodeProvider } from "./llm/claudeCode.ts";
 import { AnthropicProvider } from "./llm/anthropic.ts";
 import { buildCurriculum, fetchSource, ingest } from "./pipeline/build.ts";
 import { renderCurriculum, renderMindmapFile, renderReport } from "./render/markdown.ts";
-import { buildChapterLessons } from "./pipeline/lessons.ts";
+import YAML from "yaml";
+import { buildChapterLessons, type Feedback } from "./pipeline/lessons.ts";
 import { chapterFileName, renderChapter } from "./render/lessons.ts";
 import type { Curriculum } from "./graph/types.ts";
 
@@ -91,6 +92,8 @@ program
     fetchSource(topic, paths, log);
     const pages = ingest(topic, paths);
     const docsBase = `${topic.source.repo}/blob/${topic.source.ref}/${topic.source.docsDir}`;
+    const feedbackFile = path.join(path.dirname(paths.topicFile), "feedback.yaml");
+    const feedback = fs.existsSync(feedbackFile) ? (YAML.parse(fs.readFileSync(feedbackFile, "utf8")) as Feedback) : {};
     const numbers = parseRange(o.chapters);
     const files = new Map(cur.chapters.map((c) => [c.number, chapterFileName(c.number, c.title)]));
     const outDir = path.join(paths.out, "chapters");
@@ -98,7 +101,7 @@ program
 
     await mapLimit(numbers, Number(o.concurrency), async (n) => {
       log(`chapter ${n}: writing`);
-      const result = await buildChapterLessons(cur, pages, n, { provider, maxPageChars: Number(o.pageChars) });
+      const result = await buildChapterLessons(cur, pages, n, { provider, maxPageChars: Number(o.pageChars), feedback });
       const file = files.get(n) as string;
       fs.writeFileSync(path.join(outDir, file), renderChapter(result, docsBase, { prev: files.get(n - 1), next: files.get(n + 1) }));
       fs.writeFileSync(path.join(outDir, file.replace(/\.md$/, ".json")), JSON.stringify(result.lessons, null, 2) + "\n");

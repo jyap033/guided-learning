@@ -50,6 +50,20 @@ describe("chapterContext", () => {
   });
 });
 
+describe("feedback and rendering", () => {
+  it("passes general and per-chapter tester findings into the prompt", async () => {
+    const ctx = chapterContext(cur, pages, 2, 1000, { general: ["G"], chapters: { 2: ["C2"], 1: ["C1"] } });
+    expect(ctx.feedback).toEqual(["G", "C2"]);
+    const { chapterLessonTask } = await import("../src/pipeline/lessonPrompts.ts");
+    expect(chapterLessonTask(ctx).user).toContain("- C2");
+  });
+  it("fences partial solutions so indentation survives", async () => {
+    const { asCode } = await import("../src/render/lessons.ts");
+    expect(asCode("racks:\n  ___ name: R01")).toBe("```text\nracks:\n  ___ name: R01\n```");
+    expect(asCode("```yaml\na: 1\n```")).toBe("```yaml\na: 1\n```");
+  });
+});
+
 describe("chapterLessonSchema", () => {
   const schema = chapterLessonSchema(["dhcp", "pxe"], ["net.md"]);
   it("accepts one lesson per concept", () => {
@@ -91,6 +105,6 @@ describe("buildChapterLessons", () => {
     expect(md).toContain("<details>");
     expect(md).toContain("**B.** B1");
     expect(md).toContain("[net.md](https://docs/net.md)");
-    expect(md).toContain("rewritten using the review");
+    expect(md).toContain("rewritten using them");
   });
 });

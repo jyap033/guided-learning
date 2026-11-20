@@ -1,0 +1,46 @@
+# Findings from actually working through generated chapters (DESIGN §11).
+# They are given to the lesson writer and the reviewer, so a rebuild fixes them.
+# `general` applies to every chapter; `chapters.<n>` to one chapter.
+
+general:
+  - >-
+    Docker Engine 28 and later adds raw-table rules that drop packets addressed
+    to a container's IP unless they arrive on that container's own bridge. Labs
+    that route between two Docker networks through a "router" container
+    therefore do not work on current Docker. For routing labs, use Linux
+    network namespaces with veth pairs inside one `docker run --privileged`
+    container (tested: `ip netns add`, `ip link add ... type veth peer name ...
+    netns ...`, `ip -n <ns> addr/route`, `ip netns exec router sysctl -w
+    net.ipv4.ip_forward=1`; traceroute shows the router hop and the server
+    sees the client's real source IP).
+  - >-
+    Python's http.server logs requests to stderr. `docker logs <c> | tail`
+    does not filter stderr; write `docker logs <c> 2>&1 | tail`.
+  - >-
+    Partly completed code or config must be valid once the blanks are filled
+    exactly as the answer says. Check indentation-sensitive formats (YAML,
+    Python) character by character.
+
+chapters:
+  1:
+    - >-
+      Tested 2026-11-20: the build task (site-inventory resolver) works exactly
+      as written; keep its data, expected output and traps.
+    - >-
+      The YAML completion problem was broken: the template had `  ___ name: R01`
+      and the answer said the blank is "- " (dash and space), which gives
+      `  -  name: R01` and fails to parse. A blank must stand for exactly the
+      missing characters.
+  3:
+    - >-
+      Tested 2026-11-20 on Docker 29: steps 1-6 and "Check it works" of the
+      network lab work exactly as written (401/200/404, curl exit 28 after the
+      firewall). Keep them.
+    - >-
+      `docker exec api nft list ruleset` also prints Docker's own `table ip nat`
+      rules, so don't claim the ruleset "matches your file"; say your
+      `table inet lab` appears alongside Docker's NAT table.
+    - >-
+      The stretch goal (router container between two Docker networks) fails on
+      Docker 28+ (see general note). Rewrite it with network namespaces in one
+      privileged container.

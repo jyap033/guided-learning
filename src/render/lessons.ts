@@ -1,5 +1,11 @@
 import type { ChapterResult } from "../pipeline/lessons.ts";
 
+/** Show code-like text in a fenced block so indentation and ___ blanks survive Markdown. */
+export function asCode(text: string): string {
+  const t = text.replace(/^\n+|\s+$/g, "");
+  return t.includes("```") ? t : "```text\n" + t + "\n```";
+}
+
 const details = (summary: string, body: string) => `<details>\n<summary>${summary}</summary>\n\n${body.trim()}\n\n</details>`;
 
 /** One chapter as a Markdown page. Answers sit in collapsed blocks so the learner tries first. */
@@ -28,7 +34,7 @@ export function renderChapter(r: ChapterResult, docsBase: string, opts: { prev?:
     out.push("### Explanation", "", x.explanation.trim(), "", `**Analogy.** ${x.analogy.trim()}`, "");
     out.push(`### Worked example: ${x.workedExample.title}`, "");
     x.workedExample.steps.forEach((s, k) => out.push(`**Step ${k + 1}: ${s.subgoal}.**`, "", s.detail.trim(), ""));
-    out.push("### Your turn: finish it", "", x.completionProblem.prompt.trim(), "", x.completionProblem.partialSolution.trim(), "");
+    out.push("### Your turn: finish it", "", x.completionProblem.prompt.trim(), "", asCode(x.completionProblem.partialSolution), "");
     out.push(details("Answer", x.completionProblem.answer), "");
     out.push("### Your turn: on your own", "", x.independentProblem.prompt.trim(), "");
     x.independentProblem.hints.forEach((h, k) => out.push(details(`Hint ${k + 1}`, h), ""));
@@ -63,7 +69,8 @@ export function renderChapter(r: ChapterResult, docsBase: string, opts: { prev?:
   out.push(`**Stretch goal:** ${b.stretch}`, "");
 
   out.push("## Review notes", "");
-  if (r.revised) out.push("The first draft had major issues and was rewritten using the review; the notes below are from reviewing the rewrite.", "");
+  if (r.revised) out.push("The first draft had review issues and was rewritten using them; the notes below are from reviewing the rewrite.", "");
+  if (ctx.feedback.length) out.push(`This chapter was written with ${ctx.feedback.length} finding(s) from testing earlier versions (\`topics/<topic>/feedback.yaml\`).`, "");
   if (!review.issues.length) out.push(`Automated review: **${review.verdict}**, no issues found.`, "");
   else {
     out.push(`Automated review: **${review.verdict}**. Issues to fix before relying on this chapter:`, "");

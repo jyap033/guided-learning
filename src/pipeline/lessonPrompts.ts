@@ -87,7 +87,14 @@ export interface ChapterContext {
   /** Concepts the learner can assume (taught earlier or starting knowledge). */
   alreadyCovered: string[];
   pages: Page[];
+  /** Findings from testing earlier versions (topics/<id>/feedback.yaml). Must be addressed. */
+  feedback: string[];
 }
+
+const feedbackBlock = (ctx: ChapterContext) =>
+  ctx.feedback.length
+    ? `\n\nFindings from people testing earlier versions of this course. These are verified; follow them:\n${ctx.feedback.map((f) => `- ${f}`).join("\n")}`
+    : "";
 
 const LESSON_SYSTEM = `You write lessons for a self-paced course that takes a software engineer from fundamentals to building with a complex infrastructure system. Your lessons follow learning research:
 
@@ -114,7 +121,7 @@ export function chapterLessonTask(ctx: ChapterContext): LlmTask<ChapterLessons> 
     .join("\n\n");
   return {
     kind: "lessons",
-    promptVersion: "1",
+    promptVersion: "2",
     system: LESSON_SYSTEM,
     user: `Course: ${ctx.topicName}
 Course goal: ${ctx.goal}
@@ -127,7 +134,7 @@ Concepts to teach in this chapter, in this order (one lesson each, use these ids
 ${concepts}
 
 Relevant docs pages:
-${pages || "(none: these are background concepts; rely on well-established knowledge)"}`,
+${pages || "(none: these are background concepts; rely on well-established knowledge)"}${feedbackBlock(ctx)}`,
     schema: chapterLessonSchema(
       ctx.concepts.map((c) => c.id),
       ctx.pages.map((p) => p.path),
@@ -172,12 +179,14 @@ export function reviewTask(ctx: ChapterContext, lessons: ChapterLessons): LlmTas
   const pages = ctx.pages.map((p) => `<page path="${p.path}">\n${p.text}\n</page>`).join("\n\n");
   return {
     kind: "review",
-    promptVersion: "1",
+    promptVersion: "2",
     system: `You are a strict technical reviewer for a course chapter. Check it against the docs pages provided and well-established technical knowledge. Report:
 - factual errors or claims about the system that the pages don't support (major),
 - invented commands, flags or APIs (major),
 - check questions whose answer is wrong or ambiguous (major),
 - build steps that would not work as written, or a verify step that doesn't prove the task (major),
+- any exercise whose given answer does not actually work when followed exactly, e.g. a filled-in blank that breaks YAML indentation, or a command whose output differs from what the text says (major),
+- findings from testers (listed below, if any) that the chapter does not address (major),
 - explanations that rely on a concept not yet covered, or are confusing (minor).
 Do not report style preferences. An empty issue list with verdict "ok" is a fine answer.`,
     user: `Chapter ${ctx.chapter.number}: ${ctx.chapter.title}
@@ -187,7 +196,7 @@ Chapter content (JSON):
 ${JSON.stringify(lessons, null, 1)}
 
 Docs pages:
-${pages || "(none)"}`,
+${pages || "(none)"}${feedbackBlock(ctx)}`,
     schema: ReviewSchema,
   };
 }

@@ -3,11 +3,17 @@ import type { LlmProvider } from "../llm/provider.ts";
 import type { Curriculum } from "../graph/types.ts";
 import { chapterLessonTask, reviseTask, reviewTask, type ChapterContext, type ChapterLessons, type Review } from "./lessonPrompts.ts";
 
+/** Tester findings, from topics/<id>/feedback.yaml. */
+export interface Feedback {
+  general?: string[];
+  chapters?: Record<number, string[]>;
+}
+
 export interface ChapterResult {
   context: ChapterContext;
   lessons: ChapterLessons;
   review: Review;
-  /** True when a first draft had major issues and was rewritten. */
+  /** True when the first draft had review issues and was rewritten. */
   revised: boolean;
 }
 
@@ -17,7 +23,13 @@ export interface ChapterResult {
  * docs pages that mention the chapter's concepts (most-mentioned first, up to
  * `maxPageChars`).
  */
-export function chapterContext(cur: Curriculum, pages: Page[], chapterNumber: number, maxPageChars: number): ChapterContext {
+export function chapterContext(
+  cur: Curriculum,
+  pages: Page[],
+  chapterNumber: number,
+  maxPageChars: number,
+  feedback: Feedback = {},
+): ChapterContext {
   const chapter = cur.chapters.find((c) => c.number === chapterNumber);
   if (!chapter) throw new Error(`no chapter ${chapterNumber} (there are ${cur.chapters.length})`);
   const byId = new Map(cur.concepts.map((c) => [c.id, c]));
@@ -70,6 +82,7 @@ export function chapterContext(cur: Curriculum, pages: Page[], chapterNumber: nu
     earlierChapters: earlier.map((c) => ({ number: c.number, title: c.title })),
     alreadyCovered,
     pages: chosen,
+    feedback: [...(feedback.general ?? []), ...(feedback.chapters?.[chapterNumber] ?? [])],
   };
 }
 
@@ -77,9 +90,9 @@ export async function buildChapterLessons(
   cur: Curriculum,
   pages: Page[],
   chapterNumber: number,
-  opts: { provider: LlmProvider; maxPageChars: number },
+  opts: { provider: LlmProvider; maxPageChars: number; feedback?: Feedback },
 ): Promise<ChapterResult> {
-  const context = chapterContext(cur, pages, chapterNumber, opts.maxPageChars);
+  const context = chapterContext(cur, pages, chapterNumber, opts.maxPageChars, opts.feedback);
   const order = new Map(context.concepts.map((c, i) => [c.id, i]));
   const sorted = (l: ChapterLessons) => {
     // keep lessons in the chapter's teaching order
@@ -89,8 +102,9 @@ export async function buildChapterLessons(
   let lessons = sorted(await opts.provider.complete(chapterLessonTask(context)));
   let review = await opts.provider.complete(reviewTask(context, lessons));
   let revised = false;
-  if (review.issues.some((i) => i.severity === "major")) {
-    // one rewrite with the reviewer's notes, then review the result again
+  if (review.issues.length) {
+    // one rewrite with the reviewer's notes, then review the result again.
+    // Minor issues count too: in testing, "minor" notes were often real bugs.
     lessons = sorted(await opts.provider.complete(reviseTask(context, lessons, review)));
     review = await opts.provider.complete(reviewTask(context, lessons));
     revised = true;

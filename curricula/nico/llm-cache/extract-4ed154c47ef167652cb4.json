@@ -1,0 +1,1090 @@
+{
+  "kind": "extract",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "concepts": [
+      {
+        "name": "DOCA Platform Framework (DPF)",
+        "aliases": [
+          "DPF",
+          "DPF operator"
+        ],
+        "definition": "NVIDIA's Kubernetes-based framework for provisioning BlueField DPUs and running services on them. NICo can use it as the provisioning backend for DPUs instead of iPXE.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Data Processing Unit (DPU)",
+        "aliases": [
+          "DPU",
+          "BlueField",
+          "BF3",
+          "BF4",
+          "SuperNIC"
+        ],
+        "definition": "A SmartNIC with its own Arm CPU and OS that sits in a host server and handles networking, security and storage offloads. NVIDIA BlueField-3 and BlueField-4 are the generations covered here.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "iPXE-based DPU provisioning",
+        "aliases": [
+          "iPXE",
+          "PXE boot"
+        ],
+        "definition": "The older, now deprecated NICo way of provisioning DPUs, where they network-boot with iPXE. A host stays on this path when dpf_enabled = false.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Kubernetes",
+        "aliases": [
+          "K8s",
+          "host cluster"
+        ],
+        "definition": "A container orchestration platform. Both NICo and DPF run on the same Kubernetes cluster, called the host cluster.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Kubernetes Custom Resource (CR/CRD)",
+        "aliases": [
+          "CR",
+          "CRD",
+          "custom resource"
+        ],
+        "definition": "A user-defined Kubernetes API object type. Operators reconcile these objects into real state. DPF exposes CRs such as DPUDeployment, DPUFlavor and BFB.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Kubernetes operator",
+        "aliases": [
+          "operator",
+          "controller",
+          "reconcile"
+        ],
+        "definition": "A controller that watches custom resources and keeps working to make the cluster's actual state match the state those resources declare.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Kubernetes Secret",
+        "aliases": [
+          "Secret",
+          "docker-registry secret",
+          "image pull secret"
+        ],
+        "definition": "A Kubernetes object that holds sensitive data such as passwords or registry credentials. Pods can reference it, for example to pull private images.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Kubernetes RBAC",
+        "aliases": [
+          "Role",
+          "RoleBinding",
+          "ClusterRole",
+          "ServiceAccount"
+        ],
+        "definition": "Kubernetes' role-based access control. Roles list the allowed verbs on resources, and bindings grant those roles to identities such as ServiceAccounts.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Helm chart",
+        "aliases": [
+          "Helm",
+          "values.yaml",
+          "helm repo"
+        ],
+        "definition": "A packaged, templated set of Kubernetes manifests, configured through values and installed with the helm CLI. DPF services and the DPF operator are all delivered as Helm charts.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Container image registry (NGC/nvcr.io)",
+        "aliases": [
+          "NGC",
+          "nvcr.io",
+          "NGC API key",
+          "OCI registry"
+        ],
+        "definition": "NVIDIA's NGC registry (nvcr.io) hosts DPF and NICo container images and Helm charts. Private repositories require an NGC API key, which is used with the username $oauthtoken.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Argo CD",
+        "aliases": [
+          "ArgoCD",
+          "Argo CD repository Secret"
+        ],
+        "definition": "A GitOps continuous-delivery tool for Kubernetes. DPF uses it to pull and deploy Helm charts. It finds repository credentials through Secrets labelled argocd.argoproj.io/secret-type: repository, and each Secret's URL must exactly match the repository URL requested.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "cert-manager",
+        "aliases": [
+          "CertificateRequest",
+          "CSR"
+        ],
+        "definition": "A Kubernetes add-on that issues and renews TLS certificates. DPF relies on it to mint short-lived certificates.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "cert-manager approver-policy",
+        "aliases": [
+          "CertificateRequestPolicy"
+        ],
+        "definition": "An optional cert-manager component that approves a certificate request only if a matching CertificateRequestPolicy allows it. Without a policy for dpf-operator-system, DPF's certificate requests stay Pending.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Kamaji",
+        "aliases": [
+          "TenantControlPlane",
+          "Kamaji DataStore"
+        ],
+        "definition": "A tool that runs Kubernetes control planes as pods inside a host cluster. DPF uses it to host the DPU cluster's control plane.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Node Feature Discovery (NFD)",
+        "aliases": [
+          "NFD",
+          "NodeFeatureRule"
+        ],
+        "definition": "A Kubernetes add-on that labels nodes based on their hardware features. With NICo, nodes are labelled through NFD's own config (PCI class 0200) instead of the NodeFeatureRules bundled with the DPF chart.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPFOperatorConfig",
+        "aliases": [],
+        "definition": "The operator-level DPF custom resource. For NICo it disables DPU auto-detection, turns on Redfish-based install, and sets the API server VIP and port, the Argo CD namespace, the MTU and the pull secrets.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPUCluster",
+        "aliases": [
+          "DPU cluster"
+        ],
+        "definition": "The DPF custom resource that defines the Kubernetes control plane DPU nodes join. Here it is Kamaji-based and reached through a keepalived VIP.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Virtual IP with keepalived/VRRP",
+        "aliases": [
+          "VIP",
+          "keepalived",
+          "VRRP",
+          "virtualRouterID"
+        ],
+        "definition": "A floating IP address that keepalived advertises on a host interface using the VRRP protocol. DPUs use it to reach their control plane. Each keepalived instance on a host needs a unique virtual router ID.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "MetalLB LoadBalancer Service",
+        "aliases": [
+          "MetalLB",
+          "LoadBalancer Service",
+          "address pool"
+        ],
+        "definition": "A bare-metal load-balancer implementation for Kubernetes LoadBalancer Services. Here it reserves and advertises the DPU cluster VIP, while keepalived handles the actual traffic.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Selectorless Service with manual Endpoints",
+        "aliases": [
+          "Endpoints"
+        ],
+        "definition": "A Kubernetes pattern: if a Service has no selector and an Endpoints object exists with the same name, Kubernetes uses those endpoints exactly as written. Here a dummy IP is used so the Service routes nothing.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Baseboard Management Controller (BMC)",
+        "aliases": [
+          "BMC"
+        ],
+        "definition": "An out-of-band management controller on a server board. Through it, an operator can control power, firmware and installs even when the main OS is not running.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Redfish API",
+        "aliases": [
+          "Redfish",
+          "installViaRedfish"
+        ],
+        "definition": "A standard REST API for managing hardware through BMCs. DPF uses it to install the DPU OS out-of-band.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Site-wide BMC root credential",
+        "aliases": [
+          "bmc-shared-password",
+          "bmc_site_wide_root",
+          "version 0 credential"
+        ],
+        "definition": "The shared BMC password that NICo applies to managed hardware. carbide-api copies its current version into the bmc-shared-password Secret every 60 seconds so DPF can reach BMCs. DPU registration is blocked until this credential is set.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Credential source modes (local / local_first / backend)",
+        "aliases": [
+          "local",
+          "local_first",
+          "backend",
+          "watched credential Secret"
+        ],
+        "definition": "Settings that decide where NICo reads the BMC root from: a locally mounted file or environment variable, or a persistent backend such as Vault or Postgres. In local mode, version 0 must exist before Core starts.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "HashiCorp Vault",
+        "aliases": [
+          "Vault",
+          "vault kv put"
+        ],
+        "definition": "A secrets-management system. A site can use it as the persistent backend for NICo credentials.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "BMC credential rotation",
+        "aliases": [
+          "credential rotation"
+        ],
+        "definition": "Moving managed BMCs to a new versioned password. DPF v26.4.0 does not support this, so rotation must not be staged while DPF manages any DPU.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "carbide-api (NICo Core)",
+        "aliases": [
+          "nico-api",
+          "Core",
+          "carbide-api"
+        ],
+        "definition": "NICo's central API server and orchestrator. With DPF enabled, it reads the [dpf] config once at startup and creates the DPF initialization objects.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "NICo site config ([dpf] section)",
+        "aliases": [
+          "carbide-api site config",
+          "carbide.toml",
+          "[dpf].enabled"
+        ],
+        "definition": "The TOML configuration mounted into carbide-api. Its [dpf] section switches on DPF and configures services, deployments, the proxy and bf.cfg parameters. Changes take effect only after a carbide-api restart.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "TOML",
+        "aliases": [],
+        "definition": "A configuration file format built from tables and key-value pairs. NICo's site config is written in it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "setup.sh automated install",
+        "aliases": [
+          "helm-prereqs/setup.sh",
+          "--skip-dpf"
+        ],
+        "definition": "The helm-prereqs bootstrap script. By default it installs the DPF stack as phase 5b and then deploys NICo Core with DPF enabled. Pass --skip-dpf to opt out.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPUService",
+        "aliases": [
+          "mandatory DPUServices",
+          "dts",
+          "doca_hbn",
+          "dpu_agent",
+          "dhcp_server",
+          "fmds",
+          "otel"
+        ],
+        "definition": "A containerized service that DPF deploys onto DPUs from a Helm chart. NICo deploys six mandatory ones: dts, doca-hbn, the DPU agent, the DHCP server, FMDS and otel.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPUService CR set (Interface/Template/Configuration/NAD)",
+        "aliases": [
+          "DPUServiceTemplate",
+          "DPUServiceConfiguration",
+          "DPUServiceInterface",
+          "DPUServiceNAD"
+        ],
+        "definition": "The DPF custom resources that carbide-api creates for each mandatory service. Together they define the service's chart, its configuration, its network interfaces and its network attachment.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Host-Based Networking (HBN)",
+        "aliases": [
+          "HBN",
+          "DOCA HBN",
+          "FRR"
+        ],
+        "definition": "The DPUService that runs FRR routing on the DPU so that the DPU acts as a routing switch for its host.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "FMDS metadata service",
+        "aliases": [
+          "FMDS",
+          "carbide-fmds",
+          "169.254.169.254"
+        ],
+        "definition": "NICo's metadata service running on the DPU. Guest instances query it at a link-local address, for example to get their hostname. It can also be configured for IPv6.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPU agent",
+        "aliases": [
+          "nico-dpu-agent",
+          "carbide-dpu-agent"
+        ],
+        "definition": "NICo's agent DPUService on each DPU. It configures networking and metadata and reports to the NICo API. It runs alongside an LLDP sidecar.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "LLDP",
+        "aliases": [
+          "lldpcli",
+          "LLDP-MED",
+          "nico-lldp-sidecar"
+        ],
+        "definition": "Link Layer Discovery Protocol, which switches and NICs use to advertise their neighbours. A sidecar collects LLDP data on the DPU for the DPU agent.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPUDeployment",
+        "aliases": [
+          "[dpf.deployments.*]",
+          "bf3",
+          "bf4_generic",
+          "bf4_astra"
+        ],
+        "definition": "The DPF custom resource that ties together a BFB or BlueField software, a flavor and service templates for one DPU generation. NICo creates one per active deployment: BF3 always, and BF4 generic or BF4 Astra when configured.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPUFlavor / DPUFlavorTemplate",
+        "aliases": [
+          "DPUFlavor",
+          "DPUFlavorTemplate",
+          "flavor"
+        ],
+        "definition": "The DPF custom resource that describes a DPU's OS configuration, such as bf.cfg parameters and the proxy drop-in. Its name includes a hash of its spec, so any change creates a new flavor and triggers DPU reprovisioning. Astra uses a Go-template variant.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "BFB (BlueField Bundle)",
+        "aliases": [
+          "BFB",
+          "bf-bundle",
+          "bfb_url",
+          "bluefield_software",
+          "PLDM firmware bundle"
+        ],
+        "definition": "The BlueField OS and firmware image installed on BF3 DPUs. BF4 instead uses an OS ISO plus PLDM firmware bundles keyed by PSID (the DPU model ID).",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "bf.cfg parameters",
+        "aliases": [
+          "extra_bfcfg_parameters",
+          "bfcfgParameters"
+        ],
+        "definition": "Install-time shell variables that the BFB installer sources, for example a hashed password for the DPU's ubuntu user. NICo appends them verbatim to the flavor.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPU reprovisioning",
+        "aliases": [
+          "reprovision"
+        ],
+        "definition": "Reinstalling a DPU's OS. This happens when its flavor or BFB changes, or when an operator triggers it, for example after enabling DPF on an existing host.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPUService rollout gating",
+        "aliases": [
+          "NodeEffect hold",
+          "dpu_service_sync_enabled",
+          "service-sync"
+        ],
+        "definition": "NICo marks DPUService updates as disruptive, so each DPU is held in DPF's NodeEffect phase until it matches its DPUDeployment. The hold is then released automatically for idle Ready hosts, or by an operator with dpf service-sync release.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPF maintenance hold (NodeEffect)",
+        "aliases": [
+          "NodeEffect",
+          "maintenance-operator",
+          "DPUNodeMaintenance"
+        ],
+        "definition": "A DPF phase where a DPU waits behind a maintenance hold before a disruptive change is applied. The DPU keeps serving traffic while it waits.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Expected machines",
+        "aliases": [
+          "expected_machines",
+          "dpf_enabled"
+        ],
+        "definition": "NICo's inventory of the hosts it expects to discover, keyed by BMC MAC address. Each entry's dpf_enabled flag (default true) chooses DPF or iPXE provisioning for that host.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "nico-admin-cli",
+        "aliases": [
+          "admin CLI"
+        ],
+        "definition": "NICo's operator command-line tool. It manages expected machines and credentials, and its dpf subcommands enable, inspect, snapshot and release holds on hosts.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Managed host state (Ready/HostInit)",
+        "aliases": [
+          "Ready",
+          "HostInit",
+          "machine state"
+        ],
+        "definition": "NICo's lifecycle state for a host. Rollout holds are released automatically only for hosts that are Ready and carry no tenant instance.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Tenant instance",
+        "aliases": [
+          "instance",
+          "assigned host"
+        ],
+        "definition": "A tenant workload allocated to a host. Releasing a hold on a host with an instance disrupts that tenant, so the operator must name the instance explicitly.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Site Explorer",
+        "aliases": [],
+        "definition": "The NICo component that discovers hardware through BMCs. It does not run until the BMC root credential and the host and DPU UEFI site defaults are all set.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "DPU agent bootstrap CA",
+        "aliases": [
+          "dpu_agent_bootstrap_ca",
+          "legacy_download",
+          "mounted"
+        ],
+        "definition": "The policy for how the DPU agent gets the root CA it uses to trust the NICo API: by the legacy download or from a mounted Secret or ConfigMap. Includes a procedure for rotating the root using an overlap bundle.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "TLS certificate chain and root CA",
+        "aliases": [
+          "root CA",
+          "intermediate certificate",
+          "trust anchor",
+          "mTLS"
+        ],
+        "definition": "A TLS server proves its identity with a leaf certificate that chains through intermediates up to a root CA. The client must already trust that root.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "HTTPS/SOCKS5 forward proxy for DPU egress",
+        "aliases": [
+          "[dpf.proxy]",
+          "https_proxy",
+          "no_proxy"
+        ],
+        "definition": "An optional proxy that DPUs route image pulls through. NICo puts it into a containerd systemd drop-in inside the DPUFlavor, so changing it triggers reprovisioning.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "containerd",
+        "aliases": [],
+        "definition": "The container runtime on each DPU that pulls and runs DPUService images.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Scalable Functions (SF)",
+        "aliases": [
+          "SF",
+          "service_vpc_slot_count",
+          "additional_managed_sf",
+          "PF_TOTAL_SF"
+        ],
+        "definition": "Lightweight virtual network functions carved from a DPU's physical function. NICo reserves SFs for HBN service-VPC interfaces and for extra capacity.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "Jumbo frames / MTU",
+        "aliases": [
+          "MTU",
+          "highSpeedMTU"
+        ],
+        "definition": "The maximum packet size on a link. 9000-byte jumbo frames are used on the high-speed fabric.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "IPv6 metadata transport",
+        "aliases": [
+          "fd00:76b9::254/127"
+        ],
+        "definition": "An optional setup that serves FMDS metadata over IPv6. It needs overlays on both the DPU agent chart (to select the HBN peer) and the FMDS chart (for the listener and address).",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "name": "BF4 Astra",
+        "aliases": [
+          "Astra",
+          "Weave",
+          "Xplane",
+          "Spectrum-X",
+          "partial-multiplane"
+        ],
+        "definition": "An opt-in BF4 deployment type. It uses a DPUFlavorTemplate and extra services (Weave DHCP agent, Weave flow controller, Xplane), needs a Spectrum-X runtime ConfigMap, and has multiplane maintenance settings.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/dpf.md"
+        ]
+      }
+    ],
+    "prerequisites": [
+      {
+        "concept": "DOCA Platform Framework (DPF)",
+        "requires": "Kubernetes operator",
+        "confidence": 0.85,
+        "why": "DPF is a Kubernetes operator driven by custom resources."
+      },
+      {
+        "concept": "DOCA Platform Framework (DPF)",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.9,
+        "why": "DPF exists to provision DPUs."
+      },
+      {
+        "concept": "Kubernetes operator",
+        "requires": "Kubernetes Custom Resource (CR/CRD)",
+        "confidence": 0.85,
+        "why": "Operators reconcile custom resources."
+      },
+      {
+        "concept": "Kubernetes Custom Resource (CR/CRD)",
+        "requires": "Kubernetes",
+        "confidence": 0.9,
+        "why": "CRs extend the Kubernetes API."
+      },
+      {
+        "concept": "Kubernetes RBAC",
+        "requires": "Kubernetes",
+        "confidence": 0.85,
+        "why": "RBAC controls access to Kubernetes resources."
+      },
+      {
+        "concept": "Kubernetes Secret",
+        "requires": "Kubernetes",
+        "confidence": 0.85,
+        "why": "A Secret is a Kubernetes object."
+      },
+      {
+        "concept": "Helm chart",
+        "requires": "Kubernetes",
+        "confidence": 0.85,
+        "why": "Helm packages Kubernetes manifests."
+      },
+      {
+        "concept": "Argo CD",
+        "requires": "Helm chart",
+        "confidence": 0.7,
+        "why": "In DPF, Argo CD pulls and deploys Helm charts."
+      },
+      {
+        "concept": "Argo CD",
+        "requires": "Kubernetes Secret",
+        "confidence": 0.7,
+        "why": "Repository credentials are stored in labelled Secrets."
+      },
+      {
+        "concept": "cert-manager approver-policy",
+        "requires": "cert-manager",
+        "confidence": 0.9,
+        "why": "Approver-policy is a cert-manager extension."
+      },
+      {
+        "concept": "cert-manager",
+        "requires": "TLS certificate chain and root CA",
+        "confidence": 0.7,
+        "why": "cert-manager issues TLS certificates."
+      },
+      {
+        "concept": "Kamaji",
+        "requires": "Kubernetes",
+        "confidence": 0.8,
+        "why": "Kamaji hosts Kubernetes control planes as pods."
+      },
+      {
+        "concept": "DPUCluster",
+        "requires": "Kamaji",
+        "confidence": 0.85,
+        "why": "The DPUCluster's control plane runs as a Kamaji TenantControlPlane."
+      },
+      {
+        "concept": "DPUCluster",
+        "requires": "Virtual IP with keepalived/VRRP",
+        "confidence": 0.75,
+        "why": "DPUs reach the control plane through a keepalived VIP."
+      },
+      {
+        "concept": "MetalLB LoadBalancer Service",
+        "requires": "Virtual IP with keepalived/VRRP",
+        "confidence": 0.6,
+        "why": "MetalLB reserves the same VIP that keepalived serves."
+      },
+      {
+        "concept": "Selectorless Service with manual Endpoints",
+        "requires": "MetalLB LoadBalancer Service",
+        "confidence": 0.5,
+        "why": "The dummy-Endpoints trick only makes sense alongside the VIP Service."
+      },
+      {
+        "concept": "DPFOperatorConfig",
+        "requires": "DOCA Platform Framework (DPF)",
+        "confidence": 0.9,
+        "why": "It configures the DPF operator."
+      },
+      {
+        "concept": "DPFOperatorConfig",
+        "requires": "Redfish API",
+        "confidence": 0.7,
+        "why": "It turns on Redfish-based DPU installation."
+      },
+      {
+        "concept": "Redfish API",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "Redfish is served by BMCs."
+      },
+      {
+        "concept": "Site-wide BMC root credential",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.9,
+        "why": "It is the password for the BMCs."
+      },
+      {
+        "concept": "Site-wide BMC root credential",
+        "requires": "Kubernetes Secret",
+        "confidence": 0.7,
+        "why": "It is published to DPF as the bmc-shared-password Secret."
+      },
+      {
+        "concept": "Credential source modes (local / local_first / backend)",
+        "requires": "Site-wide BMC root credential",
+        "confidence": 0.8,
+        "why": "The modes decide where that credential is read from."
+      },
+      {
+        "concept": "Credential source modes (local / local_first / backend)",
+        "requires": "HashiCorp Vault",
+        "confidence": 0.6,
+        "why": "Vault is the persistent backend option."
+      },
+      {
+        "concept": "BMC credential rotation",
+        "requires": "Site-wide BMC root credential",
+        "confidence": 0.85,
+        "why": "Rotation advances that credential to a new version."
+      },
+      {
+        "concept": "NICo site config ([dpf] section)",
+        "requires": "TOML",
+        "confidence": 0.8,
+        "why": "The site config is written in TOML."
+      },
+      {
+        "concept": "NICo site config ([dpf] section)",
+        "requires": "carbide-api (NICo Core)",
+        "confidence": 0.8,
+        "why": "carbide-api reads this config at startup."
+      },
+      {
+        "concept": "DPUService",
+        "requires": "Helm chart",
+        "confidence": 0.85,
+        "why": "Each DPUService is deployed from a Helm chart."
+      },
+      {
+        "concept": "DPUService",
+        "requires": "DOCA Platform Framework (DPF)",
+        "confidence": 0.85,
+        "why": "DPUService is a DPF concept."
+      },
+      {
+        "concept": "DPUService CR set (Interface/Template/Configuration/NAD)",
+        "requires": "DPUService",
+        "confidence": 0.85,
+        "why": "These CRs describe a DPUService."
+      },
+      {
+        "concept": "DPUDeployment",
+        "requires": "DPUFlavor / DPUFlavorTemplate",
+        "confidence": 0.8,
+        "why": "A DPUDeployment references a flavor."
+      },
+      {
+        "concept": "DPUDeployment",
+        "requires": "BFB (BlueField Bundle)",
+        "confidence": 0.8,
+        "why": "A DPUDeployment references a BFB or BlueField software."
+      },
+      {
+        "concept": "DPUDeployment",
+        "requires": "DPUService CR set (Interface/Template/Configuration/NAD)",
+        "confidence": 0.75,
+        "why": "A DPUDeployment references the service templates."
+      },
+      {
+        "concept": "DPUFlavor / DPUFlavorTemplate",
+        "requires": "bf.cfg parameters",
+        "confidence": 0.6,
+        "why": "A flavor carries bf.cfg parameters."
+      },
+      {
+        "concept": "DPUFlavor / DPUFlavorTemplate",
+        "requires": "DPU reprovisioning",
+        "confidence": 0.65,
+        "why": "A flavor change triggers reprovisioning."
+      },
+      {
+        "concept": "bf.cfg parameters",
+        "requires": "BFB (BlueField Bundle)",
+        "confidence": 0.75,
+        "why": "The BFB installer sources bf.cfg."
+      },
+      {
+        "concept": "Host-Based Networking (HBN)",
+        "requires": "DPUService",
+        "confidence": 0.7,
+        "why": "HBN is deployed as a DPUService."
+      },
+      {
+        "concept": "FMDS metadata service",
+        "requires": "DPUService",
+        "confidence": 0.6,
+        "why": "FMDS is deployed as a DPUService."
+      },
+      {
+        "concept": "IPv6 metadata transport",
+        "requires": "FMDS metadata service",
+        "confidence": 0.85,
+        "why": "It configures FMDS to serve over IPv6."
+      },
+      {
+        "concept": "IPv6 metadata transport",
+        "requires": "Host-Based Networking (HBN)",
+        "confidence": 0.75,
+        "why": "The DPU agent selects HBN's IPv6 peer."
+      },
+      {
+        "concept": "DPU agent",
+        "requires": "DPUService",
+        "confidence": 0.6,
+        "why": "The DPU agent is deployed as a DPUService."
+      },
+      {
+        "concept": "DPU agent bootstrap CA",
+        "requires": "TLS certificate chain and root CA",
+        "confidence": 0.85,
+        "why": "The policy is about choosing the trusted root CA."
+      },
+      {
+        "concept": "DPU agent bootstrap CA",
+        "requires": "DPU agent",
+        "confidence": 0.8,
+        "why": "It sets how the DPU agent gets its trust anchor."
+      },
+      {
+        "concept": "DPUService rollout gating",
+        "requires": "DPF maintenance hold (NodeEffect)",
+        "confidence": 0.85,
+        "why": "Gating works through NodeEffect holds."
+      },
+      {
+        "concept": "DPUService rollout gating",
+        "requires": "DPUDeployment",
+        "confidence": 0.8,
+        "why": "A hold is released only when the DPU matches its DPUDeployment."
+      },
+      {
+        "concept": "DPUService rollout gating",
+        "requires": "Managed host state (Ready/HostInit)",
+        "confidence": 0.7,
+        "why": "Automatic release depends on the host being Ready."
+      },
+      {
+        "concept": "DPUService rollout gating",
+        "requires": "Tenant instance",
+        "confidence": 0.6,
+        "why": "Hosts with tenant instances are not released automatically."
+      },
+      {
+        "concept": "Expected machines",
+        "requires": "iPXE-based DPU provisioning",
+        "confidence": 0.5,
+        "why": "dpf_enabled chooses between DPF and iPXE provisioning."
+      },
+      {
+        "concept": "HTTPS/SOCKS5 forward proxy for DPU egress",
+        "requires": "containerd",
+        "confidence": 0.7,
+        "why": "The proxy is applied as a containerd systemd drop-in."
+      },
+      {
+        "concept": "HTTPS/SOCKS5 forward proxy for DPU egress",
+        "requires": "DPUFlavor / DPUFlavorTemplate",
+        "confidence": 0.6,
+        "why": "The proxy setting is embedded in the flavor."
+      },
+      {
+        "concept": "Scalable Functions (SF)",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.8,
+        "why": "SFs are carved from a DPU's physical function."
+      },
+      {
+        "concept": "BF4 Astra",
+        "requires": "DPUDeployment",
+        "confidence": 0.75,
+        "why": "Astra is one kind of DPUDeployment."
+      },
+      {
+        "concept": "setup.sh automated install",
+        "requires": "Helm chart",
+        "confidence": 0.6,
+        "why": "The script installs everything through Helm charts."
+      },
+      {
+        "concept": "Container image registry (NGC/nvcr.io)",
+        "requires": "Kubernetes Secret",
+        "confidence": 0.5,
+        "why": "Access to the private registry is configured with pull Secrets."
+      },
+      {
+        "concept": "Site Explorer",
+        "requires": "Site-wide BMC root credential",
+        "confidence": 0.6,
+        "why": "Site Explorer needs this credential before it can run."
+      }
+    ]
+  }
+}

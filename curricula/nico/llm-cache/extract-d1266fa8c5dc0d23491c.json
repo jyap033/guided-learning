@@ -1,0 +1,1203 @@
+{
+  "kind": "extract",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "concepts": [
+      {
+        "name": "Managed Host",
+        "aliases": [
+          "ManagedHost"
+        ],
+        "definition": "A host whose lifecycle NICo manages, made up of the x86/ARM host with its GPUs, zero or more DPUs, the host BMC, and the DPU BMCs.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "Data Processing Unit (DPU)",
+        "aliases": [
+          "DPU",
+          "BlueField-2",
+          "BlueField-3",
+          "BlueField"
+        ],
+        "definition": "A programmable network card (NVIDIA BlueField) plugged into a host. It runs its own OS and NICo agents and handles that host's networking.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "DPU mode vs NIC mode",
+        "aliases": [
+          "NIC mode",
+          "DPU-NIC-mode"
+        ],
+        "definition": "BlueField devices can run as a full DPU that NICo manages, or as a plain NIC. Changing mode takes a host power cycle, and devices in NIC mode are not attached as managed DPUs.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "Baseboard Management Controller (BMC)",
+        "aliases": [
+          "BMC",
+          "HMC"
+        ],
+        "definition": "A separate controller on a server board that manages the server out-of-band (power, boot settings, sensors, firmware), whether or not the main OS is running.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md",
+          "architecture/backends/rms.md",
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "name": "Redfish API",
+        "aliases": [
+          "DMTF Redfish",
+          "Redfish"
+        ],
+        "definition": "A DMTF standard REST/HTTPS API that BMCs expose for inventory, power control, BIOS settings, boot order and sensors. Its resources sit under /redfish/v1.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/redfish_workflow.md",
+          "architecture/overview.md",
+          "architecture/backends/rms.md"
+        ]
+      },
+      {
+        "name": "libredfish and nv-redfish",
+        "aliases": [
+          "libredfish",
+          "nv-redfish"
+        ],
+        "definition": "The two Rust Redfish client libraries NICo uses. libredfish has vendor-specific implementations. nv-redfish generates typed code from the Redfish schema and is gradually replacing libredfish.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "gRPC",
+        "aliases": [
+          "gRPC reflection"
+        ],
+        "definition": "A remote procedure call framework that runs over HTTP/2 and uses protobuf. NICo Core, RMS and Flow expose their APIs over gRPC.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/flow.md",
+          "architecture/backends/rms.md",
+          "architecture/redfish_workflow.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "NICo Core",
+        "aliases": [
+          "nico-core",
+          "nico-api",
+          "carbide-api",
+          "Forge gRPC"
+        ],
+        "definition": "The central NICo control plane binary. It serves the gRPC API, runs the state machines for all managed resources, and is the only component that talks to the PostgreSQL database.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/flow.md",
+          "architecture/backends/rms.md",
+          "architecture/redfish_workflow.md",
+          "getting-started/installation-options/day0-machine-identity.md",
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "name": "NICo REST API",
+        "aliases": [
+          "nico-rest-api",
+          "nico-rest"
+        ],
+        "definition": "The REST service in front of NICo, used for tenant- and org-level operations such as per-org identity config. It runs Temporal workflows.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/installation-options/day0-machine-identity.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "NICo state machines",
+        "aliases": [
+          "State Machines",
+          "ManagedHost state machine"
+        ],
+        "definition": "Idempotent state-handling functions that move resources (hosts, network segments, IB and NVLink partitions) from their actual state toward the desired state. API handlers only set the desired state.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "Desired vs actual state reconciliation",
+        "aliases": [
+          "reconciliation"
+        ],
+        "definition": "A control pattern where requests record what should be true and background loops keep acting until the real system matches it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "name": "Site Explorer",
+        "aliases": [
+          "site-explorer"
+        ],
+        "definition": "A background module in NICo Core. It keeps crawling BMCs over Redfish, records inventory, pairs hosts with their DPUs, and starts ingestion once a host is ready.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "Expected Machines manifest",
+        "aliases": [
+          "Expected Machines",
+          "fallback_dpu_serial_numbers"
+        ],
+        "definition": "A list of the machines a NICo site should manage, with their BMC MAC addresses, factory default passwords and optional DPU serials. Site Explorer needs it to work.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "DPU-host pairing",
+        "aliases": [
+          "host-DPU matching"
+        ],
+        "definition": "Site Explorer works out which DPU belongs to which host by matching the serial numbers reported by host and DPU BMCs, then checks DPU mode and completeness.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/redfish_workflow.md",
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "name": "Host ingestion",
+        "aliases": [
+          "ingestion",
+          "ingestable state"
+        ],
+        "definition": "The process of bringing a discovered host under NICo management. It starts once all of the host's components are found, paired and on acceptable firmware.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md",
+          "architecture/flow.md"
+        ]
+      },
+      {
+        "name": "Preingestion Manager",
+        "aliases": [],
+        "definition": "A Core module that updates firmware, runs resets and recovers DPU BFB images on hosts that are too old to be ingested normally.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "name": "Machine Update Manager",
+        "aliases": [],
+        "definition": "A Core scheduler that picks hosts and DPUs with outdated firmware for automatic updates. The ManagedHost state machine then carries out the updates.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "name": "DHCP",
+        "aliases": [
+          "Dynamic Host Configuration Protocol",
+          "DHCP relay"
+        ],
+        "definition": "The protocol that devices use to get IP addresses and network settings automatically. Relays forward requests from other network segments to the server.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "nico-dhcp and Kea hook",
+        "aliases": [
+          "nico-dhcp",
+          "Kea"
+        ],
+        "definition": "NICo's central DHCP service, built as a Kea DHCP server hook. It is a stateless proxy that turns DHCP requests into gRPC discover_dhcp calls to Core, which assigns the IP addresses.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "Underlay and HostInband network segments",
+        "aliases": [
+          "Underlay",
+          "HostInband"
+        ],
+        "definition": "NICo's physical network segment types. Underlay carries BMC and DPU out-of-band interfaces. HostInband is shared by zero-DPU host OS interfaces and, optionally, their BMCs.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "PXE / iPXE network boot",
+        "aliases": [
+          "PXE",
+          "iPXE",
+          "nico-pxe",
+          "HTTP UEFI boot"
+        ],
+        "definition": "Booting a machine over the network instead of from a local disk. nico-pxe serves iPXE scripts, user-data and OS images over HTTP, for example nico.efi for DPUs and scout.efi for hosts.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "UEFI boot order and BIOS settings",
+        "aliases": [
+          "BIOS",
+          "UEFI",
+          "SR-IOV"
+        ],
+        "definition": "Firmware settings that decide which device a machine boots from and which platform features (such as SR-IOV) are on. NICo sets them through Redfish.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/redfish_workflow.md",
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "name": "cloud-init",
+        "aliases": [
+          "user-data"
+        ],
+        "definition": "A standard tool that configures a machine on first boot from supplied user-data. NICo uses it to pass the machine_id and API endpoint to a booting DPU.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "Scout",
+        "aliases": [
+          "scout"
+        ],
+        "definition": "A NICo agent that runs on hosts and DPUs. It collects inventory, runs cleanup when an instance is released, runs validation tests, and does health checks.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "DPU Agent",
+        "aliases": [
+          "dpu-agent",
+          "agent"
+        ],
+        "definition": "A NICo daemon on each managed DPU. It configures the DPU, runs health checks, configures the local DHCP server, serves the metadata service, and updates itself.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "Instance metadata service (IMDS / FMDS)",
+        "aliases": [
+          "IMDS",
+          "FMDS"
+        ],
+        "definition": "An HTTP API, served by the DPU agent, that workloads on a bare-metal instance call to learn about their instance (such as Machine ID) and to get identity tokens.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "Bare-metal instance and tenant",
+        "aliases": [
+          "instance",
+          "tenant",
+          "org"
+        ],
+        "definition": "A tenant (an organization) is given a managed host as a bare-metal instance to run its workloads. When the instance is released, the host is cleaned and reused.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "nico-hw-health",
+        "aliases": [
+          "hardware health service",
+          "FirmwareCollector"
+        ],
+        "definition": "A service that polls every host and DPU BMC over Redfish for sensors, firmware and logs. It exports Prometheus metrics and sends health reports to Core.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "Prometheus metrics",
+        "aliases": [
+          "Prometheus",
+          "/metrics",
+          "ServiceMonitor"
+        ],
+        "definition": "A pull-based monitoring system. Services expose numeric metrics over HTTP, and Prometheus scrapes and stores them.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md",
+          "architecture/backends/rms.md",
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "name": "ssh-console",
+        "aliases": [
+          "serial console"
+        ],
+        "definition": "A NICo service that gives tenants and admins virtual serial console access to hosts through their BMCs, and sends console output to Loki.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "name": "nico-dns and Unbound",
+        "aliases": [
+          "nico-dns",
+          "Unbound"
+        ],
+        "definition": "NICo's DNS setup. nico-dns is authoritative for NICo zones. The Unbound recursive resolver answers managed machines and forwards NICo zone queries to nico-dns.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "name": "InfiniBand partitions and UFM",
+        "aliases": [
+          "UFM",
+          "pkey",
+          "IB Fabric Monitor"
+        ],
+        "definition": "InfiniBand networks are split into partitions identified by pkeys, managed by NVIDIA's UFM fabric manager. NICo's IB Fabric Monitor uses UFM to bind host ports to the right partitions.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "name": "NVLink partitions and NMX-C",
+        "aliases": [
+          "NVLink Manager",
+          "MNNVL",
+          "NMX-C",
+          "NVLink domain"
+        ],
+        "definition": "NVLink logical partitions group GPUs across a multi-node NVLink domain. NICo's NVLink Manager keeps them in line with the NMX-C controller.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/backends/rms.md",
+          "architecture/flow.md"
+        ]
+      },
+      {
+        "name": "Kubernetes",
+        "aliases": [
+          "K8s",
+          "StatefulSet",
+          "ConfigMap",
+          "Secret",
+          "namespace",
+          "Deployment"
+        ],
+        "definition": "The container orchestration platform that runs the NICo control plane. NICo uses its Deployments, StatefulSets, ConfigMaps, Secrets and namespaces.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/backends/rms.md",
+          "getting-started/installation-options/day0-credential-store.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "Helm charts and values",
+        "aliases": [
+          "Helm",
+          "helm-prereqs",
+          "extraEnv",
+          "siteConfig"
+        ],
+        "definition": "Helm packages Kubernetes manifests into charts, configured through values files. NICo and its prerequisites are installed this way.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "getting-started/installation-options/day0-credential-store.md",
+          "getting-started/installation-options/day0-machine-identity.md",
+          "architecture/backends/rms.md"
+        ]
+      },
+      {
+        "name": "NICo site config (TOML)",
+        "aliases": [
+          "site_config.toml",
+          "carbide-api-config.toml",
+          "nicoApiSiteConfig"
+        ],
+        "definition": "The TOML configuration file nico-api reads at startup, with sections such as [machine_identity], [secrets] and [rms]. Invalid sections can stop the API from starting.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/installation-options/day0-machine-identity.md",
+          "getting-started/installation-options/day0-credential-store.md",
+          "architecture/backends/rms.md"
+        ]
+      },
+      {
+        "name": "Day 0 vs Day 1 configuration",
+        "aliases": [
+          "Day 0",
+          "Day 1"
+        ],
+        "definition": "Day 0 is the site-wide setup done once at bring-up. Day 1 is the later per-tenant or per-org configuration built on top of it.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/installation-options/day0-machine-identity.md",
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "name": "PostgreSQL",
+        "aliases": [
+          "Postgres",
+          "nicodb"
+        ],
+        "definition": "The relational database that stores NICo state (nicodb). RMS and Flow use it as well, each with its own database.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "architecture/flow.md",
+          "architecture/backends/rms.md",
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "name": "HashiCorp Vault",
+        "aliases": [
+          "Vault",
+          "OpenBao",
+          "Vault KV",
+          "Transit"
+        ],
+        "definition": "A secrets management server. NICo uses it by default to store credentials (KV) and to issue certificates. Its Transit engine can also hold encryption keys.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md",
+          "getting-started/installation-options/day0-credential-store.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "Envelope encryption and KEK",
+        "aliases": [
+          "KEK",
+          "key encryption key",
+          "master encryption key",
+          "data key",
+          "re-wrap"
+        ],
+        "definition": "Data is encrypted with data keys, and those keys are in turn encrypted (wrapped) with a master key encryption key (KEK). You keep the KEK safe and track its key ID so you can rotate it.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/installation-options/day0-credential-store.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "AES-GCM symmetric encryption",
+        "aliases": [
+          "AES",
+          "256-bit key",
+          "AEAD"
+        ],
+        "definition": "An authenticated symmetric cipher that uses a shared secret key (here 256-bit) to provide both confidentiality and integrity. Additional authenticated data (AAD) binds extra context into the ciphertext.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/flow.md",
+          "getting-started/installation-options/day0-machine-identity.md",
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "name": "NICo credential store (secrets backends)",
+        "aliases": [
+          "[secrets]",
+          "Postgres secrets backend",
+          "KEK provider",
+          "Integrated provider",
+          "KMIP"
+        ],
+        "definition": "The way NICo stores BMC, UEFI and switch credentials. Vault is the default, or credentials can be kept encrypted per row in Postgres under a KEK from an Integrated, Transit or KMIP provider.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "name": "Factory default credentials",
+        "aliases": [
+          "kvSeeds",
+          "siteCredentials",
+          "nico-admin-cli credential add-*"
+        ],
+        "definition": "The vendor default BMC and UEFI passwords that NICo needs to log into new hardware for the first time. They can be seeded into Vault, imported, or added through the CLI.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/installation-options/day0-credential-store.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "TLS certificates and mutual TLS",
+        "aliases": [
+          "mTLS",
+          "TLS",
+          "CA",
+          "PEM"
+        ],
+        "definition": "TLS encrypts connections using certificates signed by a certificate authority (CA). With mutual TLS, both client and server present certificates and verify each other.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/backends/rms.md",
+          "getting-started/installation-options/day0-machine-identity.md",
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "name": "cert-manager and ClusterIssuer",
+        "aliases": [
+          "cert-manager",
+          "vault-nico-issuer",
+          "site-issuer"
+        ],
+        "definition": "cert-manager is a Kubernetes add-on that issues certificates. A ClusterIssuer is the cluster-wide signer it uses, backed by either Vault or a local site CA.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/installation-options/day0-credential-store.md",
+          "architecture/backends/rms.md"
+        ]
+      },
+      {
+        "name": "SPIFFE",
+        "aliases": [
+          "SPIFFE ID",
+          "trust domain",
+          "SVID",
+          "SPIFFE certificate"
+        ],
+        "definition": "A standard for workload identity. Workloads get a SPIFFE ID within a trust domain and prove it with an SVID, which is either an X.509 certificate or a JWT.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/installation-options/day0-machine-identity.md",
+          "architecture/backends/rms.md"
+        ]
+      },
+      {
+        "name": "JWT (JSON Web Token)",
+        "aliases": [
+          "JWT",
+          "ES256",
+          "JWKS",
+          "OIDC",
+          "Bearer token"
+        ],
+        "definition": "A signed, compact token that carries claims such as issuer, audience and expiry. Verifiers check its signature against the issuer's published keys (JWKS).",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "Machine identity (JWT-SVID issuance)",
+        "aliases": [
+          "machine identity",
+          "SignMachineIdentity",
+          "tenant-identity"
+        ],
+        "definition": "A NICo feature that signs short-lived SPIFFE JWT-SVIDs for workloads on instances, through the Core gRPC API or IMDS. Each org has its own signing keys, which are encrypted under the site KEK.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "Token delegation (RFC 8693 token exchange)",
+        "aliases": [
+          "RFC 8693",
+          "STS",
+          "token_endpoint"
+        ],
+        "definition": "An OAuth standard for exchanging one token for another at a security token service (STS). NICo can use it to delegate tokens to external STS endpoints, optionally through an egress proxy.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "Rate limiting (GCRA token bucket)",
+        "aliases": [
+          "GCRA",
+          "burst",
+          "requests-per-second"
+        ],
+        "definition": "An algorithm that caps the sustained request rate and allows short bursts. The DPU agent uses it for IMDS identity requests.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "name": "Temporal workflows",
+        "aliases": [
+          "Temporal"
+        ],
+        "definition": "A durable workflow engine that keeps the state of long-running, multi-step operations so they survive restarts. Flow and nico-rest use it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/flow.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "name": "NICo Flow",
+        "aliases": [
+          "Flow",
+          "operation rule",
+          "task schedule",
+          "operation run"
+        ],
+        "definition": "A service that tracks rack inventory and runs durable rack-level tasks (power, firmware, ingestion, bring-up). Each task follows an operation rule's ordered stages and runs on Temporal.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/flow.md"
+        ]
+      },
+      {
+        "name": "Component Manager",
+        "aliases": [
+          "component manager",
+          "CoreComputeTrayManager"
+        ],
+        "definition": "A pluggable layer that performs hardware operations for one class of component (compute tray, switch, power shelf) through a configured backend such as RMS or direct Redfish.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/flow.md",
+          "architecture/backends/rms.md"
+        ]
+      },
+      {
+        "name": "Rack Management Service (RMS)",
+        "aliases": [
+          "RMS",
+          "rms-api-server"
+        ],
+        "definition": "A separate NVIDIA service that NICo calls over mTLS gRPC to carry out rack-level hardware operations. It speaks Redfish, NVUE, SSH/SFTP and gNMI to the devices.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/backends/rms.md",
+          "architecture/flow.md"
+        ]
+      },
+      {
+        "name": "NVL rack components",
+        "aliases": [
+          "compute tray",
+          "NVSwitch tray",
+          "power shelf",
+          "NVUE",
+          "NVOS"
+        ],
+        "definition": "The hardware in an NVIDIA NVL rack: compute trays, NVSwitch trays (which run NVOS and are managed through NVUE), and power shelves.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/backends/rms.md"
+        ]
+      },
+      {
+        "name": "Firmware manifest and rack profile",
+        "aliases": [
+          "firmware_object",
+          "rack_profiles",
+          "apply_firmware_object"
+        ],
+        "definition": "A rack profile points to a JSON firmware manifest listing firmware components and artifact URLs. NICo forwards the manifest to RMS, and RMS downloads the artifacts itself.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/backends/rms.md"
+        ]
+      },
+      {
+        "name": "Asynchronous job polling",
+        "aliases": [
+          "job ID",
+          "get_job_status",
+          "terminal state"
+        ],
+        "definition": "A pattern where a request returns a job ID right away, and the caller polls a status API until the job reaches completed or failed.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/backends/rms.md"
+        ]
+      },
+      {
+        "name": "Loki logging",
+        "aliases": [
+          "Loki",
+          "Grafana",
+          "logcli"
+        ],
+        "definition": "A log aggregation system queried through Grafana or logcli. It stores logs from control-plane components and host serial consoles.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "name": "Power control reset types",
+        "aliases": [
+          "GracefulRestart",
+          "ForceRestart",
+          "AcPowercycle",
+          "ComputerSystem.Reset"
+        ],
+        "definition": "The Redfish reset actions used to power-cycle hosts and DPUs. They range from a graceful restart to a full AC power cycle.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/redfish_workflow.md",
+          "architecture/backends/rms.md"
+        ]
+      }
+    ],
+    "prerequisites": [
+      {
+        "concept": "Managed Host",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.9,
+        "why": "A managed host is defined partly by its BMCs"
+      },
+      {
+        "concept": "Managed Host",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.9,
+        "why": "A managed host includes its DPUs"
+      },
+      {
+        "concept": "Redfish API",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.9,
+        "why": "Redfish is the API that BMCs expose"
+      },
+      {
+        "concept": "Site Explorer",
+        "requires": "Redfish API",
+        "confidence": 0.95,
+        "why": "Site Explorer crawls BMCs over Redfish"
+      },
+      {
+        "concept": "Site Explorer",
+        "requires": "Expected Machines manifest",
+        "confidence": 0.8,
+        "why": "Site Explorer needs the manifest and its credentials"
+      },
+      {
+        "concept": "DPU-host pairing",
+        "requires": "Site Explorer",
+        "confidence": 0.85,
+        "why": "Site Explorer performs the pairing"
+      },
+      {
+        "concept": "DPU-host pairing",
+        "requires": "DPU mode vs NIC mode",
+        "confidence": 0.7,
+        "why": "Pairing validation checks DPU mode"
+      },
+      {
+        "concept": "DPU mode vs NIC mode",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.9,
+        "why": "Mode is a property of the DPU"
+      },
+      {
+        "concept": "Host ingestion",
+        "requires": "DPU-host pairing",
+        "confidence": 0.85,
+        "why": "Ingestion starts only after pairing is complete"
+      },
+      {
+        "concept": "Host ingestion",
+        "requires": "NICo state machines",
+        "confidence": 0.7,
+        "why": "The ManagedHost state machine drives ingestion"
+      },
+      {
+        "concept": "Preingestion Manager",
+        "requires": "Host ingestion",
+        "confidence": 0.8,
+        "why": "It prepares hosts that cannot be ingested yet"
+      },
+      {
+        "concept": "Machine Update Manager",
+        "requires": "NICo state machines",
+        "confidence": 0.7,
+        "why": "It only schedules updates; the state machine performs them"
+      },
+      {
+        "concept": "NICo state machines",
+        "requires": "Desired vs actual state reconciliation",
+        "confidence": 0.85,
+        "why": "State machines move actual state toward desired state"
+      },
+      {
+        "concept": "NICo Core",
+        "requires": "gRPC",
+        "confidence": 0.8,
+        "why": "Core exposes a gRPC API"
+      },
+      {
+        "concept": "nico-dhcp and Kea hook",
+        "requires": "DHCP",
+        "confidence": 0.95,
+        "why": "nico-dhcp is a DHCP service"
+      },
+      {
+        "concept": "nico-dhcp and Kea hook",
+        "requires": "NICo Core",
+        "confidence": 0.7,
+        "why": "It forwards requests to Core for IP address management"
+      },
+      {
+        "concept": "Underlay and HostInband network segments",
+        "requires": "DHCP",
+        "confidence": 0.5,
+        "why": "Segments decide which DHCP path serves a device"
+      },
+      {
+        "concept": "PXE / iPXE network boot",
+        "requires": "DHCP",
+        "confidence": 0.8,
+        "why": "Network boot relies on DHCP for addressing"
+      },
+      {
+        "concept": "PXE / iPXE network boot",
+        "requires": "UEFI boot order and BIOS settings",
+        "confidence": 0.6,
+        "why": "Hosts must be set to boot from the network"
+      },
+      {
+        "concept": "DPU Agent",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.9,
+        "why": "The agent runs on the DPU"
+      },
+      {
+        "concept": "Instance metadata service (IMDS / FMDS)",
+        "requires": "DPU Agent",
+        "confidence": 0.8,
+        "why": "The DPU agent serves FMDS"
+      },
+      {
+        "concept": "Instance metadata service (IMDS / FMDS)",
+        "requires": "Bare-metal instance and tenant",
+        "confidence": 0.7,
+        "why": "Instance workloads are the ones that use the metadata service"
+      },
+      {
+        "concept": "nico-hw-health",
+        "requires": "Redfish API",
+        "confidence": 0.85,
+        "why": "It polls BMCs over Redfish"
+      },
+      {
+        "concept": "nico-hw-health",
+        "requires": "Prometheus metrics",
+        "confidence": 0.7,
+        "why": "It exports its data as Prometheus metrics"
+      },
+      {
+        "concept": "libredfish and nv-redfish",
+        "requires": "Redfish API",
+        "confidence": 0.9,
+        "why": "Both are Redfish client libraries"
+      },
+      {
+        "concept": "Power control reset types",
+        "requires": "Redfish API",
+        "confidence": 0.8,
+        "why": "Resets are Redfish actions"
+      },
+      {
+        "concept": "SPIFFE",
+        "requires": "TLS certificates and mutual TLS",
+        "confidence": 0.5,
+        "why": "X.509 SVIDs are TLS certificates"
+      },
+      {
+        "concept": "Machine identity (JWT-SVID issuance)",
+        "requires": "SPIFFE",
+        "confidence": 0.9,
+        "why": "The feature issues SPIFFE JWT-SVIDs"
+      },
+      {
+        "concept": "Machine identity (JWT-SVID issuance)",
+        "requires": "JWT (JSON Web Token)",
+        "confidence": 0.9,
+        "why": "The tokens it issues are JWTs"
+      },
+      {
+        "concept": "Machine identity (JWT-SVID issuance)",
+        "requires": "Envelope encryption and KEK",
+        "confidence": 0.8,
+        "why": "Per-org signing keys are encrypted under the KEK"
+      },
+      {
+        "concept": "Machine identity (JWT-SVID issuance)",
+        "requires": "Instance metadata service (IMDS / FMDS)",
+        "confidence": 0.7,
+        "why": "Workloads get their tokens through IMDS"
+      },
+      {
+        "concept": "Machine identity (JWT-SVID issuance)",
+        "requires": "Day 0 vs Day 1 configuration",
+        "confidence": 0.6,
+        "why": "Setup is split into site-wide and per-org steps"
+      },
+      {
+        "concept": "Token delegation (RFC 8693 token exchange)",
+        "requires": "JWT (JSON Web Token)",
+        "confidence": 0.7,
+        "why": "Token exchange works on JWTs"
+      },
+      {
+        "concept": "Envelope encryption and KEK",
+        "requires": "AES-GCM symmetric encryption",
+        "confidence": 0.7,
+        "why": "The keys are AES keys"
+      },
+      {
+        "concept": "NICo credential store (secrets backends)",
+        "requires": "Envelope encryption and KEK",
+        "confidence": 0.9,
+        "why": "Postgres-stored credentials are wrapped under a KEK"
+      },
+      {
+        "concept": "NICo credential store (secrets backends)",
+        "requires": "HashiCorp Vault",
+        "confidence": 0.75,
+        "why": "Vault is the default backend and a possible KEK provider"
+      },
+      {
+        "concept": "NICo credential store (secrets backends)",
+        "requires": "PostgreSQL",
+        "confidence": 0.7,
+        "why": "The alternative backend is Postgres"
+      },
+      {
+        "concept": "NICo credential store (secrets backends)",
+        "requires": "NICo site config (TOML)",
+        "confidence": 0.7,
+        "why": "It is configured in the [secrets] section"
+      },
+      {
+        "concept": "Factory default credentials",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.7,
+        "why": "They are BMC and UEFI passwords"
+      },
+      {
+        "concept": "NICo site config (TOML)",
+        "requires": "Helm charts and values",
+        "confidence": 0.6,
+        "why": "The site config is delivered through chart values"
+      },
+      {
+        "concept": "Helm charts and values",
+        "requires": "Kubernetes",
+        "confidence": 0.9,
+        "why": "Helm deploys to Kubernetes"
+      },
+      {
+        "concept": "cert-manager and ClusterIssuer",
+        "requires": "Kubernetes",
+        "confidence": 0.85,
+        "why": "cert-manager is a Kubernetes add-on"
+      },
+      {
+        "concept": "cert-manager and ClusterIssuer",
+        "requires": "TLS certificates and mutual TLS",
+        "confidence": 0.85,
+        "why": "It issues certificates"
+      },
+      {
+        "concept": "Rack Management Service (RMS)",
+        "requires": "TLS certificates and mutual TLS",
+        "confidence": 0.7,
+        "why": "NICo and RMS connect over mTLS"
+      },
+      {
+        "concept": "Rack Management Service (RMS)",
+        "requires": "NVL rack components",
+        "confidence": 0.75,
+        "why": "RMS operates on rack components"
+      },
+      {
+        "concept": "Rack Management Service (RMS)",
+        "requires": "Redfish API",
+        "confidence": 0.6,
+        "why": "Most devices it manages speak Redfish"
+      },
+      {
+        "concept": "Component Manager",
+        "requires": "Rack Management Service (RMS)",
+        "confidence": 0.5,
+        "why": "RMS is one of its backends"
+      },
+      {
+        "concept": "Firmware manifest and rack profile",
+        "requires": "Rack Management Service (RMS)",
+        "confidence": 0.7,
+        "why": "The manifest is sent to RMS"
+      },
+      {
+        "concept": "Firmware manifest and rack profile",
+        "requires": "Asynchronous job polling",
+        "confidence": 0.5,
+        "why": "Firmware updates run as polled jobs"
+      },
+      {
+        "concept": "NICo Flow",
+        "requires": "Temporal workflows",
+        "confidence": 0.85,
+        "why": "Flow runs its tasks on Temporal"
+      },
+      {
+        "concept": "NICo Flow",
+        "requires": "Component Manager",
+        "confidence": 0.7,
+        "why": "Flow activities call component managers"
+      },
+      {
+        "concept": "InfiniBand partitions and UFM",
+        "requires": "NICo Core",
+        "confidence": 0.4,
+        "why": "IB Fabric Monitor is a Core module"
+      },
+      {
+        "concept": "ssh-console",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.7,
+        "why": "The console runs through host BMCs"
+      },
+      {
+        "concept": "ssh-console",
+        "requires": "Loki logging",
+        "confidence": 0.5,
+        "why": "Console output is sent to Loki"
+      }
+    ]
+  }
+}

@@ -1,0 +1,858 @@
+{
+  "kind": "extract",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "concepts": [
+      {
+        "name": "Finite State Machine (FSM)",
+        "aliases": [
+          "state machine",
+          "FSM"
+        ],
+        "definition": "A model where an entity is always in exactly one of a fixed set of states, and moves between them through defined transitions. NICo models switches, power shelves, machines and racks this way.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/power_shelf.md",
+          "architecture/state_machines/rackstatemachine.md",
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      },
+      {
+        "name": "State Controller",
+        "aliases": [
+          "state handler",
+          "controller tick",
+          "SwitchStateHandler"
+        ],
+        "definition": "A NICo loop that runs over and over. On each run (a 'tick') it loads a device's persisted state, runs the handler for that state, and moves the device to its next state if one applies. A transient error (StateHandlerError) leaves the device where it is so the next tick retries.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/power_shelf.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Switch State Machine",
+        "aliases": [
+          "SwitchControllerState"
+        ],
+        "definition": "The lifecycle of an NVLink switch in NICo. It runs Created → Initializing → Configuring → FetchInfo → Validating → BomValidating → Ready. From Ready the switch can enter Maintenance, ReProvisioning, Decommissioning, Error or Deleting.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Power Shelf State Machine",
+        "aliases": [
+          "PowerShelfControllerState"
+        ],
+        "definition": "The lifecycle of a power shelf in NICo. It runs Initializing → FetchingData → Configuring → Ready. Operators can trigger on-demand PowerOn/PowerOff maintenance, and the shelf can also be decommissioned or deleted.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/power_shelf.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Rack State Machine",
+        "aliases": [
+          "RackState"
+        ],
+        "definition": "The lifecycle of a rack, which is a collection of compute trays, switches and power shelves: Created → Discovering → Maintenance → Validating → Ready. It coordinates and drives the state machines of its child devices.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Machine State Machine (ManagedHostState)",
+        "aliases": [
+          "ManagedHostState",
+          "compute tray lifecycle",
+          "M_Ready"
+        ],
+        "definition": "The lifecycle of each compute tray or managed host. It moves through ingestion states to Ready, then to Assigned when an instance is created on it. It can also enter HostReprovision for firmware upgrades.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Rack Maintenance",
+        "aliases": [
+          "R_Maintenance",
+          "MaintenanceScope"
+        ],
+        "definition": "The rack state in which NICo runs maintenance activities in order: FirmwareUpgrade, NVOSUpdate, an optional PowerSequence reboot barrier, and ConfigureNmxCluster, then Completed. Some activities can be skipped depending on the maintenance scope.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Rack Ingestion",
+        "aliases": [
+          "ingestion_in_progress",
+          "supplemental admission"
+        ],
+        "definition": "The automatic first maintenance cycle a newly discovered rack goes through. It upgrades firmware on ready devices and admits hosts that arrive late into the same firmware job. A real NVOS update during this cycle triggers a compute reboot.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Rack Profile",
+        "aliases": [
+          "profile switch count",
+          "rack_hardware_topology"
+        ],
+        "definition": "Configuration that describes the expected inventory of a rack type, such as GB200, GB300 or VR. It covers switch, compute and power shelf counts and the firmware object to use. Rack discovery waits until the profile's switch count is reached.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Switch ReProvisioning",
+        "aliases": [
+          "switch_reprovisioning_requested",
+          "rack-level reprovisioning"
+        ],
+        "definition": "A rack-driven switch state. The switch waits in turn for the rack firmware upgrade, the NVOS upgrade and NMX-C configuration, while the rack updates status fields on the switch.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "On-Demand Maintenance",
+        "aliases": [
+          "switch_maintenance_requested",
+          "power_shelf_maintenance_requested"
+        ],
+        "definition": "A maintenance operation requested by an operator, such as PowerOn, PowerOff, Reset or ReconfigureCertificate. It is stored as a request on the device record. The state controller picks it up, runs it, and clears the request when done.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/power_shelf.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Decommissioning",
+        "aliases": [
+          "Decommissioned"
+        ],
+        "definition": "Removing a device from managed service. NICo stops Site Explorer discovery and DHCP for it, factory-resets NVOS and/or the BMC, and deletes the managed credentials. It ends in the terminal Decommissioned state.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/power_shelf.md"
+        ]
+      },
+      {
+        "name": "DHCP Suppression Acknowledgement",
+        "aliases": [
+          "SuppressingBmcDhcp",
+          "SuppressingNvosDhcp"
+        ],
+        "definition": "During decommissioning, NICo records that DHCP should be suppressed for an endpoint, then waits for an acknowledgement before moving on. Some endpoints can finish this wait without an acknowledgement.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/power_shelf.md"
+        ]
+      },
+      {
+        "name": "DHCP",
+        "aliases": [
+          "Dynamic Host Configuration Protocol"
+        ],
+        "definition": "A network protocol that automatically assigns IP addresses to devices on a network. NICo controls DHCP responses for the BMC and NVOS interfaces it manages.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/power_shelf.md"
+        ]
+      },
+      {
+        "name": "Site Explorer",
+        "aliases": [],
+        "definition": "A NICo component that discovers hardware (machines, switches, power shelves) through their BMCs and creates entities for them, including racks that share a rack_id.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/power_shelf.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Expected Switch / Expected Rack",
+        "aliases": [
+          "expected machine",
+          "expected inventory"
+        ],
+        "definition": "Records a site operator enters ahead of time to describe hardware that should be present, such as MACs, ports and rack IDs. NICo matches discovered devices against these records.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Baseboard Management Controller (BMC)",
+        "aliases": [
+          "BMC",
+          "PMC"
+        ],
+        "definition": "An out-of-band management controller built into a device. It lets software power-control, reset and inspect the device remotely. A power shelf may use a PMC (power management controller) instead.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/power_shelf.md",
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      },
+      {
+        "name": "Redfish API",
+        "aliases": [
+          "Redfish",
+          "GracefulRestart",
+          "ForceRestart"
+        ],
+        "definition": "A standard REST API that BMCs expose for hardware management. NICo uses it for restarts (GracefulRestart, ForceRestart) and factory resets.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/power_shelf.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "NVOS",
+        "aliases": [
+          "NVIDIA switch OS",
+          "NVOS interface"
+        ],
+        "definition": "The operating system that runs on NVIDIA NVLink switches. NICo links each switch's NVOS network interface to the switch, manages the NVOS admin credentials, and upgrades the NVOS image.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "NVLink Switch",
+        "aliases": [
+          "NVSwitch",
+          "switch tray"
+        ],
+        "definition": "A switch tray in a GPU rack that connects GPUs across compute trays over NVLink.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md",
+          "architecture/state_machines/switch.md"
+        ]
+      },
+      {
+        "name": "NVUE",
+        "aliases": [
+          "NVUE REST API",
+          "nvue_api"
+        ],
+        "definition": "The NVIDIA user experience configuration API on NVOS switches, available as a REST service. It is protected by mTLS certificates.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Mutual TLS (mTLS)",
+        "aliases": [
+          "mTLS",
+          "mTLS bindings",
+          "client-CA trust"
+        ],
+        "definition": "TLS where the client and the server each prove their identity with a certificate. Each side trusts certificates signed by particular Certificate Authorities (CAs).",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      },
+      {
+        "name": "TLS certificate",
+        "aliases": [
+          "certificate",
+          "CA"
+        ],
+        "definition": "A signed document that ties a public key to an identity. It is signed by a Certificate Authority, and the other side checks it when a TLS connection is set up.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/switch.md"
+        ]
+      },
+      {
+        "name": "Switch Certificate Configuration",
+        "aliases": [
+          "ConfigureCertificate",
+          "ReconfigureCertificate",
+          "DisableMtls"
+        ],
+        "definition": "The Configuring sub-flow that first disables any existing mTLS bindings (DisableMtls) and then installs NVOS certificates (ConfigureCertificate) through asynchronous RMS jobs. Maintenance can rerun the installation step as ReconfigureCertificate.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/switch.md"
+        ]
+      },
+      {
+        "name": "Switch mTLS Services",
+        "aliases": [
+          "switch_mtls_services",
+          "scale_up_fabric_manager",
+          "scale_up_fabric_telemetry"
+        ],
+        "definition": "A configurable list of switch services (nvue_api and the scale-up fabric telemetry, manager and telemetry interface services) that get certificate bindings. Fabric services apply only to the primary switch.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      },
+      {
+        "name": "Primary Switch",
+        "aliases": [
+          "primary"
+        ],
+        "definition": "The one switch in a rack that RMS selects to host the fabric manager and telemetry cluster applications. Certificate requests for those services only target this switch.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Component Manager (CM)",
+        "aliases": [
+          "CM",
+          "NvSwitchManager"
+        ],
+        "definition": "A NICo abstraction layer that forwards device operations, such as certificate jobs and power control, to a backend like RMS, NSM or a mock. This keeps the state handlers independent of which backend is in use.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/switch.md"
+        ]
+      },
+      {
+        "name": "Rack Manager Service (RMS)",
+        "aliases": [
+          "RMS",
+          "RmsBackend",
+          "librms"
+        ],
+        "definition": "An external service that runs rack-level device operations as asynchronous jobs, such as firmware upgrades, certificate configuration, mTLS disabling and fabric setup. NICo calls it over gRPC.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Asynchronous Job Polling",
+        "aliases": [
+          "job_id",
+          "WaitForComplete",
+          "parent/child jobs"
+        ],
+        "definition": "A pattern where NICo submits work, gets a job ID back, saves that ID in the controller state, and checks the job status on later ticks until it reaches a final state. Because the ID is saved, polling can resume after a restart.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Submission Outcome Semantics",
+        "aliases": [
+          "OperationOutcomeUnknown",
+          "RejectedBeforeDispatch",
+          "Unsupported"
+        ],
+        "definition": "Error categories that say whether RMS might have received a request. RejectedBeforeDispatch is safe to retry. OperationOutcomeUnknown goes to Error rather than risk running a non-idempotent operation twice. Unsupported means the step is skipped.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Idempotency",
+        "aliases": [
+          "idempotent",
+          "non-idempotent"
+        ],
+        "definition": "An operation is idempotent if running it again has the same effect as running it once. Whether an operation is idempotent decides if it can be safely resubmitted.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "gRPC / Protocol Buffers",
+        "aliases": [
+          "gRPC",
+          "protobuf",
+          "proto"
+        ],
+        "definition": "An RPC framework that defines service methods and message types in .proto files. The NICo API and RMS are both called over gRPC.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/power_shelf.md",
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      },
+      {
+        "name": "nico-admin-cli",
+        "aliases": [
+          "admin CLI"
+        ],
+        "definition": "NICo's operator command-line tool. It is a thin wrapper over the gRPC API, used for example to submit power-shelf maintenance requests.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/power_shelf.md"
+        ]
+      },
+      {
+        "name": "Credential Store",
+        "aliases": [
+          "credential vault",
+          "Credential Manager",
+          "SwitchNvosAdmin"
+        ],
+        "definition": "Secure storage for device credentials, such as BMC credentials and per-switch NVOS admin credentials. RotateOsPassword stores NVOS credentials here.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      },
+      {
+        "name": "Controller State Persistence",
+        "aliases": [
+          "controller_state JSON",
+          "JSONB"
+        ],
+        "definition": "Each device's current state and sub-state are stored as JSON in a PostgreSQL column, such as switches.controller_state. This lets a restarted controller continue where it left off.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/power_shelf.md"
+        ]
+      },
+      {
+        "name": "Database Transaction",
+        "aliases": [
+          "atomic update"
+        ],
+        "definition": "A group of database changes that are committed all together or not at all. NICo relies on this for atomic multi-device requests and state transitions.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/power_shelf.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Firmware Upgrade / Host Reprovision",
+        "aliases": [
+          "HostReprovision",
+          "FailedFirmwareUpgrade",
+          "host_reprovisioning_requested"
+        ],
+        "definition": "The flow that upgrades a device's firmware. Compute hosts do it in a HostReprovision state, which retries automatically after a failure or restarts when a fresh request arrives.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md",
+          "architecture/state_machines/switch.md"
+        ]
+      },
+      {
+        "name": "NMX-C / Fabric Manager",
+        "aliases": [
+          "NMXC",
+          "ScaleUpFabricManager",
+          "fabric_manager_status",
+          "ConfigureNmxCluster"
+        ],
+        "definition": "The NVLink fabric management cluster application that runs on the primary switch. The rack's ConfigureNmxCluster step rotates switch certificates, then submits an RMS ScaleUpFabricManager V2 job that picks the primary switch and binds NMX-C.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md",
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      },
+      {
+        "name": "NVLink scale-up fabric",
+        "aliases": [
+          "scale-up fabric"
+        ],
+        "definition": "The NVLink network that links GPUs across trays in a rack into one larger GPU domain. The fabric manager and telemetry services manage and monitor it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch_configure_certificate.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "PowerSequence Reboot Barrier",
+        "aliases": [
+          "PowerReset",
+          "restart_machine_ids"
+        ],
+        "definition": "A rack maintenance step that queues graceful reboots for a saved batch of compute hosts. It waits until each host reports a reboot timestamp newer than the time the batch was saved.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Rack Validation (RVS)",
+        "aliases": [
+          "RVS",
+          "rv.run-id",
+          "R_Validating"
+        ],
+        "definition": "Rack validation run by the RVS service. RVS writes run-id and partition result labels on the rack's machines, and those labels move the rack's Validating sub-states forward until the rack is Validated or Failed.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "BOM Validation",
+        "aliases": [
+          "Bill of Materials",
+          "BomValidating"
+        ],
+        "definition": "A switch state that checks the switch against its expected Bill of Materials (the list of components it should have).",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/switch.md"
+        ]
+      },
+      {
+        "name": "Tray Replacement / Topology Change",
+        "aliases": [
+          "topology_changed"
+        ],
+        "definition": "An external event where a compute tray is physically replaced. The old machine is deleted, a new one is discovered, and the rack goes back from Ready to Discovering.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "Instance",
+        "aliases": [
+          "Assigned"
+        ],
+        "definition": "A tenant workload allocated onto a managed host. A host with an instance is in the Assigned state, and rack maintenance excludes or waits on it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "name": "MAC address",
+        "aliases": [
+          "BMC MAC",
+          "NVOS MAC"
+        ],
+        "definition": "A hardware network interface identifier. NICo uses BMC and NVOS MACs as identity keys for switches, and fails a switch if its declared MAC belongs to another switch.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/state_machines/switch.md",
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      }
+    ],
+    "prerequisites": [
+      {
+        "concept": "State Controller",
+        "requires": "Finite State Machine (FSM)",
+        "confidence": 0.9,
+        "why": "The controller is the loop that carries out FSM transitions."
+      },
+      {
+        "concept": "Switch State Machine",
+        "requires": "State Controller",
+        "confidence": 0.8,
+        "why": "Switch transitions happen on controller ticks."
+      },
+      {
+        "concept": "Power Shelf State Machine",
+        "requires": "State Controller",
+        "confidence": 0.8,
+        "why": "Power shelf transitions happen on controller ticks."
+      },
+      {
+        "concept": "Rack State Machine",
+        "requires": "Switch State Machine",
+        "confidence": 0.8,
+        "why": "The rack drives and observes switch states."
+      },
+      {
+        "concept": "Rack State Machine",
+        "requires": "Machine State Machine (ManagedHostState)",
+        "confidence": 0.75,
+        "why": "The rack drives compute reprovisioning."
+      },
+      {
+        "concept": "Rack State Machine",
+        "requires": "Rack Profile",
+        "confidence": 0.7,
+        "why": "Rack discovery transitions are gated on profile counts."
+      },
+      {
+        "concept": "Switch State Machine",
+        "requires": "NVOS",
+        "confidence": 0.7,
+        "why": "Initializing and Configuring revolve around NVOS interfaces."
+      },
+      {
+        "concept": "Switch Certificate Configuration",
+        "requires": "Mutual TLS (mTLS)",
+        "confidence": 0.9,
+        "why": "The flow disables mTLS bindings and installs certificates."
+      },
+      {
+        "concept": "Mutual TLS (mTLS)",
+        "requires": "TLS certificate",
+        "confidence": 0.85,
+        "why": "mTLS is built on certificates and CA trust."
+      },
+      {
+        "concept": "Switch Certificate Configuration",
+        "requires": "Component Manager (CM)",
+        "confidence": 0.85,
+        "why": "The handler delegates the certificate work to CM."
+      },
+      {
+        "concept": "Switch Certificate Configuration",
+        "requires": "Asynchronous Job Polling",
+        "confidence": 0.85,
+        "why": "It uses Start/WaitForComplete with saved job IDs."
+      },
+      {
+        "concept": "Component Manager (CM)",
+        "requires": "Rack Manager Service (RMS)",
+        "confidence": 0.6,
+        "why": "RMS is the main backend CM forwards to."
+      },
+      {
+        "concept": "Rack Manager Service (RMS)",
+        "requires": "gRPC / Protocol Buffers",
+        "confidence": 0.6,
+        "why": "RMS is called through gRPC RPCs."
+      },
+      {
+        "concept": "Submission Outcome Semantics",
+        "requires": "Idempotency",
+        "confidence": 0.85,
+        "why": "The retry-or-error decision depends on whether resubmitting is safe."
+      },
+      {
+        "concept": "Submission Outcome Semantics",
+        "requires": "Asynchronous Job Polling",
+        "confidence": 0.7,
+        "why": "These categories describe how job submission and polling can turn out."
+      },
+      {
+        "concept": "Asynchronous Job Polling",
+        "requires": "Controller State Persistence",
+        "confidence": 0.7,
+        "why": "The job ID is saved in controller state so polling can resume."
+      },
+      {
+        "concept": "Switch mTLS Services",
+        "requires": "Primary Switch",
+        "confidence": 0.7,
+        "why": "Fabric services are filtered to the primary switch."
+      },
+      {
+        "concept": "Switch mTLS Services",
+        "requires": "NVUE",
+        "confidence": 0.6,
+        "why": "nvue_api is one of the service bindings."
+      },
+      {
+        "concept": "NVUE",
+        "requires": "NVOS",
+        "confidence": 0.7,
+        "why": "NVUE is NVOS's configuration API."
+      },
+      {
+        "concept": "NMX-C / Fabric Manager",
+        "requires": "NVLink scale-up fabric",
+        "confidence": 0.8,
+        "why": "NMX-C manages the NVLink fabric."
+      },
+      {
+        "concept": "NVLink scale-up fabric",
+        "requires": "NVLink Switch",
+        "confidence": 0.7,
+        "why": "The fabric is formed by the NVLink switches."
+      },
+      {
+        "concept": "Switch ReProvisioning",
+        "requires": "Rack Maintenance",
+        "confidence": 0.8,
+        "why": "Rack maintenance drives switch reprovisioning."
+      },
+      {
+        "concept": "Rack Maintenance",
+        "requires": "Firmware Upgrade / Host Reprovision",
+        "confidence": 0.7,
+        "why": "Firmware upgrade is the first maintenance activity."
+      },
+      {
+        "concept": "Rack Maintenance",
+        "requires": "NMX-C / Fabric Manager",
+        "confidence": 0.6,
+        "why": "ConfigureNmxCluster is one of the maintenance steps."
+      },
+      {
+        "concept": "Rack Ingestion",
+        "requires": "Rack Maintenance",
+        "confidence": 0.8,
+        "why": "Ingestion is an automatic maintenance cycle."
+      },
+      {
+        "concept": "PowerSequence Reboot Barrier",
+        "requires": "Rack Maintenance",
+        "confidence": 0.7,
+        "why": "It is a maintenance sub-state."
+      },
+      {
+        "concept": "Decommissioning",
+        "requires": "DHCP Suppression Acknowledgement",
+        "confidence": 0.7,
+        "why": "The decommission steps wait on DHCP acknowledgements."
+      },
+      {
+        "concept": "DHCP Suppression Acknowledgement",
+        "requires": "DHCP",
+        "confidence": 0.85,
+        "why": "It suppresses DHCP for endpoints."
+      },
+      {
+        "concept": "Decommissioning",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.75,
+        "why": "Decommissioning factory-resets the BMC."
+      },
+      {
+        "concept": "Decommissioning",
+        "requires": "Site Explorer",
+        "confidence": 0.6,
+        "why": "The first step stops Site Explorer discovery."
+      },
+      {
+        "concept": "Redfish API",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.8,
+        "why": "Redfish is the API the BMC exposes."
+      },
+      {
+        "concept": "On-Demand Maintenance",
+        "requires": "State Controller",
+        "confidence": 0.7,
+        "why": "Requests are picked up on controller ticks."
+      },
+      {
+        "concept": "nico-admin-cli",
+        "requires": "On-Demand Maintenance",
+        "confidence": 0.5,
+        "why": "The CLI is used to submit maintenance requests."
+      },
+      {
+        "concept": "Rack Validation (RVS)",
+        "requires": "Rack State Machine",
+        "confidence": 0.6,
+        "why": "Validating is one of the rack states."
+      },
+      {
+        "concept": "Tray Replacement / Topology Change",
+        "requires": "Rack State Machine",
+        "confidence": 0.7,
+        "why": "It triggers the transition from Ready back to Discovering."
+      },
+      {
+        "concept": "Switch State Machine",
+        "requires": "Expected Switch / Expected Rack",
+        "confidence": 0.6,
+        "why": "Initializing matches the switch against its expected switch record."
+      }
+    ]
+  }
+}

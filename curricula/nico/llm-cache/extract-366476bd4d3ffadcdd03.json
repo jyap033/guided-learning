@@ -1,0 +1,1321 @@
+{
+  "kind": "extract",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "concepts": [
+      {
+        "name": "NVIDIA Infra Controller (NICo)",
+        "aliases": [
+          "NICo",
+          "Infra Controller",
+          "Carbide"
+        ],
+        "definition": "NVIDIA's site controller software. It discovers bare-metal hosts through their BMCs, pairs them with their DPUs, provisions them and manages them as tenant infrastructure. It runs on a Kubernetes cluster.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "NICo Core",
+        "aliases": [
+          "Infra Controller Core",
+          "nico-api",
+          "carbide-api"
+        ],
+        "definition": "The core control plane of NICo, deployed as the 'nico' Helm release. It includes nico-api (a gRPC API) and the DHCP, DNS, PXE, NTP and SSH console services used to discover and provision hosts.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "NICo REST",
+        "aliases": [
+          "nico-rest",
+          "nico-rest-api",
+          "NCX REST"
+        ],
+        "definition": "The REST control plane that sits on top of NICo Core. It provides the REST API, workflow workers and site-manager, and it depends on Keycloak, Temporal and PostgreSQL. It lives in-tree under rest-api/.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "NICo Flow",
+        "aliases": [
+          "nico-flow"
+        ],
+        "definition": "A NICo component installed in setup Phase 7h. Its values can be overridden with --flow-values. The pages do not explain what it does.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "setup.sh orchestrator",
+        "aliases": [
+          "setup.sh",
+          "helm-prereqs"
+        ],
+        "definition": "The script in helm-prereqs/ that installs every prerequisite and NICo component in numbered phases (0 to 7i). Flags such as --skip-vault, --skip-dpf and -y control it. It is idempotent, so you upgrade by re-running it.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "Preflight checks (preflight.sh)",
+        "aliases": [
+          "preflight.sh",
+          "--ignore-preflight-errors"
+        ],
+        "definition": "A validation script that runs at the start of setup.sh. It checks environment variables, required tools, MetalLB config, cluster reachability, node count, kernel parameters, DNS, registry connectivity and Vault-free values. Errors stop the setup.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Kubernetes cluster",
+        "aliases": [
+          "K8s",
+          "kubectl",
+          "kubeconfig"
+        ],
+        "definition": "A container orchestration platform. NICo runs on a cluster you provide, which needs at least three schedulable nodes, working cluster DNS and certain kernel networking settings.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Kubernetes workload and config objects",
+        "aliases": [
+          "Pod",
+          "StatefulSet",
+          "Secret",
+          "ConfigMap",
+          "Job",
+          "Namespace",
+          "Service"
+        ],
+        "definition": "The basic Kubernetes resources the docs refer to constantly. Pods run containers. StatefulSets run replicated stateful apps. Secrets and ConfigMaps hold credentials and configuration. Jobs run one-off tasks. Services expose pods on the network.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+        "aliases": [
+          "LoadBalancer Service",
+          "NodePort",
+          "ClusterIP"
+        ],
+        "definition": "The ways a Kubernetes Service can be exposed. ClusterIP is reachable only inside the cluster. NodePort opens a port on every node. LoadBalancer gets an external IP, which MetalLB supplies on bare metal.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Persistent storage (StorageClass, PVC, local-path-provisioner)",
+        "aliases": [
+          "PVC",
+          "PersistentVolume",
+          "StorageClass",
+          "local-path-provisioner"
+        ],
+        "definition": "The Kubernetes system for durable volumes. local-path-provisioner creates StorageClasses backed by node-local disks, and the PostgreSQL and Vault volume claims use them.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "Helm and helmfile",
+        "aliases": [
+          "Helm chart",
+          "helm release",
+          "helmfile",
+          "helm-diff",
+          "values file"
+        ],
+        "definition": "Helm is the Kubernetes package manager. It installs charts configured through YAML values files. helmfile declaratively manages several Helm releases and uses the helm-diff plugin to show what will change.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "Kustomize",
+        "aliases": [
+          "kustomize overlay",
+          "--site-overlay"
+        ],
+        "definition": "A Kubernetes tool that customizes manifests by layering overlays on top of base manifests. setup.sh can apply a site overlay with it, and the REST stack uses kustomize bases.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "Container image registry",
+        "aliases": [
+          "NICO_IMAGE_REGISTRY",
+          "NGC",
+          "image pull secret"
+        ],
+        "definition": "A server that stores container images. You push the NICo images you built to a registry, and the cluster pulls them from it. Authenticated registries such as NVIDIA NGC need an image pull secret.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Building NICo containers",
+        "aliases": [
+          "build images",
+          "BFB artifacts"
+        ],
+        "definition": "Compiling the NICo Core, DPU BFB artifact and admin CLI images from source on Ubuntu 24.04, including cross-compilation for x86_64 and aarch64, then pushing them to a registry.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "BlueField-3 DPU",
+        "aliases": [
+          "DPU",
+          "Data Processing Unit",
+          "BlueField",
+          "DPU mode",
+          "BFB"
+        ],
+        "definition": "An NVIDIA SmartNIC with its own Arm cores and operating system. It runs networking and isolation functions for its host. Before use it must be flashed with a BlueField firmware bundle and set to DPU operating mode.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "DOCA Platform Framework (DPF)",
+        "aliases": [
+          "DPF",
+          "dpf-operator",
+          "doca-platform"
+        ],
+        "definition": "NVIDIA's Kubernetes-based framework for provisioning DPUs. It is NICo's default way to provision host DPUs and includes argo-cd, kamaji, NFD and the dpf-operator. You opt out with --skip-dpf or per host with dpf_enabled=false.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "PXE / iPXE network boot",
+        "aliases": [
+          "PXE",
+          "iPXE",
+          "nico-pxe"
+        ],
+        "definition": "Booting a machine over the network: it gets an address from DHCP, then downloads a boot image. NICo's nico-pxe service serves boot images. iPXE-based DPU provisioning is the deprecated alternative to DPF.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Baseboard Management Controller (BMC)",
+        "aliases": [
+          "BMC",
+          "BMC credentials",
+          "site-wide BMC root"
+        ],
+        "definition": "A small embedded controller on a server that allows remote power control, monitoring and configuration independent of the host OS. NICo discovers hosts through their BMCs and replaces the factory credentials with site-wide ones.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Out-of-band (OOB) management network",
+        "aliases": [
+          "OOB network",
+          "OOB switches"
+        ],
+        "definition": "A separate management network that connects the BMCs. Its switches must relay BMC DHCP requests to the nico-dhcp VIP so that NICo can find the hosts.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Redfish API",
+        "aliases": [
+          "Redfish"
+        ],
+        "definition": "A standard REST API that BMCs expose for hardware management. NICo uses it to discover and control hosts.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "DHCP and DHCP relay",
+        "aliases": [
+          "DHCP",
+          "DHCPv6",
+          "DHCP relay",
+          "Kea",
+          "nico-dhcp",
+          "DHCP option 42"
+        ],
+        "definition": "DHCP automatically assigns IP addresses and options, such as NTP servers, to machines on a network. A DHCP relay forwards DHCP requests from other network segments to a central server, here the Kea-based nico-dhcp service.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "DNS and DNS records",
+        "aliases": [
+          "DNS",
+          "A record",
+          "AAAA record",
+          "Unbound",
+          "nico-dns",
+          "CoreDNS"
+        ],
+        "definition": "The system that maps names to IP addresses. NICo needs cluster DNS to work, external A records for its API and ingress hostnames, and it runs its own nico-dns and Unbound services.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "NTP time synchronization",
+        "aliases": [
+          "NTP",
+          "chrony",
+          "nico-ntp",
+          "ntp_servers"
+        ],
+        "definition": "A protocol for keeping clocks synchronized. NICo uses enterprise NTP servers to set BMC time before ingestion. It can also run a 3-replica chrony service (nico-ntp) whose addresses are handed to DPUs over DHCP.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Virtual IP address (VIP)",
+        "aliases": [
+          "VIP",
+          "service VIP",
+          "perPodAnnotations"
+        ],
+        "definition": "A stable IP address assigned to a service rather than to one machine. Each NICo Core LoadBalancer service needs a fixed VIP from the MetalLB pool so that DHCP relays, DNS and PXE can be configured in advance.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "MetalLB",
+        "aliases": [
+          "metallb",
+          "IPAddressPool",
+          "BGPAdvertisement",
+          "L2Advertisement"
+        ],
+        "definition": "A load-balancer implementation for bare-metal Kubernetes. It assigns external IPs to LoadBalancer Services from configured IPAddressPools and announces them with either BGP or Layer 2.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "BGP peering",
+        "aliases": [
+          "BGP",
+          "ASN",
+          "BGPPeer",
+          "TOR switch"
+        ],
+        "definition": "Border Gateway Protocol is a routing protocol in which peers exchange routes. MetalLB peers each node with its top-of-rack (TOR) switch, using a cluster ASN and a per-node TOR ASN, to advertise the VIPs.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Layer 2 advertisement (ARP)",
+        "aliases": [
+          "L2 mode",
+          "L2Advertisement"
+        ],
+        "definition": "A MetalLB mode for flat networks without BGP. A node answers ARP requests for the VIP on the local network segment.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "IP subnets and CIDR notation",
+        "aliases": [
+          "CIDR",
+          "prefix",
+          "gateway",
+          "MTU"
+        ],
+        "definition": "A notation such as 10.0.0.0/28 for writing IP address ranges. It is used throughout siteConfig and MetalLB pools for prefixes, gateways and deny lists.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "VLAN",
+        "aliases": [
+          "VLAN ID",
+          "pools.vlan-id"
+        ],
+        "definition": "A virtual LAN, which splits one physical Layer 2 network into isolated segments identified by a VLAN ID. NICo allocates VLAN IDs from a configured pool.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "VXLAN and VNI",
+        "aliases": [
+          "VXLAN",
+          "VNI",
+          "VXLAN Network Identifier",
+          "VTEP"
+        ],
+        "definition": "An overlay technique that tunnels Layer 2 networks over a Layer 3 underlay. Each overlay network is identified by a VNI and handled at tunnel endpoints (VTEPs). NICo allocates VNIs from a pool and needs IPv4 VXLAN tunnel endpoints.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "FNN (site fabric isolation)",
+        "aliases": [
+          "FNN",
+          "site_fabric_null_routes",
+          "ETV",
+          "mutual isolation"
+        ],
+        "definition": "A NICo site networking mode that the pages use without defining. It uses site fabric prefixes and null routes (blackholes) to isolate instances, and it is required for IPv6-only admin networking.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "siteConfig (site TOML configuration)",
+        "aliases": [
+          "siteConfig",
+          "sitename",
+          "initial_domain_name",
+          "deny_prefixes"
+        ],
+        "definition": "A TOML block in nico-core.yaml that defines the site's identity, DHCP and NTP servers, fabric prefixes, deny prefixes, resource pools and initial networks.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "NICo resource pools",
+        "aliases": [
+          "pools.lo-ip",
+          "pools.vlan-id",
+          "pools.vni"
+        ],
+        "definition": "Ranges that NICo allocates from. They cover loopback IPs for hosts and DPUs, VLAN IDs and VXLAN VNIs. All three must be non-empty.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Admin and underlay networks",
+        "aliases": [
+          "networks.admin",
+          "underlay network",
+          "initial network configuration"
+        ],
+        "definition": "Networks NICo creates at startup. The admin network carries host management traffic. Underlay data-plane networks are defined one per L3 segment. An IPv4 prefix needs a gateway.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "TLS certificates and X.509 SAN",
+        "aliases": [
+          "TLS",
+          "X.509",
+          "SAN",
+          "wildcard certificate",
+          "common name"
+        ],
+        "definition": "Certificates that prove a server's identity and enable encrypted connections. Subject Alternative Names list the hostnames a certificate covers, and a wildcard covers exactly one DNS label.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Public key infrastructure and CA trust",
+        "aliases": [
+          "PKI",
+          "CA",
+          "site CA",
+          "CA bundle",
+          "ca-signing-secret"
+        ],
+        "definition": "The system in which a Certificate Authority signs certificates and clients trust that CA. NICo bootstraps a private site CA, so clients must import its CA bundle before they accept the certificates it issues.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "Mutual TLS (mTLS)",
+        "aliases": [
+          "mTLS",
+          "client certificates"
+        ],
+        "definition": "TLS in which client and server both present certificates. NICo uses it between components such as Temporal, RMS and the site-agent's gRPC client.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "cert-manager and Issuers",
+        "aliases": [
+          "cert-manager",
+          "ClusterIssuer",
+          "Issuer",
+          "Certificate resource",
+          "site-issuer",
+          "vault-nico-issuer",
+          "nico-rest-ca-issuer"
+        ],
+        "definition": "A Kubernetes controller that issues and renews TLS certificates as Certificate resources. Issuers and cluster-wide ClusterIssuers define how certificates are signed, for example by the site CA or by Vault.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "HashiCorp Vault",
+        "aliases": [
+          "Vault",
+          "HA Raft",
+          "Vault unseal",
+          "--skip-vault"
+        ],
+        "definition": "A secrets manager. NICo installs it by default as a 3-node HA cluster with Raft storage. It stores credentials and issues certificates, and it must be initialized and unsealed. --skip-vault installs NICo without it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "Credential store (Vault vs Postgres)",
+        "aliases": [
+          "Day 0 credential store",
+          "[secrets] backend"
+        ],
+        "definition": "Where NICo keeps BMC and UEFI credentials. It is Vault by default, or PostgreSQL when the site is installed without Vault. In the Postgres case, certificates come from the site-issuer ClusterIssuer instead.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "External Secrets Operator",
+        "aliases": [
+          "external-secrets",
+          "ClusterSecretStore"
+        ],
+        "definition": "A Kubernetes operator that syncs secrets from external stores such as Vault into Kubernetes Secrets, using SecretStore and ClusterSecretStore resources.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "KMIP KEK provider",
+        "aliases": [
+          "KMIP",
+          "KEK",
+          "key encryption key",
+          "nico-kmip-client"
+        ],
+        "definition": "An opt-in feature that gets the key-encryption keys protecting stored secrets from an external KMIP key-management server. The connection uses client TLS files (ca.pem, client.pem, client.key).",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Zalando postgres-operator (nico-pg-cluster)",
+        "aliases": [
+          "postgres-operator",
+          "nico-pg-cluster",
+          "HA PostgreSQL"
+        ],
+        "definition": "A Kubernetes operator that runs highly available PostgreSQL clusters. NICo uses it to run nico-pg-cluster, the shared database for Core, REST, the site-agent, Keycloak, Temporal and RMS.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "Kubernetes Ingress and ingress controllers",
+        "aliases": [
+          "Ingress",
+          "Contour",
+          "Envoy",
+          "ingress-nginx",
+          "ingress.className",
+          "TLSCertificateDelegation"
+        ],
+        "definition": "An Ingress routes external HTTP(S) traffic to Services by hostname, and an ingress controller such as Contour/Envoy or nginx handles it. You can use one to expose nico-rest-api on a domain name with TLS instead of a NodePort.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "OpenID Connect (OIDC) and identity providers",
+        "aliases": [
+          "OIDC",
+          "IdP",
+          "issuer",
+          "audience"
+        ],
+        "definition": "A standard for authentication built on OAuth 2.0. An identity provider issues signed tokens, and APIs validate them by checking the issuer and audience.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Keycloak",
+        "aliases": [
+          "keycloak",
+          "nico realm",
+          "realm"
+        ],
+        "definition": "An open-source identity provider that supports OIDC. setup.sh deploys a dev instance with a 'nico' realm and an 'ncx-service' client. You can point production at your own IdP instead.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "OAuth2 client credentials flow and JWT bearer tokens",
+        "aliases": [
+          "client_credentials",
+          "JWT",
+          "bearer token",
+          "iss claim",
+          "M2M"
+        ],
+        "definition": "A machine-to-machine flow in which a client exchanges its ID and secret for a signed JWT access token, then sends it in an Authorization: Bearer header. The token's iss claim must match what the API expects.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Temporal workflow engine",
+        "aliases": [
+          "Temporal",
+          "Temporal namespace"
+        ],
+        "definition": "A durable workflow orchestration system used by NICo REST. Each site's UUID becomes its Temporal namespace.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "gRPC",
+        "aliases": [
+          "gRPC API"
+        ],
+        "definition": "A remote procedure call framework that runs over HTTP/2. NICo Core exposes a gRPC API, which nico-admin-cli and the site-agent use.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "NICo REST site-agent",
+        "aliases": [
+          "site-agent",
+          "nico-rest-site-agent",
+          "site-manager"
+        ],
+        "definition": "A StatefulSet that connects a site's NICo Core to NICo REST. A bootstrap Job registers it with site-manager using a one-time password, and it is then bound to the site UUID.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "name": "Site and site UUID registration",
+        "aliases": [
+          "NICO_SITE_UUID",
+          "site registration",
+          "CLUSTER_ID"
+        ],
+        "definition": "Each NICo installation manages exactly one site, which has a stable UUID. setup.sh reuses, adopts or mints the UUID and registers the site automatically, so you must not create sites manually.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Org bootstrap (InfrastructureProvider, Tenant, TenantAccount)",
+        "aliases": [
+          "service-account/current",
+          "InfrastructureProvider",
+          "Tenant",
+          "TenantAccount"
+        ],
+        "definition": "A one-time GET call to the REST API. It lazily creates the org's InfrastructureProvider, a Tenant, and a TenantAccount linking them. Site operations return 404 until it has been called.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "nicocli",
+        "aliases": [
+          "nico-cli",
+          "~/.nico/config.yaml"
+        ],
+        "definition": "The CLI for the NICo REST API, built from rest-api/. It is used for site management, org bootstrap and instance operations.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "nico-admin-cli",
+        "aliases": [
+          "admin CLI",
+          "forge-admin-cli"
+        ],
+        "definition": "The CLI for the NICo Core gRPC API, built with cargo from crates/admin-cli. It is used for credentials, expected machines, TPM approval and host ingestion.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Site-wide BMC and UEFI credentials",
+        "aliases": [
+          "site-wide-root",
+          "UEFI password",
+          "bmcSiteWideRootSource",
+          "version 0 credential"
+        ],
+        "definition": "The BMC root password and the host and DPU UEFI passwords that NICo applies to machines after ingestion. All three must be set before Site Explorer will contact any BMC.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Expected machines manifest",
+        "aliases": [
+          "expected_machines.json",
+          "em replace-all"
+        ],
+        "definition": "A JSON list of the hosts NICo should ingest. Each entry has the BMC MAC address, factory BMC credentials and chassis serial number, plus an optional dpf_enabled flag.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Site Explorer",
+        "aliases": [
+          "site explorer",
+          "MissingCredentials"
+        ],
+        "definition": "The NICo Core process that repeatedly finds BMCs on the network and explores them over Redfish to discover hosts. It fails with MissingCredentials until the site-wide credentials are set.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Measured Boot with TPM 2.0",
+        "aliases": [
+          "TPM",
+          "PCR registers",
+          "attestation",
+          "trusted-machine approve"
+        ],
+        "definition": "A Trusted Platform Module records hashes of boot components in PCR registers. NICo compares these measurements to approved values to establish a machine's cryptographic identity before ingestion.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Host ingestion",
+        "aliases": [
+          "ingesting hosts",
+          "host discovery"
+        ],
+        "definition": "The process in which NICo discovers a host via Redfish, pairs it with its DPUs, provisions the DPUs and brings the host to a ready state.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Rack Management Service (RMS)",
+        "aliases": [
+          "RMS",
+          "rack-manager",
+          "nv-rms"
+        ],
+        "definition": "A NICo service installed by default in Phase 5c. It uses mTLS and an rms database on nico-pg-cluster, and you opt out with --skip-rms. The pages do not describe its function in detail.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "name": "Upgrade and teardown",
+        "aliases": [
+          "clean.sh",
+          "upgrade"
+        ],
+        "definition": "To upgrade, re-run setup.sh with new image tags; it preserves Vault, Postgres, MetalLB config and the site UUID. clean.sh removes all NICo components, namespaces and released volumes.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/quick-start.md"
+        ]
+      }
+    ],
+    "prerequisites": [
+      {
+        "concept": "NICo Core",
+        "requires": "NVIDIA Infra Controller (NICo)",
+        "confidence": 0.8,
+        "why": "Core is a component of the overall system"
+      },
+      {
+        "concept": "NICo REST",
+        "requires": "NICo Core",
+        "confidence": 0.7,
+        "why": "REST layers on top of Core via the site-agent"
+      },
+      {
+        "concept": "setup.sh orchestrator",
+        "requires": "Helm and helmfile",
+        "confidence": 0.85,
+        "why": "setup.sh wraps Helm charts and helmfile releases"
+      },
+      {
+        "concept": "setup.sh orchestrator",
+        "requires": "Kubernetes cluster",
+        "confidence": 0.9,
+        "why": "It deploys onto a cluster you provide"
+      },
+      {
+        "concept": "Preflight checks (preflight.sh)",
+        "requires": "setup.sh orchestrator",
+        "confidence": 0.6,
+        "why": "Preflight is a stage of setup and validates its inputs"
+      },
+      {
+        "concept": "Helm and helmfile",
+        "requires": "Kubernetes cluster",
+        "confidence": 0.85,
+        "why": "Helm installs resources into Kubernetes"
+      },
+      {
+        "concept": "Kustomize",
+        "requires": "Kubernetes workload and config objects",
+        "confidence": 0.7,
+        "why": "Kustomize patches Kubernetes manifests"
+      },
+      {
+        "concept": "Kubernetes workload and config objects",
+        "requires": "Kubernetes cluster",
+        "confidence": 0.8,
+        "why": "Objects exist within a cluster"
+      },
+      {
+        "concept": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+        "requires": "Kubernetes workload and config objects",
+        "confidence": 0.75,
+        "why": "Service types are a kind of Service object"
+      },
+      {
+        "concept": "Persistent storage (StorageClass, PVC, local-path-provisioner)",
+        "requires": "Kubernetes cluster",
+        "confidence": 0.7,
+        "why": "Kubernetes storage abstractions"
+      },
+      {
+        "concept": "MetalLB",
+        "requires": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+        "confidence": 0.9,
+        "why": "MetalLB implements LoadBalancer Services"
+      },
+      {
+        "concept": "MetalLB",
+        "requires": "BGP peering",
+        "confidence": 0.7,
+        "why": "BGP mode is the primary way MetalLB announces VIPs"
+      },
+      {
+        "concept": "MetalLB",
+        "requires": "IP subnets and CIDR notation",
+        "confidence": 0.7,
+        "why": "Address pools are given as CIDRs"
+      },
+      {
+        "concept": "Virtual IP address (VIP)",
+        "requires": "MetalLB",
+        "confidence": 0.75,
+        "why": "VIPs are allocated from MetalLB pools"
+      },
+      {
+        "concept": "Layer 2 advertisement (ARP)",
+        "requires": "MetalLB",
+        "confidence": 0.6,
+        "why": "L2Advertisement is a MetalLB mode"
+      },
+      {
+        "concept": "BGP peering",
+        "requires": "IP subnets and CIDR notation",
+        "confidence": 0.6,
+        "why": "BGP advertises IP prefixes"
+      },
+      {
+        "concept": "VXLAN and VNI",
+        "requires": "VLAN",
+        "confidence": 0.6,
+        "why": "VXLAN extends the L2 segmentation idea of VLANs"
+      },
+      {
+        "concept": "siteConfig (site TOML configuration)",
+        "requires": "IP subnets and CIDR notation",
+        "confidence": 0.8,
+        "why": "Most fields are prefixes and ranges"
+      },
+      {
+        "concept": "NICo resource pools",
+        "requires": "VXLAN and VNI",
+        "confidence": 0.7,
+        "why": "The VNI pool needs an understanding of VNIs"
+      },
+      {
+        "concept": "NICo resource pools",
+        "requires": "VLAN",
+        "confidence": 0.7,
+        "why": "The VLAN ID pool"
+      },
+      {
+        "concept": "Admin and underlay networks",
+        "requires": "IP subnets and CIDR notation",
+        "confidence": 0.8,
+        "why": "Networks are defined by prefix and gateway"
+      },
+      {
+        "concept": "FNN (site fabric isolation)",
+        "requires": "Admin and underlay networks",
+        "confidence": 0.5,
+        "why": "FNN modifies how site networks are isolated"
+      },
+      {
+        "concept": "PKI and CA trust",
+        "requires": "TLS certificates and X.509 SAN",
+        "confidence": 0.8,
+        "why": "CAs sign TLS certificates"
+      },
+      {
+        "concept": "Mutual TLS (mTLS)",
+        "requires": "TLS certificates and X.509 SAN",
+        "confidence": 0.85,
+        "why": "mTLS extends TLS with client certificates"
+      },
+      {
+        "concept": "cert-manager and Issuers",
+        "requires": "PKI and CA trust",
+        "confidence": 0.85,
+        "why": "Issuers represent CAs that sign certificates"
+      },
+      {
+        "concept": "cert-manager and Issuers",
+        "requires": "Kubernetes workload and config objects",
+        "confidence": 0.7,
+        "why": "Certificates are stored as Kubernetes Secrets"
+      },
+      {
+        "concept": "HashiCorp Vault",
+        "requires": "PKI and CA trust",
+        "confidence": 0.6,
+        "why": "Vault acts as a certificate issuer in NICo"
+      },
+      {
+        "concept": "Credential store (Vault vs Postgres)",
+        "requires": "HashiCorp Vault",
+        "confidence": 0.8,
+        "why": "Choosing a store requires knowing Vault"
+      },
+      {
+        "concept": "Credential store (Vault vs Postgres)",
+        "requires": "Zalando postgres-operator (nico-pg-cluster)",
+        "confidence": 0.6,
+        "why": "The alternative store is Postgres"
+      },
+      {
+        "concept": "External Secrets Operator",
+        "requires": "HashiCorp Vault",
+        "confidence": 0.6,
+        "why": "It syncs secrets from Vault"
+      },
+      {
+        "concept": "External Secrets Operator",
+        "requires": "Kubernetes workload and config objects",
+        "confidence": 0.7,
+        "why": "It produces Kubernetes Secrets"
+      },
+      {
+        "concept": "KMIP KEK provider",
+        "requires": "Mutual TLS (mTLS)",
+        "confidence": 0.6,
+        "why": "The KMIP client authenticates with client certificates"
+      },
+      {
+        "concept": "Zalando postgres-operator (nico-pg-cluster)",
+        "requires": "Persistent storage (StorageClass, PVC, local-path-provisioner)",
+        "confidence": 0.65,
+        "why": "Postgres volumes use StorageClasses"
+      },
+      {
+        "concept": "Kubernetes Ingress and ingress controllers",
+        "requires": "TLS certificates and X.509 SAN",
+        "confidence": 0.8,
+        "why": "The Ingress terminates TLS for the hostname"
+      },
+      {
+        "concept": "Kubernetes Ingress and ingress controllers",
+        "requires": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+        "confidence": 0.7,
+        "why": "Envoy is a LoadBalancer Service and the ingress replaces the NodePort"
+      },
+      {
+        "concept": "Kubernetes Ingress and ingress controllers",
+        "requires": "cert-manager and Issuers",
+        "confidence": 0.6,
+        "why": "The certificate is issued by cert-manager"
+      },
+      {
+        "concept": "Kubernetes Ingress and ingress controllers",
+        "requires": "DNS and DNS records",
+        "confidence": 0.7,
+        "why": "An A record must point at the Envoy address"
+      },
+      {
+        "concept": "Keycloak",
+        "requires": "OpenID Connect (OIDC) and identity providers",
+        "confidence": 0.8,
+        "why": "Keycloak is an OIDC IdP"
+      },
+      {
+        "concept": "OAuth2 client credentials flow and JWT bearer tokens",
+        "requires": "OpenID Connect (OIDC) and identity providers",
+        "confidence": 0.7,
+        "why": "Tokens are issued by the IdP"
+      },
+      {
+        "concept": "NICo REST",
+        "requires": "Keycloak",
+        "confidence": 0.6,
+        "why": "REST authentication depends on the IdP"
+      },
+      {
+        "concept": "NICo REST",
+        "requires": "Temporal workflow engine",
+        "confidence": 0.6,
+        "why": "REST workflows run on Temporal"
+      },
+      {
+        "concept": "NICo REST site-agent",
+        "requires": "NICo REST",
+        "confidence": 0.8,
+        "why": "It connects Core to REST"
+      },
+      {
+        "concept": "NICo REST site-agent",
+        "requires": "gRPC",
+        "confidence": 0.6,
+        "why": "It talks to Core's gRPC API"
+      },
+      {
+        "concept": "Site and site UUID registration",
+        "requires": "NICo REST site-agent",
+        "confidence": 0.7,
+        "why": "Registration is done by the site-agent bootstrap"
+      },
+      {
+        "concept": "Site and site UUID registration",
+        "requires": "Temporal workflow engine",
+        "confidence": 0.5,
+        "why": "The UUID is used as the Temporal namespace"
+      },
+      {
+        "concept": "Org bootstrap (InfrastructureProvider, Tenant, TenantAccount)",
+        "requires": "OAuth2 client credentials flow and JWT bearer tokens",
+        "confidence": 0.8,
+        "why": "The call needs a bearer token"
+      },
+      {
+        "concept": "Org bootstrap (InfrastructureProvider, Tenant, TenantAccount)",
+        "requires": "NICo REST",
+        "confidence": 0.8,
+        "why": "It is a REST API endpoint"
+      },
+      {
+        "concept": "nicocli",
+        "requires": "NICo REST",
+        "confidence": 0.85,
+        "why": "nicocli is the REST client"
+      },
+      {
+        "concept": "nicocli",
+        "requires": "OAuth2 client credentials flow and JWT bearer tokens",
+        "confidence": 0.7,
+        "why": "The config needs an auth token"
+      },
+      {
+        "concept": "nico-admin-cli",
+        "requires": "gRPC",
+        "confidence": 0.7,
+        "why": "It is a gRPC client"
+      },
+      {
+        "concept": "nico-admin-cli",
+        "requires": "NICo Core",
+        "confidence": 0.85,
+        "why": "It targets the Core API"
+      },
+      {
+        "concept": "DHCP and DHCP relay",
+        "requires": "IP subnets and CIDR notation",
+        "confidence": 0.6,
+        "why": "DHCP assigns addresses within subnets"
+      },
+      {
+        "concept": "Out-of-band (OOB) management network",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.8,
+        "why": "The OOB network connects the BMCs"
+      },
+      {
+        "concept": "Out-of-band (OOB) management network",
+        "requires": "DHCP and DHCP relay",
+        "confidence": 0.75,
+        "why": "BMC DHCP must be relayed to nico-dhcp"
+      },
+      {
+        "concept": "Redfish API",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "Redfish is served by BMCs"
+      },
+      {
+        "concept": "PXE / iPXE network boot",
+        "requires": "DHCP and DHCP relay",
+        "confidence": 0.8,
+        "why": "PXE relies on DHCP options"
+      },
+      {
+        "concept": "DOCA Platform Framework (DPF)",
+        "requires": "BlueField-3 DPU",
+        "confidence": 0.85,
+        "why": "DPF provisions DPUs"
+      },
+      {
+        "concept": "DOCA Platform Framework (DPF)",
+        "requires": "Kubernetes cluster",
+        "confidence": 0.6,
+        "why": "DPF is Kubernetes-based"
+      },
+      {
+        "concept": "Site-wide BMC and UEFI credentials",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "These credentials are applied to BMCs"
+      },
+      {
+        "concept": "Site-wide BMC and UEFI credentials",
+        "requires": "Credential store (Vault vs Postgres)",
+        "confidence": 0.65,
+        "why": "The credentials are written to the store"
+      },
+      {
+        "concept": "Site-wide BMC and UEFI credentials",
+        "requires": "nico-admin-cli",
+        "confidence": 0.6,
+        "why": "They are set via nico-admin-cli"
+      },
+      {
+        "concept": "Expected machines manifest",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.75,
+        "why": "Entries are keyed by BMC MAC and credentials"
+      },
+      {
+        "concept": "Site Explorer",
+        "requires": "Redfish API",
+        "confidence": 0.75,
+        "why": "It explores BMCs over Redfish"
+      },
+      {
+        "concept": "Site Explorer",
+        "requires": "Site-wide BMC and UEFI credentials",
+        "confidence": 0.7,
+        "why": "It refuses to run until the credentials are set"
+      },
+      {
+        "concept": "Host ingestion",
+        "requires": "Site Explorer",
+        "confidence": 0.75,
+        "why": "Discovery is the first stage of ingestion"
+      },
+      {
+        "concept": "Host ingestion",
+        "requires": "Expected machines manifest",
+        "confidence": 0.7,
+        "why": "Hosts must be listed in the manifest"
+      },
+      {
+        "concept": "Host ingestion",
+        "requires": "Measured Boot with TPM 2.0",
+        "confidence": 0.65,
+        "why": "Hosts must be approved via measured boot"
+      },
+      {
+        "concept": "Host ingestion",
+        "requires": "DOCA Platform Framework (DPF)",
+        "confidence": 0.6,
+        "why": "DPU provisioning during ingestion uses DPF by default"
+      },
+      {
+        "concept": "Upgrade and teardown",
+        "requires": "setup.sh orchestrator",
+        "confidence": 0.8,
+        "why": "You upgrade by re-running setup.sh"
+      },
+      {
+        "concept": "NTP time synchronization",
+        "requires": "DHCP and DHCP relay",
+        "confidence": 0.5,
+        "why": "NTP servers are delivered via DHCP options"
+      }
+    ]
+  }
+}

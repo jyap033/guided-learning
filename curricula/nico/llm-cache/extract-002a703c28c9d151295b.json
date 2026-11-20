@@ -1,0 +1,1440 @@
+{
+  "kind": "extract",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "concepts": [
+      {
+        "name": "NICo (NVIDIA Infra Controller)",
+        "aliases": [
+          "NICo",
+          "NVIDIA Infra Controller"
+        ],
+        "definition": "An open source suite of microservices for site-local, zero-trust lifecycle management of bare-metal hosts. It handles discovery, firmware, DPU provisioning, network isolation and tenant sanitization, and exposes all of this through APIs.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "overview/operational-principles.md",
+          "overview/lifecycle.md",
+          "overview/scope-and-boundaries.md"
+        ]
+      },
+      {
+        "name": "Bare-metal lifecycle management",
+        "aliases": [
+          "host lifecycle automation"
+        ],
+        "definition": "Managing physical servers from the moment they are racked: discovery, validation, provisioning to tenants, ongoing operation, and cleanup for reuse. The goal is for physical machines to behave like cloud instances.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "Managed Host",
+        "aliases": [
+          "managed host",
+          "compute system"
+        ],
+        "definition": "A host server paired with one or more BlueField DPUs that NICo manages. The DPUs act as the enforcement boundary for network isolation and security.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/hardware.md"
+        ]
+      },
+      {
+        "name": "BlueField DPU",
+        "aliases": [
+          "DPU",
+          "Data Processing Unit",
+          "BF3",
+          "BlueField-3"
+        ],
+        "definition": "An NVIDIA SmartNIC with its own ARM CPU, OS and BMC. It sits in the server and handles networking independently of the host. In NICo it is the trust anchor and the point where network isolation is enforced.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "overview/operational-principles.md",
+          "getting-started/prerequisites/hardware.md"
+        ]
+      },
+      {
+        "name": "DPU mode vs NIC mode",
+        "aliases": [
+          "DPU policy nic",
+          "zero-DPU host"
+        ],
+        "definition": "A BlueField can run in DPU mode, where its ARM OS manages networking, or in NIC mode, where it acts as a plain NIC. Hosts in NIC mode and hosts without a DPU (zero-DPU hosts) use central DHCP on HostInband instead of a local DHCP server on the DPU.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/hardware.md",
+          "getting-started/prerequisites/bmc-oob-setup.md"
+        ]
+      },
+      {
+        "name": "Baseboard Management Controller (BMC)",
+        "aliases": [
+          "BMC",
+          "iDRAC",
+          "iLO",
+          "XClarity",
+          "host BMC",
+          "DPU BMC"
+        ],
+        "definition": "A small, independent controller on a server or DPU that allows remote power control, monitoring and firmware updates over a management network, even when the main OS is down.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "getting-started/prerequisites/hardware.md",
+          "getting-started/prerequisites/bmc-oob-setup.md"
+        ]
+      },
+      {
+        "name": "Redfish API",
+        "aliases": [
+          "Redfish"
+        ],
+        "definition": "A standard REST/HTTPS API exposed by BMCs for out-of-band management: power control, boot order, firmware inventory and update, sensors, and Serial-over-LAN. NICo talks to BMCs only through Redfish.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/bmc-oob-setup.md",
+          "getting-started/prerequisites/hardware.md"
+        ]
+      },
+      {
+        "name": "Out-of-band (OOB) management",
+        "aliases": [
+          "OOB",
+          "OOB network",
+          "out-of-band monitoring"
+        ],
+        "definition": "Managing and monitoring hardware over a separate management network through BMCs, without going through the host OS. NICo relies only on out-of-band paths so a compromised host cannot spoof or block monitoring.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/operational-principles.md",
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/bmc-oob-setup.md"
+        ]
+      },
+      {
+        "name": "Zero-trust host model",
+        "aliases": [
+          "the machine is untrustworthy",
+          "zero-trust"
+        ],
+        "definition": "NICo's principle that software inside the host OS is never trusted for security or isolation decisions. Enforcement happens on the DPU, and monitoring happens out-of-band.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/operational-principles.md",
+          "overview/capabilities.md",
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "name": "Site Controller",
+        "aliases": [
+          "NICo control plane"
+        ],
+        "definition": "The NICo control plane: a suite of microservices running on a Kubernetes cluster of at least three nodes, located in the datacenter it manages.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/hardware.md"
+        ]
+      },
+      {
+        "name": "API Service (NICo Core)",
+        "aliases": [
+          "nico-api",
+          "NICo Core"
+        ],
+        "definition": "NICo's central control-plane service and single source of truth. It is the only service that reads and writes PostgreSQL, it implements state machines for managed resources, and other services talk to it over mTLS/gRPC.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "State machine (resource lifecycle)",
+        "aliases": [
+          "state machines"
+        ],
+        "definition": "A model where each managed resource, such as a host or network segment, moves through defined states (for example Decommissioning/Decommissioned) with controlled transitions between them.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "NICo REST (JSON API)",
+        "aliases": [
+          "NICo REST",
+          "cloud-api",
+          "REST API"
+        ],
+        "definition": "The REST API that exposes NICo to operators and ISVs, authenticated with JWT. It can be deployed next to the site controller or centrally in the cloud, serving multiple sites.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "Site Agent",
+        "aliases": [
+          "elektra-site-agent"
+        ],
+        "definition": "A site-controller service that keeps a Temporal connection to NICo REST. It syncs data and passes requests on to the local API Service, so NICo REST can run centrally while sites run on-premises.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "Admin CLI",
+        "aliases": [
+          "nico-admin-cli"
+        ],
+        "definition": "A command-line tool for site administrators that connects directly to the API Service over mTLS/gRPC. It is used, for example, to set site-wide credentials.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/bmc-oob-setup.md"
+        ]
+      },
+      {
+        "name": "Scout",
+        "aliases": [],
+        "definition": "A temporary agent that runs on the x86 host during discovery. It collects hardware inventory that cannot be gathered out-of-band, runs validation tests, and reports to the API Service.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "name": "DPU Agent",
+        "aliases": [],
+        "definition": "A persistent daemon on the DPU's ARM OS. Every 30 seconds it asks the API Service for the desired network configuration, applies it through HBN, and reports back the state it observes. It also handles health checks and updates.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "name": "Metadata Service (FMDS)",
+        "aliases": [
+          "FMDS",
+          "instance metadata"
+        ],
+        "definition": "A service on the DPU that gives tenant workloads instance metadata, such as machine ID and boot info, through a local HTTP API on the host-facing interface.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "Host-Based Networking (HBN)",
+        "aliases": [
+          "HBN",
+          "Containerized Cumulus",
+          "NVUE"
+        ],
+        "definition": "NVIDIA's networking stack that runs Cumulus Linux routing in containers on the DPU, configured through NVUE. NICo uses it to enforce VXLAN/EVPN tenant isolation without changing the physical switches.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "overview/operational-principles.md"
+        ]
+      },
+      {
+        "name": "mTLS / gRPC",
+        "aliases": [
+          "mutual TLS",
+          "gRPC"
+        ],
+        "definition": "gRPC is a binary RPC protocol. Mutual TLS means both client and server present certificates to prove their identity. All NICo control-plane services talk to each other using gRPC over mTLS.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "Kubernetes",
+        "aliases": [
+          "K8s"
+        ],
+        "definition": "A container orchestration platform. NICo's control plane is deployed on it as microservices and needs v1.30 or later.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "getting-started/prerequisites/hardware.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "Kubernetes Operator / CRDs",
+        "aliases": [
+          "operator",
+          "ClusterIssuer",
+          "ExternalSecret",
+          "ClusterSecretStore"
+        ],
+        "definition": "Kubernetes controllers that manage software through custom resource objects. NICo's prerequisites, such as cert-manager, ESO and the Zalando Postgres Operator, are configured through resources like these.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "DHCP",
+        "aliases": [
+          "DHCP relay",
+          "nico-dhcp"
+        ],
+        "definition": "The protocol devices use to get IP addresses automatically. A DHCP relay forwards requests from one network segment to a central server. NICo discovers BMCs when their relayed DHCP requests reach nico-dhcp.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/bmc-oob-setup.md",
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "name": "PXE / iPXE boot",
+        "aliases": [
+          "PXE",
+          "iPXE",
+          "network boot"
+        ],
+        "definition": "Booting a machine over the network, where firmware fetches boot scripts and OS images from a server. NICo's PXE Service delivers iPXE scripts, cloud-init data and images over HTTP.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/lifecycle.md",
+          "overview/scope-and-boundaries.md",
+          "overview/operational-principles.md"
+        ]
+      },
+      {
+        "name": "cloud-init",
+        "aliases": [
+          "user-data"
+        ],
+        "definition": "A standard tool for configuring an OS on first boot from supplied user-data. NICo's PXE Service serves cloud-init user-data to hosts.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "name": "DNS (authoritative and recursive)",
+        "aliases": [
+          "unbound",
+          "Authoritative DNS Service"
+        ],
+        "definition": "An authoritative DNS server answers for zones it owns. A recursive resolver looks up any name for clients. NICo runs both: an authoritative server for its delegated zones, and unbound for managed machines.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "name": "UEFI firmware and Secure Boot",
+        "aliases": [
+          "UEFI",
+          "BIOS",
+          "Secure Boot",
+          "boot order"
+        ],
+        "definition": "UEFI is the server firmware that initializes hardware and picks the boot device. Secure Boot only allows signed bootloaders and kernels to run. NICo manages UEFI settings, boot order and passwords.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "getting-started/prerequisites/hardware.md",
+          "getting-started/prerequisites/bmc-oob-setup.md"
+        ]
+      },
+      {
+        "name": "UEFI lockdown",
+        "aliases": [
+          "host lockdown"
+        ],
+        "definition": "Locking UEFI/BIOS settings while a tenant has the host, together with disabling in-band host-to-BMC access, so the tenant cannot change firmware configuration.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "TPM and Measured Boot attestation",
+        "aliases": [
+          "TPM 2.0",
+          "PCR",
+          "attestation",
+          "Measured Boot"
+        ],
+        "definition": "A TPM chip records hashes of boot components in Platform Configuration Registers (PCRs). Attestation checks these measurements and the TPM's signature, using the TPM Manufacturer CA, to prove a host booted untampered. In NICo it is off by default.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/hardware.md"
+        ]
+      },
+      {
+        "name": "Hardware discovery and ingestion",
+        "aliases": [
+          "Site Explorer",
+          "crawler",
+          "ingestion"
+        ],
+        "definition": "NICo's zero-touch Day 0 process. It finds BMCs over the OOB network, collects inventory through Redfish, pairs DPUs to hosts using LLDP and serial numbers, and brings hosts under management.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "overview/lifecycle.md",
+          "overview/capabilities.md",
+          "getting-started/prerequisites/bmc-oob-setup.md"
+        ]
+      },
+      {
+        "name": "LLDP",
+        "aliases": [
+          "Link Layer Discovery Protocol"
+        ],
+        "definition": "A layer-2 protocol where devices advertise their identity to directly connected neighbors. NICo uses it to work out which DPU belongs to which host.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "SKU validation and burn-in",
+        "aliases": [
+          "machine validation"
+        ],
+        "definition": "Checking that each machine has the expected hardware components for its SKU, then running hardware and connectivity tests (including NVLink and InfiniBand multi-node tests) before the host is made available.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "Firmware baseline enforcement",
+        "aliases": [
+          "site baseline",
+          "firmware compliance"
+        ],
+        "definition": "Taking inventory of UEFI/BMC firmware and updating hosts to a site-defined baseline. Hosts that cannot be brought to the baseline are quarantined. Later updates are scheduled on healthy, unoccupied hosts.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "Expected Machines Manifest",
+        "aliases": [
+          "expected_machines.json"
+        ],
+        "definition": "A JSON file listing each host's BMC MAC address, chassis serial number and factory BMC credentials. Only hosts in this file are discovered and ingested.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/prerequisites/bmc-oob-setup.md"
+        ]
+      },
+      {
+        "name": "Site-wide BMC and UEFI credentials",
+        "aliases": [
+          "credential rotation",
+          "MissingCredentials"
+        ],
+        "definition": "Site-managed passwords that NICo sets on host/DPU BMCs and UEFI after it takes over from the factory defaults. They must be configured before ingestion starts.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "getting-started/prerequisites/bmc-oob-setup.md",
+          "overview/capabilities.md"
+        ]
+      },
+      {
+        "name": "Day 0 / Day 1 / Day 2 lifecycle",
+        "aliases": [
+          "Day 0",
+          "Day 1",
+          "Day 2"
+        ],
+        "definition": "NICo's three lifecycle phases. Day 0 covers bring-up, discovery and ingestion. Day 1 covers isolation, lockdown and provisioning. Day 2 covers operations, monitoring, upgrades and tenant transitions.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "Instance and instance type",
+        "aliases": [
+          "instance types"
+        ],
+        "definition": "An instance is a host allocated to a tenant. An instance type is an operator-defined hardware class used to request hosts through the API.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/lifecycle.md",
+          "overview/scope-and-boundaries.md"
+        ]
+      },
+      {
+        "name": "Multi-tenancy",
+        "aliases": [
+          "tenant"
+        ],
+        "definition": "Several customers (tenants) share the same physical infrastructure, and each must be isolated from the others.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "overview/scope-and-boundaries.md"
+        ]
+      },
+      {
+        "name": "Tenant sanitization",
+        "aliases": [
+          "tenant transition",
+          "tenant release",
+          "tenant lifecycle cleanup"
+        ],
+        "definition": "The cleanup after a tenant releases a host. It includes secure disk erase, memory-overwrite verification, IB reset, TPM clear, re-attestation, and network cleanup that only counts as complete once the DPU confirms it has left all tenant networks.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "overview/lifecycle.md",
+          "overview/capabilities.md"
+        ]
+      },
+      {
+        "name": "Secure Erase",
+        "aliases": [
+          "NVMe secure erase"
+        ],
+        "definition": "A drive-level command that cryptographically or physically wipes all data on NVMe/SAS/SATA drives. NICo requires drives that support it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/hardware.md"
+        ]
+      },
+      {
+        "name": "Network planes (Ethernet, InfiniBand, NVLink)",
+        "aliases": [
+          "N/S",
+          "E/W",
+          "Spectrum-X"
+        ],
+        "definition": "The separate fabrics in an AI cluster. Ethernet carries north-south traffic, InfiniBand and Spectrum-X carry east-west GPU traffic, and NVLink connects GPUs. NICo isolates tenants on each of them.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "InfiniBand partitioning with UFM (P_Key)",
+        "aliases": [
+          "UFM",
+          "P_Key",
+          "partition key"
+        ],
+        "definition": "InfiniBand isolates traffic with partition keys (P_Keys). NVIDIA's UFM fabric manager assigns them, and NICo calls UFM APIs to put a tenant's ports into that tenant's partition.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "overview/operational-principles.md",
+          "overview/scope-and-boundaries.md"
+        ]
+      },
+      {
+        "name": "NVLink partitioning with NMX-C",
+        "aliases": [
+          "NMX-C",
+          "NVLink partition",
+          "NVL domain"
+        ],
+        "definition": "NMX-C is the NVLink fabric controller. NICo uses its gRPC API to place GPUs into tenant NVLink logical partitions and to check that the NVLink domain is healthy before allocating instances.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "overview/scope-and-boundaries.md"
+        ]
+      },
+      {
+        "name": "GB200 NVL72 rack-scale management (NICo Flow)",
+        "aliases": [
+          "NICo Flow",
+          "NVL72",
+          "MNNVL"
+        ],
+        "definition": "NICo's rack-level management for GB200 NVL72 systems. It treats racks and NVL domains as units and sequences power, firmware, leak response and power profiles across the trays in a rack.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "Static network fabric principle",
+        "aliases": [
+          "static underlay"
+        ],
+        "definition": "Leaf/spine switches are never reconfigured when tenants change. All tenant isolation is done on DPUs and through fabric manager APIs.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/operational-principles.md",
+          "overview/scope-and-boundaries.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "Underlay and overlay networks",
+        "aliases": [
+          "underlay",
+          "overlay",
+          "admin overlay"
+        ],
+        "definition": "The underlay is the physical routed network of switches. Overlays are virtual networks tunneled over it, such as tenant VPCs or the admin network.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/scope-and-boundaries.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "name": "BGP",
+        "aliases": [
+          "eBGP",
+          "BGP unnumbered",
+          "RFC 5549",
+          "route server"
+        ],
+        "definition": "The routing protocol networks use to exchange routes. In NICo each DPU runs eBGP, often unnumbered (peering over link-local IPv6), with leaf switches or route servers to advertise its loopback and tenant routes.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/network.md",
+          "overview/scope-and-boundaries.md"
+        ]
+      },
+      {
+        "name": "Autonomous System Number (ASN)",
+        "aliases": [
+          "ASN",
+          "32-bit ASN"
+        ],
+        "definition": "An identifier for a BGP routing domain. NICo gives every DPU a unique 32-bit ASN from a pool, following RFC 7938 data-center routing practice.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "name": "VXLAN / EVPN",
+        "aliases": [
+          "L3 VXLAN/EVPN",
+          "BGP EVPN",
+          "VTEP"
+        ],
+        "definition": "VXLAN wraps Layer-2/3 traffic in UDP so overlay networks can run over a routed underlay. EVPN is the BGP address family that spreads overlay reachability. DPUs act as the VXLAN tunnel endpoints (VTEPs).",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "name": "VNI (L2VNI / L3VNI)",
+        "aliases": [
+          "VNI",
+          "VXLAN Network Identifier"
+        ],
+        "definition": "The ID that tells VXLAN overlay segments apart. Each VPC needs a unique L3VNI for its VRF, and the admin network uses one L2VNI. VNIs must be unique across the datacenter.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/prerequisites/network.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "name": "VRF",
+        "aliases": [
+          "Virtual Routing and Forwarding",
+          "tenant VRF"
+        ],
+        "definition": "A separate routing table on one device, which keeps each tenant's routes isolated from the others.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "name": "Route targets (import/export)",
+        "aliases": [
+          "RT",
+          "route_targets_on_exports"
+        ],
+        "definition": "BGP EVPN tags attached to routes that decide which VRFs import them. NICo uses conventional values (:50100 to :50500) so tenant/admin networks and control-plane VIPs can reach each other.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "name": "VPC (FNN VPC)",
+        "aliases": [
+          "VPC",
+          "tenant network",
+          "FNN"
+        ],
+        "definition": "A tenant's isolated virtual network, set up through the API. In FNN VPCs each instance interface gets a routed /31 link to its DPU gateway, and there is no shared L2 subnet.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/capabilities.md",
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "name": "IP address pools",
+        "aliases": [
+          "admin network",
+          "DPU loopback pool",
+          "management network",
+          "HostInband"
+        ],
+        "definition": "Address ranges the site owner gives NICo for allocation: OOB management, DPU loopbacks, admin network, tenant networks (/31 per interface), and control-plane service VIPs.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/prerequisites/network.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/bmc-oob-setup.md"
+        ]
+      },
+      {
+        "name": "CIDR prefixes and /31 point-to-point subnets",
+        "aliases": [
+          "/31",
+          "/32 loopback",
+          "IPv4 prefix"
+        ],
+        "definition": "CIDR notation gives the size of an IP block. A /31 holds exactly two addresses for a point-to-point link, and a /32 is a single host address such as a loopback.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/prerequisites/network.md"
+        ]
+      },
+      {
+        "name": "PF and VF (SR-IOV)",
+        "aliases": [
+          "SR-IOV",
+          "physical function",
+          "virtual function",
+          "PF representor"
+        ],
+        "definition": "SR-IOV lets one NIC appear as a physical function (PF) plus several lightweight virtual functions (VFs). NICo gives each PF or VF its own tenant interface and /31.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/prerequisites/network.md",
+          "getting-started/prerequisites/hardware.md"
+        ]
+      },
+      {
+        "name": "MetalLB LoadBalancer VIPs",
+        "aliases": [
+          "MetalLB",
+          "service VIP"
+        ],
+        "definition": "MetalLB gives bare-metal Kubernetes LoadBalancer services virtual IPs and advertises them over BGP or L2. This makes NICo pods reachable from BMCs, the admin network and tenant VPCs.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/hardware.md",
+          "getting-started/prerequisites/network.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "CNI",
+        "aliases": [
+          "Calico",
+          "Container Network Interface"
+        ],
+        "definition": "The Kubernetes plugin layer that provides pod networking. Calico is validated for NICo. Tenant clusters need a CNI that works over routed (not L2) node connectivity.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/prerequisites/software.md",
+          "getting-started/prerequisites/network.md",
+          "overview/scope-and-boundaries.md"
+        ]
+      },
+      {
+        "name": "PostgreSQL (Zalando operator)",
+        "aliases": [
+          "Postgres",
+          "Spilo",
+          "nico_system_nico"
+        ],
+        "definition": "The relational database holding all NICo state. Only the API Service reads and writes it. The reference deployment uses the Zalando Postgres Operator and needs the btree_gin and pg_trgm extensions.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "HashiCorp Vault",
+        "aliases": [
+          "Vault",
+          "PKI engine",
+          "KV secrets engine"
+        ],
+        "definition": "A secrets manager whose PKI engine issues certificates and whose KV engine stores credentials. NICo services authenticate to it with Kubernetes auth. It is optional: the --skip-vault install keeps credentials in Postgres instead.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "PKI and TLS certificates",
+        "aliases": [
+          "CA",
+          "certificate authority",
+          "SAN"
+        ],
+        "definition": "Public key infrastructure: a certificate authority signs certificates that bind identities (DNS names in the SANs) to keys. Services use these certificates for TLS and mTLS.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/prerequisites/software.md",
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "name": "cert-manager",
+        "aliases": [
+          "ClusterIssuer",
+          "approver-policy",
+          "site-issuer"
+        ],
+        "definition": "A Kubernetes controller that issues and rotates TLS certificates from configured issuers, such as the site-root CA or Vault PKI. NICo uses it for its mTLS certificates.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "External Secrets Operator (ESO)",
+        "aliases": [
+          "ESO",
+          "ExternalSecret"
+        ],
+        "definition": "A Kubernetes operator that copies secrets from a backing store into Kubernetes Secret objects. In NICo it copies CA bundles and DB credentials into NICo namespaces.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "Temporal workflow engine",
+        "aliases": [
+          "Temporal",
+          "Temporal namespace"
+        ],
+        "definition": "A durable workflow orchestration engine. NICo REST uses it for multi-step operations such as provisioning and release, and the Site Agent connects through it. It needs the cloud and site namespaces plus one per site UUID.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "Observability stack (Prometheus, Grafana, Loki, OpenTelemetry)",
+        "aliases": [
+          "Prometheus",
+          "Loki",
+          "OpenTelemetry",
+          "Grafana",
+          "/metrics"
+        ],
+        "definition": "Tools for metrics scraping (Prometheus), dashboards (Grafana), log aggregation (Loki) and telemetry shipping (OpenTelemetry Collector). NICo exports Prometheus metrics and sends logs to Loki.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "name": "Hardware Health service",
+        "aliases": [
+          "Hardware Health"
+        ],
+        "definition": "A NICo service that scrapes host and DPU BMCs over Redfish for sensor data and firmware inventory. It exposes /metrics and /telemetry and reports health alerts to the API Service.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "name": "Serial-over-LAN and SSH Console Service",
+        "aliases": [
+          "SOL",
+          "IPMI",
+          "serial console"
+        ],
+        "definition": "Serial-over-LAN carries a server's serial console over the BMC network. NICo's SSH Console Service keeps SSH/IPMI connections to BMCs open so admins and tenants get live console access, and the output is logged to Loki.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/bmc-oob-setup.md"
+        ]
+      },
+      {
+        "name": "OIDC / JWT authentication (Keycloak)",
+        "aliases": [
+          "OIDC",
+          "JWT",
+          "Keycloak",
+          "IDP"
+        ],
+        "definition": "OIDC is a standard for logging in through an identity provider such as Keycloak, which issues signed JWT tokens. NICo REST accepts JWTs, and the admin web UI uses OIDC.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md"
+        ]
+      },
+      {
+        "name": "GitOps with ArgoCD",
+        "aliases": [
+          "ArgoCD"
+        ],
+        "definition": "Continuous delivery where a controller syncs cluster state from Git. It is an optional way to deploy and update NICo.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "name": "NICo scope boundaries",
+        "aliases": [
+          "boot handoff"
+        ],
+        "definition": "NICo covers everything from the physical underlay up to the OS boot handoff. OS management, cluster assembly (Kubernetes/SLURM), workload scheduling and switch configuration belong to the platform or network team.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "overview/scope-and-boundaries.md",
+          "overview/what-is-nico.md",
+          "overview/operational-principles.md"
+        ]
+      }
+    ],
+    "prerequisites": [
+      {
+        "concept": "Managed Host",
+        "requires": "BlueField DPU",
+        "confidence": 0.9,
+        "why": "A managed host is defined as a server paired with DPUs"
+      },
+      {
+        "concept": "DPU mode vs NIC mode",
+        "requires": "BlueField DPU",
+        "confidence": 0.85,
+        "why": "These are operating modes of the DPU"
+      },
+      {
+        "concept": "Redfish API",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.9,
+        "why": "Redfish is the API that BMCs expose"
+      },
+      {
+        "concept": "Out-of-band (OOB) management",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "OOB management is done through BMCs"
+      },
+      {
+        "concept": "Zero-trust host model",
+        "requires": "Out-of-band (OOB) management",
+        "confidence": 0.7,
+        "why": "The model depends on monitoring out-of-band"
+      },
+      {
+        "concept": "Zero-trust host model",
+        "requires": "BlueField DPU",
+        "confidence": 0.8,
+        "why": "The DPU is the trust anchor"
+      },
+      {
+        "concept": "Site Controller",
+        "requires": "Kubernetes",
+        "confidence": 0.85,
+        "why": "The site controller runs as microservices on Kubernetes"
+      },
+      {
+        "concept": "API Service (NICo Core)",
+        "requires": "mTLS / gRPC",
+        "confidence": 0.7,
+        "why": "All services talk to it over mTLS/gRPC"
+      },
+      {
+        "concept": "API Service (NICo Core)",
+        "requires": "State machine (resource lifecycle)",
+        "confidence": 0.7,
+        "why": "It implements state machines for every resource"
+      },
+      {
+        "concept": "Site Agent",
+        "requires": "Temporal workflow engine",
+        "confidence": 0.8,
+        "why": "It connects to NICo REST through Temporal"
+      },
+      {
+        "concept": "Site Agent",
+        "requires": "NICo REST (JSON API)",
+        "confidence": 0.75,
+        "why": "It syncs and delegates requests between NICo REST and the site"
+      },
+      {
+        "concept": "NICo REST (JSON API)",
+        "requires": "OIDC / JWT authentication (Keycloak)",
+        "confidence": 0.6,
+        "why": "Clients authenticate with JWT"
+      },
+      {
+        "concept": "DPU Agent",
+        "requires": "Host-Based Networking (HBN)",
+        "confidence": 0.8,
+        "why": "It applies configuration through HBN"
+      },
+      {
+        "concept": "DPU Agent",
+        "requires": "API Service (NICo Core)",
+        "confidence": 0.7,
+        "why": "It polls the API Service for desired state"
+      },
+      {
+        "concept": "Host-Based Networking (HBN)",
+        "requires": "VXLAN / EVPN",
+        "confidence": 0.75,
+        "why": "HBN enforces isolation with VXLAN/EVPN"
+      },
+      {
+        "concept": "Host-Based Networking (HBN)",
+        "requires": "BlueField DPU",
+        "confidence": 0.85,
+        "why": "HBN runs on the DPU"
+      },
+      {
+        "concept": "mTLS / gRPC",
+        "requires": "PKI and TLS certificates",
+        "confidence": 0.85,
+        "why": "mTLS uses certificates on both sides"
+      },
+      {
+        "concept": "cert-manager",
+        "requires": "PKI and TLS certificates",
+        "confidence": 0.85,
+        "why": "It issues TLS certificates"
+      },
+      {
+        "concept": "cert-manager",
+        "requires": "Kubernetes Operator / CRDs",
+        "confidence": 0.7,
+        "why": "It is configured with ClusterIssuer and Certificate resources"
+      },
+      {
+        "concept": "External Secrets Operator (ESO)",
+        "requires": "Kubernetes Operator / CRDs",
+        "confidence": 0.7,
+        "why": "It is configured with ExternalSecret resources"
+      },
+      {
+        "concept": "HashiCorp Vault",
+        "requires": "PKI and TLS certificates",
+        "confidence": 0.65,
+        "why": "Its PKI engine issues certificates"
+      },
+      {
+        "concept": "Kubernetes Operator / CRDs",
+        "requires": "Kubernetes",
+        "confidence": 0.9,
+        "why": "Operators extend Kubernetes"
+      },
+      {
+        "concept": "PostgreSQL (Zalando operator)",
+        "requires": "Kubernetes Operator / CRDs",
+        "confidence": 0.6,
+        "why": "The reference deployment runs it through an operator"
+      },
+      {
+        "concept": "MetalLB LoadBalancer VIPs",
+        "requires": "Kubernetes",
+        "confidence": 0.8,
+        "why": "It provides VIPs for Kubernetes LoadBalancer services"
+      },
+      {
+        "concept": "MetalLB LoadBalancer VIPs",
+        "requires": "BGP",
+        "confidence": 0.6,
+        "why": "It advertises VIPs as L3 routes"
+      },
+      {
+        "concept": "CNI",
+        "requires": "Kubernetes",
+        "confidence": 0.85,
+        "why": "CNI is Kubernetes pod networking"
+      },
+      {
+        "concept": "PXE / iPXE boot",
+        "requires": "DHCP",
+        "confidence": 0.8,
+        "why": "PXE uses DHCP to find its boot server"
+      },
+      {
+        "concept": "PXE / iPXE boot",
+        "requires": "UEFI firmware and Secure Boot",
+        "confidence": 0.6,
+        "why": "UEFI starts the network boot and sets boot order"
+      },
+      {
+        "concept": "UEFI lockdown",
+        "requires": "UEFI firmware and Secure Boot",
+        "confidence": 0.85,
+        "why": "Lockdown restricts UEFI settings"
+      },
+      {
+        "concept": "Hardware discovery and ingestion",
+        "requires": "Redfish API",
+        "confidence": 0.85,
+        "why": "Inventory is collected through Redfish"
+      },
+      {
+        "concept": "Hardware discovery and ingestion",
+        "requires": "DHCP",
+        "confidence": 0.75,
+        "why": "BMCs are found from their relayed DHCP requests"
+      },
+      {
+        "concept": "Hardware discovery and ingestion",
+        "requires": "LLDP",
+        "confidence": 0.6,
+        "why": "DPU-to-host pairing uses LLDP"
+      },
+      {
+        "concept": "Hardware discovery and ingestion",
+        "requires": "Expected Machines Manifest",
+        "confidence": 0.7,
+        "why": "Only hosts listed in the manifest are ingested"
+      },
+      {
+        "concept": "Hardware discovery and ingestion",
+        "requires": "Site-wide BMC and UEFI credentials",
+        "confidence": 0.7,
+        "why": "Ingestion aborts until these credentials are set"
+      },
+      {
+        "concept": "Expected Machines Manifest",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.7,
+        "why": "It lists BMC MAC addresses and credentials"
+      },
+      {
+        "concept": "Firmware baseline enforcement",
+        "requires": "Redfish API",
+        "confidence": 0.7,
+        "why": "Firmware inventory and updates go through Redfish"
+      },
+      {
+        "concept": "Firmware baseline enforcement",
+        "requires": "UEFI firmware and Secure Boot",
+        "confidence": 0.6,
+        "why": "UEFI is one of the firmware components it manages"
+      },
+      {
+        "concept": "TPM and Measured Boot attestation",
+        "requires": "UEFI firmware and Secure Boot",
+        "confidence": 0.6,
+        "why": "Measured boot records the UEFI boot chain"
+      },
+      {
+        "concept": "Tenant sanitization",
+        "requires": "Secure Erase",
+        "confidence": 0.75,
+        "why": "Drives are wiped with secure erase"
+      },
+      {
+        "concept": "Tenant sanitization",
+        "requires": "TPM and Measured Boot attestation",
+        "confidence": 0.6,
+        "why": "It includes TPM clear and re-attestation"
+      },
+      {
+        "concept": "Tenant sanitization",
+        "requires": "VRF",
+        "confidence": 0.6,
+        "why": "Network cleanup tears down the tenant VRF"
+      },
+      {
+        "concept": "Tenant sanitization",
+        "requires": "Multi-tenancy",
+        "confidence": 0.75,
+        "why": "It exists to make tenant transitions safe"
+      },
+      {
+        "concept": "Instance and instance type",
+        "requires": "Managed Host",
+        "confidence": 0.75,
+        "why": "An instance is a managed host allocated to a tenant"
+      },
+      {
+        "concept": "Instance and instance type",
+        "requires": "Multi-tenancy",
+        "confidence": 0.6,
+        "why": "Instances are allocated to tenants"
+      },
+      {
+        "concept": "InfiniBand partitioning with UFM (P_Key)",
+        "requires": "Network planes (Ethernet, InfiniBand, NVLink)",
+        "confidence": 0.65,
+        "why": "It assumes knowledge of the InfiniBand fabric"
+      },
+      {
+        "concept": "NVLink partitioning with NMX-C",
+        "requires": "Network planes (Ethernet, InfiniBand, NVLink)",
+        "confidence": 0.65,
+        "why": "It assumes knowledge of the NVLink fabric"
+      },
+      {
+        "concept": "GB200 NVL72 rack-scale management (NICo Flow)",
+        "requires": "NVLink partitioning with NMX-C",
+        "confidence": 0.6,
+        "why": "NVL domains and NVLink cluster readiness are central to it"
+      },
+      {
+        "concept": "Static network fabric principle",
+        "requires": "Underlay and overlay networks",
+        "confidence": 0.75,
+        "why": "Isolation in overlays is what lets the underlay stay static"
+      },
+      {
+        "concept": "VXLAN / EVPN",
+        "requires": "Underlay and overlay networks",
+        "confidence": 0.8,
+        "why": "VXLAN builds overlays on top of an underlay"
+      },
+      {
+        "concept": "VXLAN / EVPN",
+        "requires": "BGP",
+        "confidence": 0.8,
+        "why": "EVPN is a BGP address family"
+      },
+      {
+        "concept": "VNI (L2VNI / L3VNI)",
+        "requires": "VXLAN / EVPN",
+        "confidence": 0.85,
+        "why": "VNIs identify VXLAN segments"
+      },
+      {
+        "concept": "VNI (L2VNI / L3VNI)",
+        "requires": "VRF",
+        "confidence": 0.6,
+        "why": "An L3VNI identifies a VPC's VRF"
+      },
+      {
+        "concept": "Autonomous System Number (ASN)",
+        "requires": "BGP",
+        "confidence": 0.85,
+        "why": "ASNs identify BGP speakers"
+      },
+      {
+        "concept": "Route targets (import/export)",
+        "requires": "VXLAN / EVPN",
+        "confidence": 0.75,
+        "why": "Route targets are attached to EVPN routes"
+      },
+      {
+        "concept": "Route targets (import/export)",
+        "requires": "VRF",
+        "confidence": 0.8,
+        "why": "Route targets control which VRFs import routes"
+      },
+      {
+        "concept": "VPC (FNN VPC)",
+        "requires": "VXLAN / EVPN",
+        "confidence": 0.75,
+        "why": "VPCs are routed VXLAN/EVPN overlays"
+      },
+      {
+        "concept": "VPC (FNN VPC)",
+        "requires": "VRF",
+        "confidence": 0.7,
+        "why": "Each VPC is a VRF"
+      },
+      {
+        "concept": "VPC (FNN VPC)",
+        "requires": "CIDR prefixes and /31 point-to-point subnets",
+        "confidence": 0.7,
+        "why": "Each interface gets a /31 link to its DPU gateway"
+      },
+      {
+        "concept": "IP address pools",
+        "requires": "CIDR prefixes and /31 point-to-point subnets",
+        "confidence": 0.75,
+        "why": "Pool sizes are given as prefixes"
+      },
+      {
+        "concept": "IP address pools",
+        "requires": "PF and VF (SR-IOV)",
+        "confidence": 0.5,
+        "why": "Tenant pools are sized per PF/VF interface"
+      },
+      {
+        "concept": "Hardware Health service",
+        "requires": "Redfish API",
+        "confidence": 0.8,
+        "why": "It scrapes BMCs through Redfish"
+      },
+      {
+        "concept": "Hardware Health service",
+        "requires": "Observability stack (Prometheus, Grafana, Loki, OpenTelemetry)",
+        "confidence": 0.6,
+        "why": "It exposes Prometheus metrics"
+      },
+      {
+        "concept": "Serial-over-LAN and SSH Console Service",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.75,
+        "why": "The console is reached through the BMC"
+      },
+      {
+        "concept": "Day 0 / Day 1 / Day 2 lifecycle",
+        "requires": "Bare-metal lifecycle management",
+        "confidence": 0.6,
+        "why": "The phases break down the overall lifecycle"
+      },
+      {
+        "concept": "NICo scope boundaries",
+        "requires": "PXE / iPXE boot",
+        "confidence": 0.55,
+        "why": "The boundary is drawn at the boot handoff"
+      },
+      {
+        "concept": "Metadata Service (FMDS)",
+        "requires": "BlueField DPU",
+        "confidence": 0.65,
+        "why": "It runs on the DPU"
+      }
+    ]
+  }
+}

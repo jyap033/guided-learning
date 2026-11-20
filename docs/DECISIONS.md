@@ -50,6 +50,9 @@ reversed, mark it `Superseded by D-xxx` and add a new entry.
 | D-020 | Graph extraction: few-shot, doc-order signal, edge confidence | Proposed |
 | D-021 | Features we deliberately won't build | Proposed |
 | D-022 | Every topic gets a mind map, separate from the prerequisite graph | Proposed |
+| D-023 | Run AI steps through Claude Code by default; API key optional | Accepted |
+| D-024 | M1 stores results as committed JSON/Markdown, not a database | Accepted |
+| D-025 | Ingest NICo docs from the source repo at a pinned commit | Accepted |
 
 Evidence for D-014 – D-021 is in [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEARNING-METHODS.md).
 
@@ -146,6 +149,9 @@ Evidence for D-014 – D-021 is in [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEA
 - **Alternatives considered:** Hard-coding one provider's SDK everywhere
   (lock-in); multi-provider abstraction framework (overkill for MVP).
 - **Consequences:** Can switch or mix models per task by config.
+- **Update (2026-11-20):** See D-023. The default provider is now Claude
+  Code's headless mode, because the project owner has no API key. The API
+  provider remains as an option.
 
 ## D-008 — SQLite + sqlite-vec now, Postgres + pgvector later
 - **Status:** Proposed
@@ -185,6 +191,14 @@ Evidence for D-014 – D-021 is in [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEA
   3. Cloud bare-metal / lab access guidance for learners who have it.
 - **Leaning:** 1 + 2 combined, with 3 as an optional track. Needs a spike to
   check which NICo components run in an emulated lab.
+- **Update (2026-11-20):** The NICo repo's own developer docs support option 1.
+  `docs/development/sushy_bmc_emulator.md` describes testing NICo's hardware
+  discovery against libvirt VMs through the Sushy Redfish emulator, including
+  power control and PXE boot. It notes the full provisioning flow works if
+  DHCP/PXE connectivity is available. It needs libvirt/KVM, Podman and an
+  OpenShift cluster (CRC works) with NICo deployed. The repo also has a
+  machine simulator ("machine-a-tron") used for scale testing. Both are strong
+  candidates for the capstone lab; a spike should confirm resource needs.
 - **Consequences:** Determines what the capstone looks like.
 
 ## D-011 — Capturing the learner's starting knowledge
@@ -356,3 +370,48 @@ Evidence for D-014 – D-021 is in [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEA
 - **Consequences:** Adds `themes` and `concept_themes` tables plus validation
   rules (each concept in exactly one theme, about 7 children at most, depth no
   more than 4). Later: a "build your own map" exercise at chapter end.
+
+## D-023 — Run AI steps through Claude Code by default; API key optional
+- **Status:** Accepted
+- **Date:** 2026-11-20
+- **Context:** The project owner doesn't have a Claude API key. Claude Code's
+  headless mode (`claude -p --output-format json --json-schema ...`) returns
+  schema-checked JSON and uses the user's existing Claude login.
+- **Decision:** AI calls go through a small `LlmProvider` interface with two
+  implementations: `claude-code` (default; runs `claude -p` with tools
+  disabled and a task-specific system prompt) and `anthropic-api` (Claude API
+  via the official SDK, structured outputs, server-side refusal fallbacks).
+  Both answers are validated again with zod. A cache wrapper stores every
+  validated answer keyed by a hash of the prompt.
+- **Alternatives considered:** Requiring an API key (blocks the owner);
+  having a person paste prompts into a chat (slow, error-prone).
+- **Consequences:** Builds use the owner's Claude plan usage rather than API
+  billing. The web app (M3) will need the API provider or a similar backend,
+  since it can't shell out to a user's Claude Code.
+
+## D-024 — M1 stores results as committed JSON/Markdown, not a database
+- **Status:** Accepted
+- **Date:** 2026-11-20
+- **Context:** D-008 chose SQLite for the app. The M1 command line only needs
+  to produce and review outputs.
+- **Decision:** M1 writes `curricula/<topic>/graph.json`, Markdown views and
+  the AI answer cache (`llm-cache/`) into the repo. Working files (the docs
+  checkout, logs) go in `.work/`, which is not committed. SQLite (D-008) comes
+  with the web app in M3, loaded from `graph.json`.
+- **Consequences:** Outputs are easy to diff and review in Git (D-005).
+  Committing the cache makes builds reproducible without new AI calls.
+
+## D-025 — Ingest NICo docs from the source repo at a pinned commit
+- **Status:** Accepted
+- **Date:** 2026-11-20
+- **Context:** docs.nvidia.com was not reachable from the build environment.
+  The NICo source repo (`github.com/dsx-ai-factory/infra-controller`, Apache
+  2.0) contains the same docs as Markdown plus the site's navigation file
+  (`docs/index.yml`, Fern format).
+- **Decision:** A `fern-docs` source type: clone the repo at the commit pinned
+  in `topic.yaml`, read pages in navigation order (the teaching-order signal
+  from D-020), and keep chosen top-level sections. The first pilot run reads
+  Overview, Getting Started, Architecture and the glossary (36 pages, ~700K
+  characters); Day 0/1/2 operations sections can be added in `topic.yaml`.
+- **Consequences:** Builds are reproducible and offline-friendly. A topic on
+  a different docs system needs a new source type.

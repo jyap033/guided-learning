@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v0.1 |
+| **Status** | Draft v0.2 · M1 built |
 | **Last updated** | 2026-11-20 |
 | **Pilot topic** | NVIDIA NICo (NVIDIA Infra Controller) |
 | **Related** | [DECISIONS.md](./DECISIONS.md), [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEARNING-METHODS.md) |
@@ -410,7 +410,7 @@ AI-generated curricula can be wrong in subtle ways. Mitigations:
 | Milestone | Scope | Exit criteria |
 |---|---|---|
 | **M0 — Docs** | This design doc + decisions log | Agreed direction |
-| **M1 — Graph CLI** | Ingest NICo docs, extract + expand concepts, output a DAG, a mind map (Mermaid) and a chapter list as JSON/Markdown | Graph looks sensible to the pilot user; passes sanity checks |
+| **M1 — Graph CLI** (built: `npm run gl -- build nico`) | Ingest NICo docs, extract + expand concepts, output a DAG, a mind map (Mermaid) and a chapter list as JSON/Markdown | Graph looks sensible to the pilot user; passes sanity checks |
 | **M2 — Content CLI** | Generate lessons, checks, and an exercise for the first 2–3 chapters | Pilot user can actually learn from chapter 1–2 |
 | **M3 — Web MVP** | Curriculum map, lesson reader, checks, progress, tutor | Pilot user uses it end-to-end for a week |
 | **M4 — Personalisation** | Placement quiz, skip-known, remediation | Measurably less time on known material |

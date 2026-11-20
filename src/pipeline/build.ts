@@ -24,7 +24,7 @@ export function fetchSource(topic: Topic, paths: TopicPaths, log: (m: string) =>
   const dir = paths.sourceCheckout;
   const head = (): string | null => {
     try {
-      return execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      return execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
     } catch {
       return null;
     }

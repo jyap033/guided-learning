@@ -1,0 +1,720 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "Node Feature Discovery (NFD)",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform that runs workloads across a cluster of nodes.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "NFD is a Kubernetes add-on that labels nodes."
+          },
+          {
+            "name": "PCIe device",
+            "definition": "Hardware attached over the PCI Express bus, like NICs and DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "NFD labels nodes by PCI class (0200 = network controller)."
+          },
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's Kubernetes-based framework for provisioning and managing DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The NICo-specific NFD setup replaces DPF's bundled rules."
+          }
+        ]
+      },
+      {
+        "concept": "DPFOperatorConfig",
+        "prerequisites": [
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's Kubernetes-based framework for provisioning and managing DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "It is DPF's operator-level config."
+          },
+          {
+            "name": "Kubernetes Custom Resource (CR/CRD)",
+            "definition": "User-defined Kubernetes API objects.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "DPFOperatorConfig is a custom resource."
+          },
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing servers through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "It enables Redfish-based DPU install."
+          },
+          {
+            "name": "GitOps with ArgoCD",
+            "definition": "Deploying from declared state in Git using Argo CD.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "It configures the Argo CD namespace."
+          }
+        ]
+      },
+      {
+        "concept": "DPUCluster",
+        "prerequisites": [
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's Kubernetes-based framework for provisioning and managing DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "DPUCluster is a DPF resource."
+          },
+          {
+            "name": "Kubernetes Custom Resource (CR/CRD)",
+            "definition": "User-defined Kubernetes API objects.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "It is a custom resource."
+          },
+          {
+            "name": "Kamaji",
+            "definition": "A tool for running Kubernetes control planes as pods inside another cluster.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The control plane is Kamaji-based."
+          }
+        ]
+      },
+      {
+        "concept": "Selectorless Service with manual Endpoints",
+        "prerequisites": [
+          {
+            "name": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+            "definition": "Ways Kubernetes exposes a set of pods behind a stable network address.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The pattern is a special form of a Service."
+          }
+        ]
+      },
+      {
+        "concept": "Credential source modes (local / local_first / backend)",
+        "prerequisites": [
+          {
+            "name": "Credential store (Vault vs Postgres)",
+            "definition": "The persistent backend where NICo stores secrets such as BMC credentials.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Backend mode reads from that store."
+          },
+          {
+            "name": "Site-wide BMC and UEFI credentials",
+            "definition": "The shared BMC/UEFI passwords NICo sets across a site.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The modes control where the BMC root credential comes from."
+          }
+        ]
+      },
+      {
+        "concept": "TOML",
+        "prerequisites": []
+      },
+      {
+        "concept": "DPUService CR set (Interface/Template/Configuration/NAD)",
+        "prerequisites": [
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's Kubernetes-based framework for provisioning and managing DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "These are DPF resources."
+          },
+          {
+            "name": "Kubernetes Custom Resource (CR/CRD)",
+            "definition": "User-defined Kubernetes API objects.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "They are custom resources."
+          },
+          {
+            "name": "Helm and helmfile",
+            "definition": "Tools for packaging and deploying Kubernetes apps as charts.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The template refers to a service chart."
+          },
+          {
+            "name": "CNI",
+            "definition": "The Kubernetes plugin interface for pod networking.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "A NAD (NetworkAttachmentDefinition) is a Multus/CNI concept."
+          }
+        ]
+      },
+      {
+        "concept": "DPUFlavor / DPUFlavorTemplate",
+        "prerequisites": [
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's Kubernetes-based framework for provisioning and managing DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "It is a DPF resource."
+          },
+          {
+            "name": "Kubernetes Custom Resource (CR/CRD)",
+            "definition": "User-defined Kubernetes API objects.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It is a custom resource."
+          },
+          {
+            "name": "DPU BFB",
+            "definition": "The BlueField bootstream image used to install a DPU's OS.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "A flavor configures how the DPU OS from a BFB is set up."
+          }
+        ]
+      },
+      {
+        "concept": "bf.cfg parameters",
+        "prerequisites": [
+          {
+            "name": "DPU BFB",
+            "definition": "The BlueField bootstream image used to install a DPU's OS.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The BFB installer sources bf.cfg."
+          }
+        ]
+      },
+      {
+        "concept": "DPU reprovisioning",
+        "prerequisites": [
+          {
+            "name": "DPU BFB",
+            "definition": "The BlueField bootstream image used to install a DPU's OS.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Reprovisioning reinstalls the OS from a BFB."
+          },
+          {
+            "name": "DPUFlavor / DPUFlavorTemplate",
+            "definition": "The DPF resource that describes a DPU's OS configuration.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Flavor changes trigger reprovisioning."
+          }
+        ]
+      },
+      {
+        "concept": "DPUService rollout gating",
+        "prerequisites": [
+          {
+            "name": "DPF maintenance hold (NodeEffect)",
+            "definition": "A DPF phase where a DPU waits behind a maintenance hold before a disruptive change.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Gating holds DPUs in NodeEffect."
+          },
+          {
+            "name": "DPUService CR set (Interface/Template/Configuration/NAD)",
+            "definition": "The DPF resources defining each mandatory DPU service.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Gating applies to DPUService updates."
+          }
+        ]
+      },
+      {
+        "concept": "DPF maintenance hold (NodeEffect)",
+        "prerequisites": [
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's Kubernetes-based framework for provisioning and managing DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "NodeEffect is a DPF phase."
+          }
+        ]
+      },
+      {
+        "concept": "DPU agent bootstrap CA",
+        "prerequisites": [
+          {
+            "name": "DPU Agent",
+            "definition": "NICo's agent running on each DPU that applies network config and reports health.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The policy is about the DPU agent's trust root."
+          },
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "Certificate authorities and certificates used to establish trusted TLS connections.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "It concerns root CA trust and rotation."
+          }
+        ]
+      },
+      {
+        "concept": "HTTPS/SOCKS5 forward proxy for DPU egress",
+        "prerequisites": [
+          {
+            "name": "containerd",
+            "definition": "The container runtime on each DPU.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The proxy is configured in a containerd drop-in."
+          },
+          {
+            "name": "DPUFlavor / DPUFlavorTemplate",
+            "definition": "The DPF resource that describes a DPU's OS configuration.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The proxy lives inside the flavor."
+          }
+        ]
+      },
+      {
+        "concept": "containerd",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit, a SmartNIC with its own Arm cores and OS.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Here containerd runs on the DPU."
+          }
+        ]
+      },
+      {
+        "concept": "Scalable Functions (SF)",
+        "prerequisites": [
+          {
+            "name": "PF and VF (SR-IOV)",
+            "definition": "Physical and virtual functions that a NIC exposes for sharing hardware.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "SFs are carved from a PF, like VFs."
+          },
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit, a SmartNIC with its own Arm cores and OS.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "SFs come from the DPU's functions."
+          }
+        ]
+      },
+      {
+        "concept": "IPv6 metadata transport",
+        "prerequisites": [
+          {
+            "name": "Metadata Service (FMDS)",
+            "definition": "The service that gives instances their metadata.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "It serves FMDS over IPv6."
+          },
+          {
+            "name": "Helm chart values",
+            "definition": "Settings that customize a Helm chart deployment.",
+            "kind": "procedural",
+            "confidence": 0.7,
+            "why": "It needs chart overlays."
+          },
+          {
+            "name": "Host-Based Networking (HBN)",
+            "definition": "NVIDIA's routing stack running on the DPU.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The DPU agent selects the HBN peer."
+          }
+        ]
+      },
+      {
+        "concept": "libredfish and nv-redfish",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing servers through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "They are Redfish clients."
+          },
+          {
+            "name": "Rust toolchain and Cargo",
+            "definition": "The Rust compiler and package manager.",
+            "kind": "procedural",
+            "confidence": 0.55,
+            "why": "They are Rust libraries."
+          },
+          {
+            "name": "Redfish vendor detection and OEM extensions",
+            "definition": "How NICo picks vendor-specific Redfish behavior.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "libredfish has vendor-specific implementations."
+          }
+        ]
+      },
+      {
+        "concept": "Desired vs actual state reconciliation",
+        "prerequisites": []
+      },
+      {
+        "concept": "DPU-host pairing",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded controller for out-of-band server management.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Serial numbers come from host and DPU BMCs."
+          },
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit, a SmartNIC with its own Arm cores and OS.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "It pairs DPUs with hosts."
+          },
+          {
+            "name": "PCIe device",
+            "definition": "Hardware attached over the PCI Express bus.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "PCIe devices are the main pairing path."
+          },
+          {
+            "name": "DPU mode vs NIC mode",
+            "definition": "Whether a BlueField runs as a full DPU or as a plain NIC.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Pairing checks DPU mode."
+          }
+        ]
+      },
+      {
+        "concept": "Preingestion Manager",
+        "prerequisites": [
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "How NICo finds new hardware and brings it under management.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "It handles hosts before normal ingestion."
+          },
+          {
+            "name": "Firmware inventory and update",
+            "definition": "Listing firmware versions and applying updates through Redfish.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It updates firmware."
+          },
+          {
+            "name": "DPU BFB",
+            "definition": "The BlueField bootstream image used to install a DPU's OS.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "It recovers BFB images."
+          }
+        ]
+      },
+      {
+        "concept": "Machine Update Manager",
+        "prerequisites": [
+          {
+            "name": "Firmware baseline enforcement",
+            "definition": "Keeping machines on a configured firmware version set.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "It picks hosts with outdated firmware."
+          },
+          {
+            "name": "Machine State Machine (ManagedHostState)",
+            "definition": "The lifecycle state machine for managed hosts.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "That state machine carries out the updates."
+          }
+        ]
+      },
+      {
+        "concept": "AES-GCM symmetric encryption",
+        "prerequisites": []
+      },
+      {
+        "concept": "Factory default credentials",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded controller for out-of-band server management.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "They are BMC login credentials."
+          },
+          {
+            "name": "HashiCorp Vault",
+            "definition": "A secrets management system.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Defaults are seeded into Vault."
+          }
+        ]
+      },
+      {
+        "concept": "SPIFFE",
+        "prerequisites": [
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "Certificate authorities and certificates used for trusted TLS.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "X.509 SVIDs are certificates."
+          },
+          {
+            "name": "OIDC / JWT authentication (Keycloak)",
+            "definition": "Token-based authentication using signed JWTs.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "JWT-SVIDs are JWTs."
+          }
+        ]
+      },
+      {
+        "concept": "Machine identity (JWT-SVID issuance)",
+        "prerequisites": [
+          {
+            "name": "SPIFFE",
+            "definition": "A workload identity standard using SPIFFE IDs and SVIDs.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "It issues SPIFFE JWT-SVIDs."
+          },
+          {
+            "name": "Instance and instance type",
+            "definition": "A tenant allocation of a machine and its hardware class.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Workloads run on instances."
+          },
+          {
+            "name": "Metadata Service (FMDS)",
+            "definition": "The service that gives instances their metadata.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Tokens are served via IMDS."
+          },
+          {
+            "name": "KMIP KEK provider",
+            "definition": "A key-encryption-key source reached via KMIP.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Signing keys are encrypted under the site KEK."
+          }
+        ]
+      },
+      {
+        "concept": "Token delegation (RFC 8693 token exchange)",
+        "prerequisites": [
+          {
+            "name": "OIDC / JWT authentication (Keycloak)",
+            "definition": "Token-based authentication using signed JWTs.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "It exchanges OAuth tokens."
+          },
+          {
+            "name": "Machine identity (JWT-SVID issuance)",
+            "definition": "NICo's issuance of SPIFFE JWT-SVIDs for instance workloads.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The tokens delegated are typically the machine identity tokens."
+          }
+        ]
+      },
+      {
+        "concept": "Rate limiting (GCRA token bucket)",
+        "prerequisites": []
+      },
+      {
+        "concept": "Component Manager",
+        "prerequisites": [
+          {
+            "name": "Rack Management Service (RMS)",
+            "definition": "A service that manages rack-level components.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "RMS is one backend."
+          },
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing servers through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Direct Redfish is another backend."
+          },
+          {
+            "name": "NVLink switch tray",
+            "definition": "A rack tray holding NVLink switches.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Switches are one component class."
+          },
+          {
+            "name": "Power shelf",
+            "definition": "A rack unit supplying power to trays.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Power shelves are one component class."
+          }
+        ]
+      },
+      {
+        "concept": "Asynchronous job polling",
+        "prerequisites": []
+      },
+      {
+        "concept": "Power control reset types",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing servers through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "They are Redfish reset actions."
+          }
+        ]
+      },
+      {
+        "concept": "Redfish resource tree (Systems, Chassis, Managers)",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing servers through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "It describes the Redfish structure."
+          }
+        ]
+      },
+      {
+        "concept": "Redfish vendor detection and OEM extensions",
+        "prerequisites": [
+          {
+            "name": "Redfish resource tree (Systems, Chassis, Managers)",
+            "definition": "The Redfish hierarchy under /redfish/v1.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Vendor is read from the service root, and Oem sections sit on resources."
+          }
+        ]
+      },
+      {
+        "concept": "Machine ID",
+        "prerequisites": [
+          {
+            "name": "DMI Platform Identity",
+            "definition": "System identity data such as serial number and manufacturer from DMI/SMBIOS.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The ID is a hash of DMI data."
+          }
+        ]
+      },
+      {
+        "concept": "PCIe device",
+        "prerequisites": []
+      },
+      {
+        "concept": "MAC address",
+        "prerequisites": []
+      },
+      {
+        "concept": "UEFI device path",
+        "prerequisites": [
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "Modern server firmware and its signed boot mechanism.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Device paths are a UEFI construct."
+          },
+          {
+            "name": "MAC address",
+            "definition": "The hardware address of a network interface.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Paths include MAC nodes NICo extracts."
+          },
+          {
+            "name": "PCIe device",
+            "definition": "Hardware attached over the PCI Express bus.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Paths encode PCI locations."
+          }
+        ]
+      },
+      {
+        "concept": "Boot order and boot source override",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing servers through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Overrides are set through Redfish."
+          },
+          {
+            "name": "PXE / iPXE boot",
+            "definition": "Booting a machine over the network.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The goal is network boot."
+          }
+        ]
+      },
+      {
+        "concept": "Firmware inventory and update",
+        "prerequisites": [
+          {
+            "name": "Redfish resource tree (Systems, Chassis, Managers)",
+            "definition": "The Redfish hierarchy under /redfish/v1.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "UpdateService is part of the Redfish tree."
+          }
+        ]
+      },
+      {
+        "concept": "Redfish Task Service",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing servers through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "It is a Redfish service."
+          },
+          {
+            "name": "Asynchronous job polling",
+            "definition": "Getting a job ID and polling until the job finishes.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Tasks are polled to completion."
+          }
+        ]
+      }
+    ]
+  }
+}

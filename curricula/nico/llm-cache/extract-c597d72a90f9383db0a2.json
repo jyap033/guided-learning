@@ -1,0 +1,1192 @@
+{
+  "kind": "extract",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "concepts": [
+      {
+        "name": "Health report",
+        "aliases": [
+          "HealthReport"
+        ],
+        "definition": "A structured record NICo attaches to a host, rack, switch or other object, listing failed checks as alerts and passed checks as successes, each tagged with a source.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "Health probe ID",
+        "aliases": [
+          "probe ID"
+        ],
+        "definition": "A stable identifier for one specific health check, for example BmcSensor or HeartbeatTimeout, used to label alerts and successes in health reports.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Health alert classification",
+        "aliases": [
+          "classification"
+        ],
+        "definition": "A conventional tag on a health alert, for example PreventAllocations, that tells NICo how the alert should affect allocation, state changes or alerting.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_alert_classifications.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "PreventAllocations",
+        "aliases": [],
+        "definition": "A classification that stops tenants from getting the host as an instance, unless targeted instance creation is used.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_alert_classifications.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "PreventHostStateChanges",
+        "aliases": [],
+        "definition": "A classification that keeps a host from moving between certain lifecycle states while it is unclear whether all required configuration has been applied.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_alert_classifications.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "SuppressExternalAlerting",
+        "aliases": [],
+        "definition": "A classification that leaves a host out of the site-wide fleet-health calculation, so known issues do not trigger external alerts.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "Merge vs Replace health reports",
+        "aliases": [
+          "Merge report",
+          "Replace report",
+          "health report override"
+        ],
+        "definition": "Two ways a source can write a health report. A Merge report is combined with the host's other reports. A Replace report overrides them and takes precedence.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Aggregate host health",
+        "aliases": [],
+        "definition": "The combined health of a host, built from all its health report sources. It decides whether classifications such as PreventAllocations apply.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Alert debouncing",
+        "aliases": [
+          "consecutive-failure threshold"
+        ],
+        "definition": "Raising an alert only after a set number of consecutive failed checks, and clearing it on the first success, so short blips are not reported.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "NICo state machine",
+        "aliases": [
+          "host lifecycle state machine"
+        ],
+        "definition": "NICo's controller that moves hosts through lifecycle states such as ingestion, ready and assigned. It also performs automatic recovery actions such as reboots.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_alert_classifications.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Managed Host",
+        "aliases": [
+          "ManagedHost",
+          "host"
+        ],
+        "definition": "A bare-metal machine (host plus its DPUs) that NICo has ingested and manages.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Instance",
+        "aliases": [
+          "bare metal instance"
+        ],
+        "definition": "A host allocated to a tenant. Tenants create instances and later release them.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md",
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "Tenant",
+        "aliases": [
+          "Tenant Org"
+        ],
+        "definition": "A customer organization that allocates hosts as instances and owns resources such as key groups.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/key_group_sync.md",
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "Targeted instance creation",
+        "aliases": [
+          "allow_unhealthy_machine"
+        ],
+        "definition": "Creating an instance on a specific Machine ID. In some cases this can bypass health-based allocation blocks.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_alert_classifications.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Baseboard Management Controller (BMC)",
+        "aliases": [
+          "BMC"
+        ],
+        "definition": "An out-of-band management chip on a server. It reports power state, sensors and events, and allows remote control.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "Redfish API",
+        "aliases": [
+          "Redfish"
+        ],
+        "definition": "A standard REST API that BMCs expose for hardware management. NICo uses it, for example, to read leak detectors.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "BMC sensor thresholds",
+        "aliases": [
+          "caution/critical/fatal thresholds"
+        ],
+        "definition": "Ranges that a sensor reports: caution, critical, fatal and valid min/max. nico-hardware-health maps them to the SensorWarning, SensorCritical, SensorFatal and SensorFailure classifications.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_alert_classifications.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "nico-hardware-health",
+        "aliases": [],
+        "definition": "The NICo service that reads BMC sensors and events and reports hardware health, such as BmcSensor and leak detection.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "Site Explorer",
+        "aliases": [],
+        "definition": "The NICo component that scrapes BMC endpoints to discover hosts and compares them against Expected Machines.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Expected Machines",
+        "aliases": [
+          "expected_machines",
+          "Expected Machine manifest"
+        ],
+        "definition": "A list of the machines (BMC MAC, serial number and so on) that a site is expected to ingest. It is used to check discovered hardware.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Machine validation",
+        "aliases": [
+          "host validation tests"
+        ],
+        "definition": "A framework that runs validation tests on hosts and raises alerts when a test fails or cannot be scheduled.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "SKU validation",
+        "aliases": [
+          "SKU"
+        ],
+        "definition": "A workflow that checks a host's hardware against its expected SKU. If it fails, the host cannot be allocated.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Repair workflow",
+        "aliases": [
+          "online repair",
+          "TenantReportedIssue"
+        ],
+        "definition": "A flow in which tenants report broken hosts on release, or flag instances for online repair, so an external framework can fix them.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "Maintenance mode",
+        "aliases": [
+          "SetMaintenance"
+        ],
+        "definition": "An admin marking that a host is being worked on. It applies PreventAllocations, SuppressExternalAlerting and ExcludeFromStateMachineSla.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_alert_classifications.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Leak detection",
+        "aliases": [
+          "TrayLeak",
+          "RackLeak",
+          "BMS leak"
+        ],
+        "definition": "Health processing that turns raw leak observations (from BMC detectors, NVUE switch sensors or the BMS) into derived tray-level and rack-level leak alerts.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "Building Management System (BMS)",
+        "aliases": [
+          "BMS",
+          "DSX Exchange"
+        ],
+        "definition": "Datacenter facility systems. NICo receives their rack leak events through the DSX Exchange consumer.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "NVLink",
+        "aliases": [],
+        "definition": "NVIDIA's high-bandwidth GPU-to-GPU interconnect. In a rack it links GPUs across compute trays through NVLink switches.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "NVLink partition",
+        "aliases": [
+          "NVLink domain"
+        ],
+        "definition": "A group of GPUs that may talk to each other over NVLink. Partitions are assigned per tenant or are tray defaults.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "NMX-C",
+        "aliases": [
+          "NMX Controller"
+        ],
+        "definition": "The NVLink fabric controller that runs on switches. It manages NVLink partitions and reports domain and GPU health.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "NMX-T",
+        "aliases": [],
+        "definition": "The NVLink telemetry listener service that runs on primary switches.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "NVLink partition monitor",
+        "aliases": [
+          "nvlink-partition-monitor"
+        ],
+        "definition": "A periodic nico-api task that reconciles NVLink partitions with NMX-C. It raises NmxcUnreachable and NvlinkUnhealthy alerts and performs isolation.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "NVLink isolation",
+        "aliases": [
+          "IsolateFromNvLinkPartitions",
+          "compute-tray-due-for-swap"
+        ],
+        "definition": "Removing all of a host's GPUs from every NVLink partition, triggered by the IsolateFromNvLinkPartitions classification. It is used before a compute tray is moved or replaced.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      },
+      {
+        "name": "NVOS / NVUE",
+        "aliases": [
+          "NVUE API",
+          "NVOS"
+        ],
+        "definition": "The NVIDIA switch and network operating system (NVOS) and its configuration and state API (NVUE). They are used on switches and in HBN on DPUs.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Switch reachability monitor",
+        "aliases": [
+          "switch-reachability-monitor"
+        ],
+        "definition": "A nico-api task that makes a TCP connection to each ready switch's NVOS and NMX-T ports, and raises debounced unreachable alerts.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Leader lease / work lock",
+        "aliases": [],
+        "definition": "A mechanism that makes sure only one nico-api replica runs a monitor at a time. When the lease moves to another replica, that replica takes over.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Data Processing Unit (DPU)",
+        "aliases": [
+          "DPU",
+          "BlueField"
+        ],
+        "definition": "A SmartNIC with its own CPUs, attached to each host. NICo uses it to enforce networking and runs dpu-agent on it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "dpu-agent",
+        "aliases": [],
+        "definition": "The NICo agent that runs on the DPU. It applies network configuration, checks local services and sends health reports and heartbeats to NICo core.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "HBN (Host-Based Networking)",
+        "aliases": [
+          "HBN"
+        ],
+        "definition": "NVIDIA's containerized routing stack (FRR, DHCP and so on) on the DPU. dpu-agent configures it through ContainerExec or NVUE.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "DPF",
+        "aliases": [
+          "DOCA Platform Framework"
+        ],
+        "definition": "A framework that deploys DPU services, such as HBN, DHCP and FMDS, as pods. When DPF is used, dpu-agent takes the NVUE path.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "BGP",
+        "aliases": [
+          "BGP peering",
+          "FRR"
+        ],
+        "definition": "The routing protocol that the DPU uses to peer with top-of-rack switches and route servers. FRR is the daemon that implements it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Top-of-rack (ToR) uplink",
+        "aliases": [
+          "ToR",
+          "p0/p1"
+        ],
+        "definition": "The DPU's physical uplink ports (p0 and p1) to the rack switches. Normal PXE boot requires p0.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "DHCP relay/server on DPU",
+        "aliases": [
+          "DHCP"
+        ],
+        "definition": "The DHCP services that run on the DPU and hand out addresses to the host. Their failure raises DhcpRelay and DhcpServer alerts.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "PXE boot",
+        "aliases": [
+          "PXE"
+        ],
+        "definition": "Booting a machine over the network. It relies on DHCP and on the host's p0 uplink.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "FMDS (NICo Metadata Service)",
+        "aliases": [
+          "FMDS",
+          "metadata service"
+        ],
+        "definition": "A metadata service that tenant software on an instance can query. It returns the applied configuration, such as InfiniBand GUIDs, and supports configuration scripts.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "DPU restricted mode",
+        "aliases": [
+          "RestrictedMode"
+        ],
+        "definition": "A locked-down DPU mode in which the host cannot reconfigure the DPU. NICo raises an alert if the DPU is not running in it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "InfiniBand",
+        "aliases": [
+          "IB"
+        ],
+        "definition": "A high-performance, low-latency network fabric made of HCAs and switches. It is used for HPC and AI traffic.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "InfiniBand partition",
+        "aliases": [
+          "ib_partition_id",
+          "PKey"
+        ],
+        "definition": "An isolated group within an InfiniBand fabric. Tenants attach instance interfaces to partitions.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/infiniband/nic_selection.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "UFM (Unified Fabric Manager)",
+        "aliases": [
+          "UFM"
+        ],
+        "definition": "NVIDIA's InfiniBand fabric manager. NICo uses it to manage partition membership.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "InfiniBand fabric",
+        "aliases": [
+          "multi-fabric"
+        ],
+        "definition": "A separate InfiniBand network. Each NIC port connects to one fabric, and a host may span several fabrics.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "InfiniBand device (NIC port as device)",
+        "aliases": [
+          "device",
+          "HCA"
+        ],
+        "definition": "A physical PCI function that can send InfiniBand traffic. NICo presents each port of a multi-port NIC as a separate device.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "PCI device and slot address",
+        "aliases": [
+          "PCI slot",
+          "BDF"
+        ],
+        "definition": "An address such as 0000:ca:00.0 that identifies a PCI device. NICo sorts by it to map tenant selections to hardware deterministically.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "SR-IOV Physical and Virtual Functions",
+        "aliases": [
+          "PF",
+          "VF",
+          "SR-IOV"
+        ],
+        "definition": "A PCI feature in which one physical function (PF) can expose several virtual functions (VFs) that appear as additional devices sharing the same hardware.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "InfiniBand GUID and LID",
+        "aliases": [
+          "GUID",
+          "LID"
+        ],
+        "definition": "A GUID is the globally unique hardware ID of an InfiniBand port or VF. A LID is the local address that the subnet manager assigns.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/infiniband/nic_selection.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Mellanox firmware tools (mlxconfig, mst)",
+        "aliases": [
+          "mlxconfig",
+          "mst"
+        ],
+        "definition": "Command-line tools for inspecting and configuring ConnectX NIC firmware settings, such as link type and the number of VFs. They operate per physical card.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "nico-scout",
+        "aliases": [
+          "scout"
+        ],
+        "definition": "A tool that runs on a host during discovery, enumerates its hardware (CPUs, GPUs, NICs) and reports it to NICo.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "Discovery data",
+        "aliases": [
+          "DiscoveryData",
+          "hardware inventory"
+        ],
+        "definition": "The hardware details that nico-scout reports and NICo stores in its database, including InfiniBand devices with PCI properties and GUIDs.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "Protocol Buffers",
+        "aliases": [
+          "protobuf"
+        ],
+        "definition": "A schema language and serialization format that NICo uses to define API messages such as InfinibandInterface.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "Instance type and machine capabilities",
+        "aliases": [
+          "instance type",
+          "Machine Capability"
+        ],
+        "definition": "An instance type groups identical machines. Machine capabilities summarize how many components of each kind those machines have, such as InfiniBand devices per fabric.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "InstanceInfinibandConfig",
+        "aliases": [
+          "ib_interfaces"
+        ],
+        "definition": "The tenant's InfiniBand configuration for an instance. Each interface selects a device by name, fabric and device_instance, chooses a PF or VF, and names a partition.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "Device-instance to hardware mapping",
+        "aliases": [
+          "device_instance"
+        ],
+        "definition": "The rule that turns a tenant's (device, fabric, device_instance) selection into a specific hardware port: matching devices are sorted by PCI slot and the N-th is chosen.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "NUMA node",
+        "aliases": [
+          "NUMA"
+        ],
+        "definition": "A CPU and memory locality domain. The NUMA node a device is attached to affects performance between that device and GPUs.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "NICo REST API (cloud)",
+        "aliases": [
+          "Cloud backend",
+          "NICo REST API"
+        ],
+        "definition": "The cloud-side NICo service that tenants use. It holds the source of truth for things such as key groups and synchronizes them to sites.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/key_group_sync.md",
+          "architecture/infiniband/nic_selection.md"
+        ]
+      },
+      {
+        "name": "NICo site",
+        "aliases": [
+          "site controller",
+          "nico-api"
+        ],
+        "definition": "A NICo deployment that runs in one datacenter and manages its hosts. It receives configuration from the cloud REST API.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/key_group_sync.md",
+          "architecture/infiniband/nic_selection.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "name": "Key group",
+        "aliases": [
+          "SSH key group"
+        ],
+        "definition": "A named set of SSH public keys, stored per tenant, that grants access to the SSH console.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/key_group_sync.md"
+        ]
+      },
+      {
+        "name": "Key group synchronization",
+        "aliases": [
+          "keygroup sync"
+        ],
+        "definition": "The process in which the cloud REST API pushes versioned key group contents to sites, records which version each site holds, and compares versions to find out of sync sites.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "architecture/key_group_sync.md"
+        ]
+      },
+      {
+        "name": "Optimistic concurrency with versions",
+        "aliases": [
+          "ifVersionMatch",
+          "versioned entities"
+        ],
+        "definition": "Each update gets a new version string, and an update can be rejected if the stored version no longer matches. This prevents overwriting another user's concurrent edit.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "architecture/key_group_sync.md"
+        ]
+      },
+      {
+        "name": "SSH public keys",
+        "aliases": [
+          "SSH key"
+        ],
+        "definition": "Public keys that authorize a user to log in over SSH. Here they grant access to the host's serial console.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "architecture/key_group_sync.md"
+        ]
+      },
+      {
+        "name": "nico-admin-cli",
+        "aliases": [
+          "admin CLI"
+        ],
+        "definition": "An operator command-line tool for administering NICo, for example to remove health reports or apply health templates.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/health/health_alert_classifications.md"
+        ]
+      }
+    ],
+    "prerequisites": [
+      {
+        "concept": "Health probe ID",
+        "requires": "Health report",
+        "confidence": 0.9,
+        "why": "Probe IDs label the entries inside health reports"
+      },
+      {
+        "concept": "Health alert classification",
+        "requires": "Health report",
+        "confidence": 0.9,
+        "why": "Classifications are tags on health report alerts"
+      },
+      {
+        "concept": "PreventAllocations",
+        "requires": "Health alert classification",
+        "confidence": 0.9,
+        "why": "It is one specific classification"
+      },
+      {
+        "concept": "PreventAllocations",
+        "requires": "Instance",
+        "confidence": 0.8,
+        "why": "It blocks hosts from being allocated as instances"
+      },
+      {
+        "concept": "PreventHostStateChanges",
+        "requires": "NICo state machine",
+        "confidence": 0.85,
+        "why": "It blocks lifecycle state transitions"
+      },
+      {
+        "concept": "SuppressExternalAlerting",
+        "requires": "Health alert classification",
+        "confidence": 0.8,
+        "why": "It is one specific classification"
+      },
+      {
+        "concept": "Merge vs Replace health reports",
+        "requires": "Health report",
+        "confidence": 0.85,
+        "why": "These are two modes of writing a report"
+      },
+      {
+        "concept": "Aggregate host health",
+        "requires": "Merge vs Replace health reports",
+        "confidence": 0.7,
+        "why": "Aggregate health combines reports according to their mode"
+      },
+      {
+        "concept": "Instance",
+        "requires": "Managed Host",
+        "confidence": 0.8,
+        "why": "An instance is a managed host allocated to a tenant"
+      },
+      {
+        "concept": "Instance",
+        "requires": "Tenant",
+        "confidence": 0.75,
+        "why": "Tenants own instances"
+      },
+      {
+        "concept": "Targeted instance creation",
+        "requires": "Instance",
+        "confidence": 0.8,
+        "why": "It is a special way of creating an instance"
+      },
+      {
+        "concept": "Redfish API",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "Redfish is the API that BMCs expose"
+      },
+      {
+        "concept": "BMC sensor thresholds",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "BMCs report the sensors and their thresholds"
+      },
+      {
+        "concept": "nico-hardware-health",
+        "requires": "BMC sensor thresholds",
+        "confidence": 0.75,
+        "why": "It evaluates sensor readings against these thresholds"
+      },
+      {
+        "concept": "Site Explorer",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.85,
+        "why": "It scrapes BMC endpoints"
+      },
+      {
+        "concept": "Site Explorer",
+        "requires": "Expected Machines",
+        "confidence": 0.7,
+        "why": "It compares discovered hosts against the expected list"
+      },
+      {
+        "concept": "Leak detection",
+        "requires": "Redfish API",
+        "confidence": 0.6,
+        "why": "BMC leak detectors are read through Redfish"
+      },
+      {
+        "concept": "Leak detection",
+        "requires": "Health alert classification",
+        "confidence": 0.7,
+        "why": "Derived leak alerts are built from classifications"
+      },
+      {
+        "concept": "NVLink partition",
+        "requires": "NVLink",
+        "confidence": 0.9,
+        "why": "Partitions group GPUs on the NVLink fabric"
+      },
+      {
+        "concept": "NMX-C",
+        "requires": "NVLink partition",
+        "confidence": 0.8,
+        "why": "NMX-C manages NVLink partitions"
+      },
+      {
+        "concept": "NVLink partition monitor",
+        "requires": "NMX-C",
+        "confidence": 0.9,
+        "why": "The monitor queries NMX-C"
+      },
+      {
+        "concept": "NVLink partition monitor",
+        "requires": "Alert debouncing",
+        "confidence": 0.6,
+        "why": "The NmxcUnreachable alert is debounced"
+      },
+      {
+        "concept": "NVLink isolation",
+        "requires": "NVLink partition monitor",
+        "confidence": 0.85,
+        "why": "The monitor carries out the isolation"
+      },
+      {
+        "concept": "NVLink isolation",
+        "requires": "Health alert classification",
+        "confidence": 0.75,
+        "why": "Isolation is triggered by a classification"
+      },
+      {
+        "concept": "Switch reachability monitor",
+        "requires": "Alert debouncing",
+        "confidence": 0.8,
+        "why": "Its alerts are debounced"
+      },
+      {
+        "concept": "Switch reachability monitor",
+        "requires": "NVOS / NVUE",
+        "confidence": 0.7,
+        "why": "It probes the NVOS management port"
+      },
+      {
+        "concept": "Switch reachability monitor",
+        "requires": "Leader lease / work lock",
+        "confidence": 0.6,
+        "why": "Ownership by a single replica affects the failure counts"
+      },
+      {
+        "concept": "dpu-agent",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.9,
+        "why": "The agent runs on the DPU"
+      },
+      {
+        "concept": "HBN (Host-Based Networking)",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.85,
+        "why": "HBN runs on the DPU"
+      },
+      {
+        "concept": "HBN (Host-Based Networking)",
+        "requires": "BGP",
+        "confidence": 0.6,
+        "why": "HBN provides BGP routing through FRR"
+      },
+      {
+        "concept": "Top-of-rack (ToR) uplink",
+        "requires": "BGP",
+        "confidence": 0.65,
+        "why": "Uplink health is measured by BGP sessions"
+      },
+      {
+        "concept": "PXE boot",
+        "requires": "DHCP relay/server on DPU",
+        "confidence": 0.6,
+        "why": "PXE relies on DHCP"
+      },
+      {
+        "concept": "DPF",
+        "requires": "HBN (Host-Based Networking)",
+        "confidence": 0.6,
+        "why": "DPF deploys HBN and related services"
+      },
+      {
+        "concept": "InfiniBand partition",
+        "requires": "InfiniBand",
+        "confidence": 0.9,
+        "why": "Partitions are an InfiniBand concept"
+      },
+      {
+        "concept": "InfiniBand fabric",
+        "requires": "InfiniBand",
+        "confidence": 0.9,
+        "why": "A fabric is an InfiniBand network"
+      },
+      {
+        "concept": "UFM (Unified Fabric Manager)",
+        "requires": "InfiniBand partition",
+        "confidence": 0.7,
+        "why": "UFM manages partition membership"
+      },
+      {
+        "concept": "InfiniBand device (NIC port as device)",
+        "requires": "PCI device and slot address",
+        "confidence": 0.8,
+        "why": "A device is defined as a PCI function"
+      },
+      {
+        "concept": "InfiniBand device (NIC port as device)",
+        "requires": "InfiniBand",
+        "confidence": 0.85,
+        "why": "These are InfiniBand devices"
+      },
+      {
+        "concept": "SR-IOV Physical and Virtual Functions",
+        "requires": "PCI device and slot address",
+        "confidence": 0.75,
+        "why": "PFs and VFs are PCI functions"
+      },
+      {
+        "concept": "Discovery data",
+        "requires": "nico-scout",
+        "confidence": 0.8,
+        "why": "Scout produces the discovery data"
+      },
+      {
+        "concept": "Instance type and machine capabilities",
+        "requires": "Discovery data",
+        "confidence": 0.65,
+        "why": "Capabilities summarize the discovered hardware"
+      },
+      {
+        "concept": "InstanceInfinibandConfig",
+        "requires": "InfiniBand device (NIC port as device)",
+        "confidence": 0.85,
+        "why": "The config selects devices"
+      },
+      {
+        "concept": "InstanceInfinibandConfig",
+        "requires": "Instance type and machine capabilities",
+        "confidence": 0.75,
+        "why": "Device names come from the capabilities"
+      },
+      {
+        "concept": "InstanceInfinibandConfig",
+        "requires": "SR-IOV Physical and Virtual Functions",
+        "confidence": 0.75,
+        "why": "Each interface selects a PF or a VF"
+      },
+      {
+        "concept": "InstanceInfinibandConfig",
+        "requires": "InfiniBand partition",
+        "confidence": 0.75,
+        "why": "Each interface is attached to a partition"
+      },
+      {
+        "concept": "Device-instance to hardware mapping",
+        "requires": "InstanceInfinibandConfig",
+        "confidence": 0.8,
+        "why": "The mapping resolves config selections"
+      },
+      {
+        "concept": "Device-instance to hardware mapping",
+        "requires": "PCI device and slot address",
+        "confidence": 0.8,
+        "why": "Matching devices are sorted by PCI slot"
+      },
+      {
+        "concept": "FMDS (NICo Metadata Service)",
+        "requires": "Instance",
+        "confidence": 0.7,
+        "why": "FMDS serves instance metadata"
+      },
+      {
+        "concept": "Key group",
+        "requires": "SSH public keys",
+        "confidence": 0.85,
+        "why": "Key groups contain SSH keys"
+      },
+      {
+        "concept": "Key group synchronization",
+        "requires": "Key group",
+        "confidence": 0.9,
+        "why": "Synchronization operates on key groups"
+      },
+      {
+        "concept": "Key group synchronization",
+        "requires": "NICo REST API (cloud)",
+        "confidence": 0.8,
+        "why": "The cloud API drives the sync"
+      },
+      {
+        "concept": "Key group synchronization",
+        "requires": "NICo site",
+        "confidence": 0.75,
+        "why": "Sites are the sync targets"
+      },
+      {
+        "concept": "Key group synchronization",
+        "requires": "Optimistic concurrency with versions",
+        "confidence": 0.7,
+        "why": "Sync relies on comparing versions"
+      },
+      {
+        "concept": "Repair workflow",
+        "requires": "Instance",
+        "confidence": 0.7,
+        "why": "Repairs are tied to instance release or online repair"
+      },
+      {
+        "concept": "Maintenance mode",
+        "requires": "Health alert classification",
+        "confidence": 0.7,
+        "why": "Maintenance mode applies classifications"
+      }
+    ]
+  }
+}

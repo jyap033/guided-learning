@@ -1,0 +1,951 @@
+{
+  "kind": "extract",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "concepts": [
+      {
+        "name": "NICo site controller",
+        "aliases": [
+          "site controller",
+          "NICo Core"
+        ],
+        "definition": "The NICo control plane deployed on a small Kubernetes cluster (3 nodes at baseline) that manages one site's hosts, DPUs, switch trays, power shelves and racks. One site controller manages one site.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Scale guidance vs hard limit",
+        "aliases": [
+          "measured figures",
+          "validation status"
+        ],
+        "definition": "NICo has no enforced maximum on fleet size. The published figures are the largest fleets measured, each labelled with how it was validated: field deployment, hardware lab, simulation, pre-release simulation, planned certification or roadmap.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Baseboard Management Controller (BMC)",
+        "aliases": [
+          "BMC",
+          "BMC endpoint"
+        ],
+        "definition": "A small out-of-band management controller inside a server or device. It lets software discover, power-control and inspect the hardware over the network. Every BMC needs its own IP address on the BMC network.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Data Processing Unit (DPU)",
+        "aliases": [
+          "DPU",
+          "BlueField"
+        ],
+        "definition": "A programmable network card with its own Arm CPU and BMC. NICo manages each DPU as a separate machine and uses it to provide tenant networking to its host.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md",
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "GB200 NVL72 rack",
+        "aliases": [
+          "NVL72",
+          "GB300 NVL72",
+          "compute tray"
+        ],
+        "definition": "An NVIDIA rack-scale system made of 18 compute trays (hosts), 9 NVLink switch trays and several power shelves. Its GPUs share a single NVLink domain.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "NVLink switch tray",
+        "aliases": [
+          "switch tray",
+          "NVOS switch"
+        ],
+        "definition": "A rack tray holding NVLink switches that connect the GPUs in an NVL72 rack. It runs NVOS and has its own BMC.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Power shelf",
+        "aliases": [],
+        "definition": "A rack component that supplies power to the trays. It has a BMC and NICo manages it as a device that moves through to the ready state.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Rack profile",
+        "aliases": [
+          "[rack_profiles]"
+        ],
+        "definition": "Configuration in the nico-api chart that says how many compute trays, DPUs, switch trays and power shelves a rack type has. NICo uses it to work out BMC endpoints and machines per rack, for example 71 endpoints and 54 machines for a GB200 NVL72 rack with 2 DPUs per tray.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Machine (NICo)",
+        "aliases": [
+          "ManagedHost",
+          "machine"
+        ],
+        "definition": "NICo's managed unit. Each host and each DPU is a separate machine, and a state controller moves each one through its lifecycle until it reaches 'ready'.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Site explorer",
+        "aliases": [
+          "explorations_per_run",
+          "machines_created_per_run",
+          "concurrent_explorations",
+          "machine_creation_concurrency"
+        ],
+        "definition": "The NICo component that probes BMC endpoints to discover hardware and then creates machines from what it finds. Its per-run budgets set how fast discovery happens.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "State controller concurrency",
+        "aliases": [
+          "machine state controller",
+          "max_concurrency"
+        ],
+        "definition": "The machine state controller moves at most max_concurrency machines through their states at once (10 by default, 80 to 120 recommended for large sites). This setting, not the number of CPU cores, sets how long a fleet takes to become ready.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Fleet-up and time to ready",
+        "aliases": [
+          "fleet-up"
+        ],
+        "definition": "The clock used for the simulation figures. It starts once every simulator pod is Ready and every simulated BMC is reachable, and it measures how long until all machines are created and every device reaches 'ready'.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Machine-a-tron",
+        "aliases": [
+          "machine-a-tron simulator",
+          "mat-protocol-gateway"
+        ],
+        "definition": "NICo's fleet simulator. It runs simulated BMCs and agents in Kubernetes pods behind a protocol gateway so the control plane can be scale-tested without real hardware.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md",
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "DOCA Platform Framework (DPF)",
+        "aliases": [
+          "DPF",
+          "DPF simulator"
+        ],
+        "definition": "NVIDIA's framework for provisioning and orchestrating services on DPUs. NICo provisions DPUs through it, and scale tests use a DPF simulator in its place.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Host Based Networking (HBN)",
+        "aliases": [
+          "HBN",
+          "DOCA HBN"
+        ],
+        "definition": "An NVIDIA DOCA service that runs on DPUs and provides the routed, VXLAN-based tenant network data plane.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Rack Management Service (RMS)",
+        "aliases": [
+          "RMS",
+          "RMS mock"
+        ],
+        "definition": "The service NICo uses for rack-level setup. Simulations use a mock of it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "NMX Controller (NMX-C)",
+        "aliases": [
+          "NMX-C"
+        ],
+        "definition": "The NVLink fabric management controller that NICo calls to create NVLink partitions. Simulations use a mock of it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "NVLink partition",
+        "aliases": [
+          "partition monitor",
+          "partition_monitor_max_concurrent_groups",
+          "NVLink domain"
+        ],
+        "definition": "An isolated group of GPUs inside an NVLink domain (one NVL72 rack, or two NVL36 racks cabled together). NICo creates partitions and checks them with a partition monitor that runs every 60 seconds.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "nico-api",
+        "aliases": [
+          "carbide-api"
+        ],
+        "definition": "The central NICo Core API service. It runs as one process, uses Postgres, and serves agents, the admin CLI and the other components.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md",
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Postgres primary",
+        "aliases": [
+          "PostgreSQL",
+          "max_database_connections"
+        ],
+        "definition": "The writable PostgreSQL instance that holds NICo's state. Its CPU and memory limits are among the first things to run out as a fleet grows.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Tokio worker threads",
+        "aliases": [
+          "TOKIO_WORKER_THREADS"
+        ],
+        "definition": "The threads that run the async Rust Tokio runtime inside nico-api. Raise their count to match nico-api's CPU limit so the extra CPU actually gets used.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Kubernetes resource limits",
+        "aliases": [
+          "CPU limit",
+          "memory limit",
+          "logical CPUs"
+        ],
+        "definition": "Per-container caps on CPU and memory set in the pod spec or Helm values. Kubernetes reports CPU in logical CPUs (hyper-threads).",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Kubelet working set and OOM kill",
+        "aliases": [
+          "working set",
+          "oom_kill"
+        ],
+        "definition": "The working set is resident memory plus active page cache. It naturally grows toward the memory limit, so the real sign that more memory is needed is a rising oom_kill count in the container's cgroup.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Helm chart values",
+        "aliases": [
+          "helm-prereqs/values.yaml",
+          "extraEnv",
+          "nico-core-10k-hosts.yaml"
+        ],
+        "definition": "Configuration files that customize a Helm deployment. NICo ships sizing values, for example for 10k and 20k hosts, through them.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Pod anti-affinity",
+        "aliases": [
+          "required anti-affinity"
+        ],
+        "definition": "A Kubernetes scheduling rule that keeps certain pods off the same node. The 20k-host runs used it to put nico-api and the Postgres primary on different nodes.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Kubernetes Service externalIP",
+        "aliases": [
+          "Service",
+          "externalIP"
+        ],
+        "definition": "A Kubernetes Service field that exposes a Service on a specific IP address. The simulator publishes each simulated BMC address this way.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "kube-proxy IPVS mode",
+        "aliases": [
+          "IPVS",
+          "ipset"
+        ],
+        "definition": "A kube-proxy mode that routes Service traffic with Linux IP Virtual Server. Each node keeps one ipset of addresses that holds at most 65,536 entries, which caps a stock simulator at about 736 racks.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Calico networking",
+        "aliases": [
+          "calico-node",
+          "BIRD"
+        ],
+        "definition": "A Kubernetes network plugin. Its calico-node pod runs the BIRD BGP daemon, whose health probes needed longer timeouts once nodes carried very many addresses.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "API admission control",
+        "aliases": [
+          "[api_admission_control]",
+          "apiAdmissionControl.enabled",
+          "carbide_api_admission_rejected_total"
+        ],
+        "definition": "A nico-api setting, on by default, that limits how many requests run and wait in a queue, both in total and per client. Disable it for simulated fleets, because all simulated agents share one client identity. Keep it on with real hardware and watch the rejection counter.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Client identity",
+        "aliases": [
+          "per-client limits"
+        ],
+        "definition": "The identity, typically from the client's certificate, that nico-api uses to apply per-client limits. On real hardware each host and DPU agent has its own identity.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Prometheus metrics",
+        "aliases": [
+          "counter",
+          "histogram"
+        ],
+        "definition": "Time-series counters and histograms that components expose for monitoring. The sizing figures and alert signals come from them.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "BMC network IP addressing",
+        "aliases": [
+          "/16 segment",
+          "CIDR"
+        ],
+        "definition": "Planning the address ranges for BMCs. Every endpoint needs one IP, and a 1,112-rack site needs 78,952 addresses, more than one /16 subnet (65,536) holds.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Tenant VPC",
+        "aliases": [
+          "virtual private cloud",
+          "VPC"
+        ],
+        "definition": "An isolated tenant network that NICo creates against one site. Each VPC uses one active VNI.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "VXLAN and VNI",
+        "aliases": [
+          "VXLAN network identifier",
+          "VTEP"
+        ],
+        "definition": "VXLAN carries layer-2 overlay networks over a routed fabric. Each overlay is identified by a VNI, and VTEPs are the endpoints of the tunnels.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "VNI resource pool",
+        "aliases": [
+          "vpc-vni",
+          "external-vpc-vni",
+          "resource-pool grow"
+        ],
+        "definition": "Operator-configured ranges of VNIs that NICo hands out to VPCs. The size of the pool bounds how many VPCs a site can have, and an established pool can be extended with nico-admin-cli.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "InfiniBand partition",
+        "aliases": [],
+        "definition": "An isolation group on an InfiniBand fabric. In NICo it is a tenancy object scoped to one site.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "Network security group",
+        "aliases": [
+          "max_network_security_group_size"
+        ],
+        "definition": "A set of tenant firewall rules that the DPU agent enforces. A group is limited to 200 expanded rules by default.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "name": "NICo REST and Site Agent",
+        "aliases": [
+          "nico-rest",
+          "Site Agent",
+          "siteId"
+        ],
+        "definition": "NICo REST is a REST API layer that can be deployed centrally. Each site controller connects to it through a Site Agent, so one REST endpoint can front several sites.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "getting-started/sizing-and-scale.md",
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Docker BuildKit and Buildx",
+        "aliases": [
+          "Buildx",
+          "docker context",
+          "BUILDX_BUILDER"
+        ],
+        "definition": "BuildKit is Docker's image build engine and Buildx is its CLI front end. NICo's build recipes pin both the Docker context and the builder so that every build runs on one daemon.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Multi-architecture image manifest",
+        "aliases": [
+          "manifest list",
+          "linux/amd64",
+          "linux/arm64"
+        ],
+        "definition": "A single image tag that points to separate images for each CPU architecture. NICo builds amd64 and arm64 separately and then assembles the combined tag.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Container registry",
+        "aliases": [
+          "IMAGE_REGISTRY",
+          "localhost:5000"
+        ],
+        "definition": "A server that stores and serves container images. The Makefile pushes to a local registry on localhost:5000 unless you override IMAGE_REGISTRY.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Cross-architecture emulation (binfmt/QEMU)",
+        "aliases": [
+          "binfmt",
+          "QEMU"
+        ],
+        "definition": "Linux binfmt_misc registration with QEMU, which lets a host build and run images for a different CPU architecture. The -arm build targets avoid it by building natively.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Building local dev images (make images-dev)",
+        "aliases": [
+          "DEV_TARGET",
+          "images-dev"
+        ],
+        "definition": "Builds one native Core development service image, such as api or dhcp, using the same recipes as Tilt, in a Linux Docker daemon. It does not push or deploy the image.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Tilt",
+        "aliases": [],
+        "definition": "A local Kubernetes development tool that builds and deploys services when code changes. NICo's dev image recipes are shared with it.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "DHCP",
+        "aliases": [
+          "DHCPv4",
+          "DHCPv6"
+        ],
+        "definition": "The protocol that assigns IP addresses to network devices. The servers listen on UDP port 67 (IPv4) and 547 (IPv6).",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Kea DHCP server with NICo hook",
+        "aliases": [
+          "Kea",
+          "libdhcp.so",
+          "KEA_VERSION"
+        ],
+        "definition": "ISC's Kea DHCP server, packaged in the NICo DHCP image with a NICo hook library that loads from /usr/lib/kea/hooks/libdhcp.so. A smoke-test script checks that the hook loads and that the listeners start.",
+        "kind": "conceptual",
+        "role": "explained",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Build host bootstrap (make bootstrap)",
+        "aliases": [
+          "setup-build-host.sh"
+        ],
+        "definition": "A single, repeatable step on Ubuntu 24.04 that installs the packages, rustup, git submodules, Docker with emulation, and cargo tooling needed for the full image and boot-artifact builds.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Rust toolchain and Cargo",
+        "aliases": [
+          "rustup",
+          "cargo make",
+          "sccache"
+        ],
+        "definition": "Rust's compiler and package/build tool. NICo is written in Rust, and its build tasks are driven with cargo-make.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Building all images (make images)",
+        "aliases": [
+          "images-all",
+          "images-arm",
+          "images-all-arm",
+          "NICO_ARCHES",
+          "DPU_ARCHES"
+        ],
+        "definition": "Make targets that build and push the deployable stack (NICo Core and the REST images), and optionally the machine-validation and boot-artifact images, for chosen architectures. A loop afterwards checks each tag's platforms.",
+        "kind": "procedural",
+        "role": "explained",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Boot artifacts",
+        "aliases": [
+          "boot-artifacts-x86_64",
+          "boot-artifacts-aarch64",
+          "mkosi"
+        ],
+        "definition": "The OS images and binaries that NICo serves to network-boot hosts and DPUs. They are built with mkosi and iPXE and packaged into containers.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "PXE / iPXE network boot",
+        "aliases": [
+          "PXE",
+          "iPXE",
+          "nico-pxe"
+        ],
+        "definition": "Booting a machine over the network: DHCP gives the machine an address and a boot target, and the machine then downloads its boot images. NICo uses it to provision hosts.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "DPU BFB",
+        "aliases": [
+          "BFB",
+          "BlueField bootstream"
+        ],
+        "definition": "The BlueField Bootstream image format used to install software on a DPU. NICo builds it as the aarch64 boot artifact.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "Machine validation",
+        "aliases": [
+          "machine-validation-runner",
+          "machine-validation-config"
+        ],
+        "definition": "NICo images that run hardware validation tests on machines. The runner image is packaged into a config container that is deployed on the nico-pxe pod.",
+        "kind": "conceptual",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "name": "nico-admin-cli",
+        "aliases": [
+          "admin-cli"
+        ],
+        "definition": "NICo's operator command-line tool, built as a standalone binary rather than as a container.",
+        "kind": "procedural",
+        "role": "assumed",
+        "pages": [
+          "manuals/building_nico_containers.md",
+          "getting-started/sizing-and-scale.md"
+        ]
+      }
+    ],
+    "prerequisites": [
+      {
+        "concept": "Rack profile",
+        "requires": "GB200 NVL72 rack",
+        "confidence": 0.85,
+        "why": "A rack profile counts the trays, DPUs and shelves of a rack type"
+      },
+      {
+        "concept": "Rack profile",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.75,
+        "why": "Profiles are converted into BMC endpoint counts"
+      },
+      {
+        "concept": "Machine (NICo)",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.75,
+        "why": "Each DPU is managed as its own machine"
+      },
+      {
+        "concept": "Site explorer",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.9,
+        "why": "The explorer discovers hardware by probing BMCs"
+      },
+      {
+        "concept": "Site explorer",
+        "requires": "Machine (NICo)",
+        "confidence": 0.7,
+        "why": "The explorer creates machines"
+      },
+      {
+        "concept": "State controller concurrency",
+        "requires": "Machine (NICo)",
+        "confidence": 0.85,
+        "why": "The state controller advances machines"
+      },
+      {
+        "concept": "Fleet-up and time to ready",
+        "requires": "Machine-a-tron",
+        "confidence": 0.75,
+        "why": "Fleet-up is defined by the simulator pods being ready"
+      },
+      {
+        "concept": "Fleet-up and time to ready",
+        "requires": "State controller concurrency",
+        "confidence": 0.6,
+        "why": "Time to ready depends on state controller concurrency"
+      },
+      {
+        "concept": "Machine-a-tron",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.8,
+        "why": "It simulates BMCs"
+      },
+      {
+        "concept": "Machine-a-tron",
+        "requires": "Kubernetes Service externalIP",
+        "confidence": 0.6,
+        "why": "Simulated BMC addresses are exposed as Services"
+      },
+      {
+        "concept": "NVLink partition",
+        "requires": "GB200 NVL72 rack",
+        "confidence": 0.75,
+        "why": "The partition domain is an NVL72 rack"
+      },
+      {
+        "concept": "NVLink partition",
+        "requires": "NVLink switch tray",
+        "confidence": 0.6,
+        "why": "The switch trays form the NVLink fabric"
+      },
+      {
+        "concept": "NMX Controller (NMX-C)",
+        "requires": "NVLink partition",
+        "confidence": 0.6,
+        "why": "NMX-C exists to manage partitions"
+      },
+      {
+        "concept": "DOCA Platform Framework (DPF)",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.85,
+        "why": "DPF orchestrates DPUs"
+      },
+      {
+        "concept": "Host Based Networking (HBN)",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.85,
+        "why": "HBN runs on DPUs"
+      },
+      {
+        "concept": "Host Based Networking (HBN)",
+        "requires": "VXLAN and VNI",
+        "confidence": 0.7,
+        "why": "HBN is a VXLAN data plane"
+      },
+      {
+        "concept": "Tokio worker threads",
+        "requires": "Kubernetes resource limits",
+        "confidence": 0.6,
+        "why": "The thread count is matched to the CPU limit"
+      },
+      {
+        "concept": "Kubelet working set and OOM kill",
+        "requires": "Kubernetes resource limits",
+        "confidence": 0.85,
+        "why": "OOM kills happen against the memory limit"
+      },
+      {
+        "concept": "Postgres primary",
+        "requires": "Kubernetes resource limits",
+        "confidence": 0.5,
+        "why": "Postgres is sized through its CPU and memory limits"
+      },
+      {
+        "concept": "kube-proxy IPVS mode",
+        "requires": "Kubernetes Service externalIP",
+        "confidence": 0.75,
+        "why": "IPVS records the Service addresses"
+      },
+      {
+        "concept": "Pod anti-affinity",
+        "requires": "Kubernetes resource limits",
+        "confidence": 0.4,
+        "why": "Anti-affinity is used because the two limits together exceed one node"
+      },
+      {
+        "concept": "API admission control",
+        "requires": "nico-api",
+        "confidence": 0.85,
+        "why": "Admission control limits nico-api's requests"
+      },
+      {
+        "concept": "API admission control",
+        "requires": "Client identity",
+        "confidence": 0.8,
+        "why": "The per-client limits key on identity"
+      },
+      {
+        "concept": "VNI resource pool",
+        "requires": "VXLAN and VNI",
+        "confidence": 0.9,
+        "why": "The pool hands out VNIs"
+      },
+      {
+        "concept": "Tenant VPC",
+        "requires": "VNI resource pool",
+        "confidence": 0.6,
+        "why": "Each VPC takes a VNI from the pool"
+      },
+      {
+        "concept": "BMC network IP addressing",
+        "requires": "Baseboard Management Controller (BMC)",
+        "confidence": 0.8,
+        "why": "Each BMC needs an address"
+      },
+      {
+        "concept": "NICo REST and Site Agent",
+        "requires": "NICo site controller",
+        "confidence": 0.7,
+        "why": "Site Agents connect site controllers to REST"
+      },
+      {
+        "concept": "Multi-architecture image manifest",
+        "requires": "Container registry",
+        "confidence": 0.6,
+        "why": "Manifests are published to a registry"
+      },
+      {
+        "concept": "Building all images (make images)",
+        "requires": "Multi-architecture image manifest",
+        "confidence": 0.8,
+        "why": "The targets produce multi-arch tags"
+      },
+      {
+        "concept": "Building all images (make images)",
+        "requires": "Build host bootstrap (make bootstrap)",
+        "confidence": 0.85,
+        "why": "The prerequisites must be installed first"
+      },
+      {
+        "concept": "Building all images (make images)",
+        "requires": "Docker BuildKit and Buildx",
+        "confidence": 0.7,
+        "why": "The builds run through Buildx"
+      },
+      {
+        "concept": "Building all images (make images)",
+        "requires": "Cross-architecture emulation (binfmt/QEMU)",
+        "confidence": 0.55,
+        "why": "Non-native architectures are built under emulation"
+      },
+      {
+        "concept": "Building local dev images (make images-dev)",
+        "requires": "Docker BuildKit and Buildx",
+        "confidence": 0.8,
+        "why": "It requires a BuildKit daemon and a pinned context"
+      },
+      {
+        "concept": "Kea DHCP server with NICo hook",
+        "requires": "DHCP",
+        "confidence": 0.9,
+        "why": "Kea is a DHCP server"
+      },
+      {
+        "concept": "PXE / iPXE network boot",
+        "requires": "DHCP",
+        "confidence": 0.8,
+        "why": "PXE relies on DHCP"
+      },
+      {
+        "concept": "Boot artifacts",
+        "requires": "PXE / iPXE network boot",
+        "confidence": 0.7,
+        "why": "The artifacts are served for network boot"
+      },
+      {
+        "concept": "DPU BFB",
+        "requires": "Data Processing Unit (DPU)",
+        "confidence": 0.85,
+        "why": "BFB is the DPU install image"
+      },
+      {
+        "concept": "Build host bootstrap (make bootstrap)",
+        "requires": "Rust toolchain and Cargo",
+        "confidence": 0.5,
+        "why": "It installs and uses the Rust tooling"
+      },
+      {
+        "concept": "Scale guidance vs hard limit",
+        "requires": "Machine-a-tron",
+        "confidence": 0.5,
+        "why": "Most of the figures come from simulation"
+      }
+    ]
+  }
+}

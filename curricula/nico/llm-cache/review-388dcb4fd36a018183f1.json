@@ -1,0 +1,34 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "The flush hint says removing Docker's NAT table inside the container is 'fine here because no ports are published'. That's wrong. Published-port DNAT lives in the host's network namespace, not the container's. The NAT table inside a container on a user-defined network redirects traffic for Docker's embedded DNS resolver (127.0.0.11). Flushing it breaks name resolution in the container. That's harmless here only because app.py does no lookups.",
+        "fix": "Reword: 'Flushing also removes Docker's NAT rules inside the container, which serve Docker's embedded DNS at 127.0.0.11. That's fine here because the API never resolves names, but you can simply recreate the container instead.'"
+      },
+      {
+        "where": "cidr-prefixes-and-31-point-to-point-subnets",
+        "severity": "minor",
+        "problem": "The lesson says the admin network's `reserve_first` setting exists 'for this', i.e. reserving the gateway address. The quick start only lists `reserve_first` as a field and never describes its purpose.",
+        "fix": "Say that NICo's admin network config has a `reserve_first` field for reserving addresses at the start of the prefix, or drop the claim that it's for the gateway."
+      },
+      {
+        "where": "http-and-web-apis",
+        "severity": "minor",
+        "problem": "The lesson says NICo's REST ingress 'forces a redirect from HTTP to HTTPS when TLS is enabled'. The docs say the default annotation (`ingress.kubernetes.io/force-ssl-redirect`) is honoured by Contour. Other controllers such as ingress-nginx need their own annotation, and a spec.tls block alone leaves port 80 serving cleartext. The same claim appears in the plain-HTTP check explanation.",
+        "fix": "Qualify it: 'NICo's REST ingress chart adds a force-ssl-redirect annotation by default (honoured by Contour; other controllers need their own annotation), because a TLS block alone would leave port 80 serving the API in cleartext.'"
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "`docker logs api 2>&1 | tail -n 8` also shows the intruder's request from step 4, made before the firewall went up. A learner may read that 172.30.0.30 line as a failure.",
+        "fix": "Tell the learner to compare timestamps: the 172.30.0.30 line from step 4 is expected, and no 172.30.0.30 line should have a timestamp after the firewall was applied. Alternatively, have them note the time when they apply lab.nft."
+      }
+    ]
+  }
+}

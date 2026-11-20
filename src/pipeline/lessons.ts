@@ -13,8 +13,8 @@ export interface ChapterResult {
   context: ChapterContext;
   lessons: ChapterLessons;
   review: Review;
-  /** True when the first draft had review issues and was rewritten. */
-  revised: boolean;
+  /** How many times the draft was rewritten after review (0-2). */
+  rewrites: number;
 }
 
 /**
@@ -101,13 +101,16 @@ export async function buildChapterLessons(
   };
   let lessons = sorted(await opts.provider.complete(chapterLessonTask(context)));
   let review = await opts.provider.complete(reviewTask(context, lessons));
-  let revised = false;
-  if (review.issues.length) {
-    // one rewrite with the reviewer's notes, then review the result again.
-    // Minor issues count too: in testing, "minor" notes were often real bugs.
+  let rewrites = 0;
+  // Rewrite with the reviewer's notes, then review again. Any issue triggers the
+  // first rewrite (in testing, "minor" notes were often real bugs); a second
+  // rewrite happens only if major issues remain.
+  for (let round = 0; round < 2; round++) {
+    const needed = round === 0 ? review.issues.length > 0 : review.issues.some((i) => i.severity === "major");
+    if (!needed) break;
     lessons = sorted(await opts.provider.complete(reviseTask(context, lessons, review)));
     review = await opts.provider.complete(reviewTask(context, lessons));
-    revised = true;
+    rewrites++;
   }
-  return { context, lessons, review, revised };
+  return { context, lessons, review, rewrites };
 }

@@ -10,9 +10,17 @@ general:
     therefore do not work on current Docker. For routing labs, use Linux
     network namespaces with veth pairs inside one `docker run --privileged`
     container (tested: `ip netns add`, `ip link add ... type veth peer name ...
-    netns ...`, `ip -n <ns> addr/route`, `ip netns exec router sysctl -w
-    net.ipv4.ip_forward=1`; traceroute shows the router hop and the server
-    sees the client's real source IP).
+    netns ...`, `ip -n <ns> addr/route`; traceroute shows the router hop and
+    the server sees the client's real source IP).
+  - >-
+    `debian:stable-slim` and `python:3.12-slim` have no `sysctl` (it is in the
+    `procps` package). Either install procps or enable forwarding with
+    `ip netns exec router sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'`.
+  - >-
+    In Debian-based containers, `nft list ruleset` prints Docker's
+    `table ip nat` with warnings like "XT target DNAT not found". They are
+    harmless; tell the learner to expect them so they don't think the
+    firewall is broken.
   - >-
     Python's http.server logs requests to stderr. `docker logs <c> | tail`
     does not filter stderr; write `docker logs <c> 2>&1 | tail`.
@@ -24,23 +32,22 @@ general:
 chapters:
   1:
     - >-
-      Tested 2026-11-20: the build task (site-inventory resolver) works exactly
-      as written; keep its data, expected output and traps.
+      Tested 2026-11-20: the site-inventory resolver build task (site.toml,
+      discovered.yaml with one deliberately unquoted MAC, requests.yaml,
+      resolver.py, expected.txt) works as designed: step 2 shows one int, the
+      script fails with "quote it in the YAML", and after quoting it prints
+      PASS. The YAML completion problem (quoting "50:00:12:34:56:01", which
+      PyYAML otherwise loads as 38882717761) is correct.
     - >-
-      The YAML completion problem was broken: the template had `  ___ name: R01`
-      and the answer said the blank is "- " (dash and space), which gives
-      `  -  name: R01` and fails to parse. A blank must stand for exactly the
-      missing characters.
+      Blanks in completion problems must stand for exactly the missing
+      characters (an earlier version's "- " blank broke YAML indentation).
   3:
     - >-
-      Tested 2026-11-20 on Docker 29: steps 1-6 and "Check it works" of the
-      network lab work exactly as written (401/200/404, curl exit 28 after the
-      firewall). Keep them.
-    - >-
-      `docker exec api nft list ruleset` also prints Docker's own `table ip nat`
-      rules, so don't claim the ruleset "matches your file"; say your
-      `table inet lab` appears alongside Docker's NAT table.
-    - >-
-      The stretch goal (router container between two Docker networks) fails on
-      Docker 28+ (see general note). Rewrite it with network namespaces in one
-      privileged container.
+      Tested 2026-11-20 on Docker 29: the firewall lab (api on 172.30.0.10 in
+      python:3.12-slim with nftables, throwaway curlimages/curl clients at .20
+      and .30, input chain allowing only .20, timestamp check in the API log)
+      works exactly as written: 401/200/404/401, then 401/200/404 and the
+      intruder's curl prints 000 with exit 28. The namespace stretch goal with
+      /31 links works: traceroute hops 10.0.0.0 then 10.0.0.3, server sees
+      10.0.0.1, forward-chain firewall lets the first client through and times
+      out a second client.

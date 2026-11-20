@@ -83,7 +83,8 @@ program
   .option("--model <id>", "model to use")
   .option("--concurrency <n>", "chapters in parallel", "2")
   .option("--page-chars <n>", "docs characters given per chapter", "120000")
-  .action(async (id: string, o: { chapters: string; provider: string; model?: string; concurrency: string; pageChars: string }) => {
+  .option("--force", "rewrite chapters that already exist (they may have been tested by hand)")
+  .action(async (id: string, o: { chapters: string; provider: string; model?: string; concurrency: string; pageChars: string; force?: boolean }) => {
     const { topic, paths } = loadTopic(root, id);
     const graphFile = path.join(paths.out, "graph.json");
     if (!fs.existsSync(graphFile)) throw new Error(`no ${path.relative(root, graphFile)}; run "gl build ${id}" first`);
@@ -94,7 +95,14 @@ program
     const docsBase = `${topic.source.repo}/blob/${topic.source.ref}/${topic.source.docsDir}`;
     const feedbackFile = path.join(path.dirname(paths.topicFile), "feedback.yaml");
     const feedback = fs.existsSync(feedbackFile) ? (YAML.parse(fs.readFileSync(feedbackFile, "utf8")) as Feedback) : {};
-    const numbers = parseRange(o.chapters);
+    const numbers = parseRange(o.chapters).filter((n) => {
+      const file = path.join(paths.out, "chapters", chapterFileName(n, cur.chapters.find((c) => c.number === n)?.title ?? ""));
+      if (!o.force && fs.existsSync(file)) {
+        log(`chapter ${n}: already written, skipping (use --force to rewrite it)`);
+        return false;
+      }
+      return true;
+    });
     const files = new Map(cur.chapters.map((c) => [c.number, chapterFileName(c.number, c.title)]));
     const outDir = path.join(paths.out, "chapters");
     fs.mkdirSync(outDir, { recursive: true });
@@ -106,7 +114,7 @@ program
       fs.writeFileSync(path.join(outDir, file), renderChapter(result, docsBase, { prev: files.get(n - 1), next: files.get(n + 1) }));
       fs.writeFileSync(path.join(outDir, file.replace(/\.md$/, ".json")), JSON.stringify(result.lessons, null, 2) + "\n");
       const major = result.review.issues.filter((i) => i.severity === "major").length;
-      log(`chapter ${n}: done (${result.review.verdict}${result.revised ? ", rewritten once" : ""}, ${major} major / ${result.review.issues.length - major} minor issues left) → ${file}`);
+      log(`chapter ${n}: done (${result.review.verdict}${result.rewrites ? `, rewritten ${result.rewrites}x` : ""}, ${major} major / ${result.review.issues.length - major} minor issues left) → ${file}`);
     });
     // index of every chapter written so far
     const written = cur.chapters.filter((c) => fs.existsSync(path.join(outDir, files.get(c.number) as string)));

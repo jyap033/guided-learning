@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "Step 3 claims 'Once the firewall is in place, the container can no longer download packages', and a hint says apt-get failing after the firewall is 'expected'. With lab.nft only the input hook is filtered: outbound traffic is unfiltered, replies pass via 'ct state established,related accept', and Docker's embedded DNS (127.0.0.11) goes over lo, which is accepted. apt-get therefore keeps working. The hint's explanation ('replies from the internet are allowed but DNS lookups made before loading might be cached') contradicts itself and is wrong.",
+        "fix": "Rewrite step 3's note, e.g. 'Install the tools now so the firewall test isn't confused by later changes', or say the firewall only blocks new inbound connections. Remove or rewrite the apt-get hint to explain that a default-deny input chain with established/related still allows connections the container starts itself. Keep the step order (tester-verified)."
+      },
+      {
+        "where": "ip-addressing-basics",
+        "severity": "minor",
+        "problem": "The completion problem says `is_private` prints True 'for addresses in the RFC 1918 private ranges'. Python's is_private is also True for loopback (127/8) and link-local (169.254/16), which clashes with the check question that says 169.254 is not RFC 1918.",
+        "fix": "Say that is_private is True for RFC 1918 and other non-public ranges such as loopback and link-local."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The stretch goal asks you to check that the server's log shows client source IP 10.0.0.0, but never tells you to send an HTTP request from the client namespace first.",
+        "fix": "Add `ip netns exec client curl -s http://10.0.0.3:8080/ >/dev/null` before the log check."
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "ok",
+    "issues": []
+  }
+}

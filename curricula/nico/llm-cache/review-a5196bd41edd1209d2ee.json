@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "containers-and-container-images",
+        "severity": "major",
+        "problem": "The example Dockerfile in the explanation puts comments at the end of instruction lines (e.g. `FROM python:3.12-slim        # base image`, `WORKDIR /app # cd ...`, `CMD [\"python\", \"app.py\"]     # default command`). Docker only treats `#` as a comment at the start of a line. If a learner copies this: FROM fails with extra arguments, WORKDIR becomes the literal path '/app # cd (and create) inside the image', RUN passes the comment text to the shell, and CMD's JSON no longer parses, so it silently falls back to shell form. The example teaches syntax that doesn't work.",
+        "fix": "Put each comment on its own line above the instruction (e.g. `# base image` then `FROM python:3.12-slim`), or move the notes into a bullet list under the code block. Add one sentence saying that `#` starts a comment only at the beginning of a line in a Dockerfile."
+      },
+      {
+        "where": "linux-system-administration-basics",
+        "severity": "minor",
+        "problem": "Hint 3 of the independent problem says '`su` starts a fresh login, so it picks up the new group.' Plain `su alice -c ...` (without `-`/`-l`) does not start a login shell. It picks up the new group because su sets up the target user's groups again from /etc/group when it switches user. The wording mixes this up with a login shell, which is a different thing.",
+        "fix": "Reword to: '`su` sets up alice's groups again from /etc/group when it switches to her, so the new process has the new group (an already-open shell of hers would not).'"
+      }
+    ]
+  }
+}

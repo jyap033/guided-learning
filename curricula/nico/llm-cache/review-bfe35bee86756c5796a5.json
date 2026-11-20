@@ -1,0 +1,40 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "The expected output in verify lists `train-b -> NONE` for node02. But inventory.yaml gives node02 one IbFabric2 port (guid 9100, slot 0000:ca:00.0, numa_node 1). The SQL in step 5 (host=node02, fabric=IbFabric2, OFFSET 0) returns that row, so a correct resolve.py prints `train-b -> guid=9100 slot=0000:ca:00.0 dev=ibp202s0f0 numa=1` and the `diff` fails. The tester note says to keep the data and expected output, but this line cannot come from the given data, so the expected output in this version is inconsistent.",
+        "fix": "Keep the data and traps unchanged. Change the node02 train-b line in the expected output to `  train-b -> guid=9100 slot=0000:ca:00.0 dev=ibp202s0f0 numa=1`."
+      },
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "One hint contradicts itself. It first says `train-b` on node02 being `NONE` is correct, then says it should actually be `9100`, and it refers to a 'note in Stretch' that doesn't exist. Learners get no clear way to check their result.",
+        "fix": "Remove that hint, or replace it with: \"node02 has a single IbFabric2 port, so train-b resolves to 9100. If you get NONE, check the fabric parameter you pass to the query.\""
+      },
+      {
+        "where": "intro",
+        "severity": "minor",
+        "problem": "The intro says each reported InfiniBand port 'carries a PCI slot address'. In the docs' current PciDeviceProperties, the port carries an OS-specific `path`. The `slot` field is only proposed.",
+        "fix": "Say that the current message carries a device path and NUMA node, and that the docs propose storing the PCI slot instead."
+      },
+      {
+        "where": "protocol-buffers",
+        "severity": "minor",
+        "problem": "The comment 'a few dozen bytes' is inaccurate. The message (guid '1234', vendor '0x15b3', numa_node 1) encodes to about 18 bytes. Also, json_format.MessageToJson prints lowerCamelCase names (pciProperties, numaNode) by default, which differs from the docs' snake_case JSON and from the claim that JSON uses the field names.",
+        "fix": "Change the comment to 'about 18 bytes'. Either note that MessageToJson converts names to camelCase, or pass preserving_proto_field_name=True."
+      },
+      {
+        "where": "mac-address",
+        "severity": "minor",
+        "problem": "The independent-problem answer loops over `inputs` but never defines it.",
+        "fix": "Add `inputs = [...]` with the list from the prompt to the answer code."
+      }
+    ]
+  }
+}

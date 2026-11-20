@@ -69,7 +69,7 @@ export function renderChapter(r: ChapterResult, docsBase: string, opts: { prev?:
   out.push(`**Stretch goal:** ${b.stretch}`, "");
 
   out.push("## Review notes", "");
-  if (r.revised) out.push("The first draft had review issues and was rewritten using them; the notes below are from reviewing the rewrite.", "");
+  if (r.rewrites) out.push(`The draft was rewritten ${r.rewrites === 1 ? "once" : "twice"} using review issues; the notes below are from the last review.`, "");
   if (ctx.feedback.length) out.push(`This chapter was written with ${ctx.feedback.length} finding(s) from testing earlier versions (\`topics/<topic>/feedback.yaml\`).`, "");
   if (!review.issues.length) out.push(`Automated review: **${review.verdict}**, no issues found.`, "");
   else {

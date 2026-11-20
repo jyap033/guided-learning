@@ -1,0 +1,607 @@
+{
+  "kind": "revise",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Chapter 1 covered the physical server: CPUs, PCIe devices, NUMA nodes, MAC addresses and the data formats used to describe them. This chapter adds the software layer you'll need before NICo makes sense: the operating system, the programming model its services use, and the tools for packaging and shipping them.\n\nThere are six lessons. The first, the **network interface card**, connects back to hardware. A NIC is the PCIe device that puts a server on the network, and you'll learn to find it from a Linux shell. Four software foundations follow: **async programming** (how one service can wait on thousands of slow machines at once), **Git** (where code and, later, deployment config live), **Linux system administration** (users, files, packages, services) and **containers** (how services are packaged and run). The last lesson, **memory and cgroups**, explains how Linux counts memory and how it caps a group of processes. Without it, a container that gets \"OOM killed\" in a later chapter won't make sense.\n\nEach lesson leads to a later chapter. NICs lead to Ethernet networking (ch. 3). Async leads to Tokio worker threads (ch. 16). Git leads to GitOps with ArgoCD (ch. 17). Containers lead to Kubernetes and registries (ch. 13–14). cgroups lead to kubelet memory accounting (ch. 16). NICo is a set of services that run in containers on Kubernetes and manage bare-metal machines over the network, so it uses all of these.\n\nEverything here runs on a laptop with a shell, Python 3 and Docker (or Podman). Commands that need Linux are marked. On macOS, run them inside a Linux container.",
+    "objectives": [
+      "Identify a server's network interfaces, their MAC addresses and the PCI addresses behind them from a Linux shell",
+      "Write a Python asyncio program that runs many I/O-bound tasks at once, and spot code that blocks the event loop",
+      "Use Git to commit changes, create and merge branches, and safely undo a bad commit",
+      "Manage users, file permissions, packages and systemd services on a Linux system",
+      "Build a container image from a Dockerfile, run it, and explain why a container is an isolated process rather than a VM",
+      "Read resident memory, page cache and cgroup memory limits, and reproduce and diagnose an OOM kill"
+    ],
+    "lessons": [
+      {
+        "concept": "network-interface-card",
+        "prequestions": [
+          {
+            "question": "A server has one network card with two Ethernet ports. Does it have one MAC address or two?",
+            "answer": "Normally two. Each port is a separate network interface with its own MAC address, even when both ports sit on the same card."
+          },
+          {
+            "question": "Is a server's IP address stored on the network card?",
+            "answer": "No. The MAC address is set by the card's firmware. The IP address is configuration that the operating system (or DHCP) assigns to the interface, and it can change at any time."
+          }
+        ],
+        "explanation": "A **network interface card (NIC)** is the hardware that connects a server to a network. In a server it's usually a **PCIe device** (ch. 1), either a plug-in card or a chip on the motherboard. A NIC has one or more **ports**, the physical sockets that take a copper cable or a fibre transceiver. Each port has its own **MAC address** and appears in the OS as its own **network interface**.\n\nTerms you'll see:\n\n- **Link speed**: how fast the port talks to the switch at the other end, e.g. 1, 25, 100 or 400 Gb/s. Servers often have a slow port for management and fast ports for workloads.\n- **Driver**: the kernel module that controls the card, e.g. `mlx5_core` for NVIDIA/Mellanox ConnectX cards or `e1000e` for some Intel ones.\n- **Interface name**: what Linux calls the port. Modern systems use \"predictable\" names based on where the hardware sits. `enp65s0f1` means **en**=Ethernet, **p65**=PCI bus 65 (decimal, which is 0x41), **s0**=slot 0, **f1**=function 1. That is the device at PCI address `0000:41:00.1`.\n- **Virtual interfaces**: some interfaces aren't hardware at all. `lo` (loopback), `docker0` (a software bridge) and `veth*` (the two ends of a virtual cable, used by containers) exist only in the kernel.\n- **Network boot (PXE)**: NIC firmware can download a boot program over the network before any OS is on the disk. Bare-metal provisioning systems rely on this.\n- **BMC port**: the server's baseboard management controller has its own small NIC, separate from the main OS, so you can manage the machine while it's powered off.\n- **SmartNIC / DPU**: a NIC with its own CPU cores, such as NVIDIA BlueField. It can run software and enforce network policy on the card, independently of the host OS.\n\nLinux shows NICs in three places: `ip link` (interfaces and MACs), `/sys/class/net/<name>/` (one directory per interface, with files like `address` and a `device` link to the PCI device), and `lspci` (the PCIe hardware itself).",
+        "analogy": "A NIC is like a building's mail room. Each port is a separate mail slot with its own permanent label (the MAC address). The street address (the IP) is assigned by the city and can change. The comparison stops working with SmartNICs. An ordinary mail room only passes mail along, but a DPU is a mail room with its own staff who can open, filter and redirect mail without asking anyone in the building.",
+        "workedExample": {
+          "title": "Find every NIC on a Linux machine and match it to its PCI address",
+          "steps": [
+            {
+              "subgoal": "List interfaces and their MACs",
+              "detail": "On Linux (or inside `docker run --rm -it debian:12 bash`, then `apt-get update && apt-get install -y iproute2`):\n```bash\nip -br link\n```\nExample output:\n```\nlo        UNKNOWN  00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP>\nenp65s0f0 UP       b8:3f:d2:11:22:30 <BROADCAST,MULTICAST,UP,LOWER_UP>\nenp65s0f1 DOWN     b8:3f:d2:11:22:31 <BROADCAST,MULTICAST>\n```\nTwo ports on one card, with consecutive MACs. `lo` is virtual."
+            },
+            {
+              "subgoal": "Tell physical from virtual",
+              "detail": "Physical interfaces have a `device` link in sysfs. Virtual ones don't:\n```bash\nls -l /sys/class/net/\n```\nEntries that point into `../../devices/pci0000:...` are hardware. Entries under `devices/virtual/` are software."
+            },
+            {
+              "subgoal": "Resolve the PCI address",
+              "detail": "```bash\nbasename \"$(readlink -f /sys/class/net/enp65s0f1/device)\"\n# 0000:41:00.1\n```\nThis agrees with the name: bus 0x41 = 65 decimal, slot 0, function 1."
+            },
+            {
+              "subgoal": "Look at the hardware and driver",
+              "detail": "```bash\nlspci -s 41:00.1          # what card is it?\nethtool -i enp65s0f1      # driver, firmware, bus-info\nethtool enp65s0f1 | grep -E 'Speed|Link detected'\n```\n`ethtool` and `lspci` may need `sudo` and the `ethtool` / `pciutils` packages. On a laptop your names will differ (e.g. `wlp0s20f3` for Wi‑Fi). In a VM or container you'll see `eth0` with a `virtio_net` or `veth` driver."
+            },
+            {
+              "subgoal": "macOS equivalent",
+              "detail": "```bash\nnetworksetup -listallhardwareports   # port name, device (en0), MAC\nifconfig en0\n```\nmacOS doesn't expose PCI paths the same way. Use a Linux container for the sysfs steps."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this script so it prints, for every interface, its name, its MAC address and either its PCI address or the word `virtual`.",
+          "partialSolution": "#!/bin/sh\nfor dev in /sys/class/net/*; do\n  name=$(basename \"$dev\")\n  mac=$(cat \"$dev/___\")\n  if [ -e \"$dev/device\" ]; then\n    pci=$(basename \"$(readlink -f \"$dev/___\")\")\n  else\n    pci=\"virtual\"\n  fi\n  echo \"$name $mac $pci\"\ndone",
+          "answer": "The first blank is `address`, the file that holds the MAC. The second is `device`, the symlink to the underlying bus device. On bare metal the last column shows values like `0000:41:00.1`. In a VM with virtio networking you may see `virtio0` instead, because the link points to a virtio device that sits under a PCI device."
+        },
+        "independentProblem": {
+          "prompt": "You're handed a server whose interfaces are named `eno1`, `enp129s0f0np0` and `enp129s0f1np1`. Without running anything, work out (a) which two ports are probably on the same physical card and (b) the PCI address of `enp129s0f1np1`. Then give the command you'd run to confirm.",
+          "hints": [
+            "Look at what the `p`, `s` and `f` parts mean. `eno1` follows a different scheme: `o` means 'onboard'.",
+            "The bus number in the name is decimal. PCI addresses are written in hex.",
+            "129 decimal = 0x81, so the address is `0000:81:00.1`. (`np1` is the physical port name the driver reports.)"
+          ],
+          "answer": "(a) `enp129s0f0np0` and `enp129s0f1np1` share bus 129 and slot 0 and differ only by function (0 and 1), so they are two ports on one card. `eno1` is an onboard NIC, often the one used for management. (b) Bus 129 = 0x81, slot 0, function 1 → `0000:81:00.1`. Confirm with `basename \"$(readlink -f /sys/class/net/enp129s0f1np1/device)\"` or `ethtool -i enp129s0f1np1 | grep bus-info`."
+        },
+        "selfExplanation": "Why would a provisioning system rather identify a machine's network ports by MAC address than by interface name or IP address?",
+        "checks": [
+          {
+            "question": "What does the interface name `enp65s0f1` tell you?",
+            "options": [
+              "It's the 65th Ethernet interface the kernel found",
+              "It's an Ethernet port at PCI bus 65 (0x41), slot 0, function 1",
+              "It runs at 65 Gb/s on port 1",
+              "It's a virtual interface created by Docker"
+            ],
+            "answer": "It's an Ethernet port at PCI bus 65 (0x41), slot 0, function 1",
+            "explanation": "Predictable names come from the hardware location, not from the order the kernel found devices in. The old `eth0`-style names did use discovery order, which is why they could change between reboots. Link speed isn't part of the name, and Docker's virtual interfaces are called `docker0` or `veth…`."
+          },
+          {
+            "question": "Which of these is NOT a physical NIC?",
+            "options": [
+              "The port the BMC uses",
+              "`veth3a1f2c` on a Docker host",
+              "A BlueField DPU port",
+              "An onboard `eno1` port"
+            ],
+            "answer": "`veth3a1f2c` on a Docker host",
+            "explanation": "`veth` interfaces are virtual cable ends that exist only in the kernel, so they have no `device` link in sysfs. The BMC's port, DPU ports and onboard ports are all real hardware, even though the host OS can't see the BMC's port."
+          },
+          {
+            "question": "A machine is reinstalled and gets a new IP address. What happens to the MAC addresses of its NIC ports?",
+            "options": [
+              "They change, because MAC addresses are assigned by DHCP",
+              "They stay the same, because they come from the NIC's firmware",
+              "They are wiped until the OS reconfigures them"
+            ],
+            "answer": "They stay the same, because they come from the NIC's firmware",
+            "explanation": "DHCP hands out IP addresses, not MACs. The MAC is programmed into the card. Software can override it, but by default it survives reinstalls, which makes it a stable hardware identifier."
+          }
+        ],
+        "sources": []
+      },
+      {
+        "concept": "asynchronous-programming",
+        "prequestions": [
+          {
+            "question": "A program must make 100 network requests, and each one waits 1 second for a reply. On a single thread, what's the fastest it could finish: about 100 s, about 10 s, or about 1 s?",
+            "answer": "About 1 s, if the program starts all the requests and waits for all the replies at the same time instead of one after another. That's what async programming does."
+          },
+          {
+            "question": "Would async help a program that spends all its time multiplying matrices?",
+            "answer": "No. Async only helps when tasks spend time *waiting* on the network, the disk or a timer. CPU-bound work keeps the thread busy, so there's no idle time to hand to other tasks."
+          }
+        ],
+        "explanation": "Most infrastructure software spends its time **waiting**: on a database query, an HTTP reply from a server's BMC, a DHCP packet. During that wait, a plain synchronous call **blocks**, meaning the thread sits idle until the reply arrives.\n\nOne fix is to give each task its own thread. Threads are fairly expensive, though: each has its own stack, and the OS has to switch between them. 10,000 threads is a lot to manage.\n\n**Asynchronous programming** works differently. You write functions that can **pause** wherever they would wait, so other work runs in the meantime. The vocabulary:\n\n- **Coroutine / async function** (`async def` in Python, `async fn` in Rust): a function that can pause and resume.\n- **`await`**: \"pause me here until this finishes, and run something else meanwhile.\" You can only `await` inside an async function.\n- **Task**: a scheduled run of a coroutine. Many tasks can be in progress at once.\n- **Event loop / runtime**: the scheduler. It keeps a list of ready tasks and runs one until it reaches an `await`. It then asks the OS to report when that I/O finishes and switches to another ready task. Python's is `asyncio`. Rust's most common one is **Tokio**, which you'll meet in ch. 16. Tokio runs tasks on a small pool of *worker threads*, roughly one per CPU core.\n\nThis is **cooperative** multitasking: a task gives up the thread only at an `await`. That's the source of the classic async bug. If a task does something slow *without* awaiting (`time.sleep(5)`, a blocking file or socket call, a long CPU loop), it holds the thread and every other task on that thread stalls. The usual fixes are to use the async version of the call (`asyncio.sleep`, an async HTTP client) or to move blocking work onto a separate thread (`asyncio.to_thread` in Python, `spawn_blocking` in Tokio).\n\n**Concurrency** means many tasks are in progress at once. **Parallelism** means many are executing at the same instant on different cores. Async gives you concurrency, even on one thread.",
+        "analogy": "A restaurant waiter takes an order, hands it to the kitchen and serves other tables while the food cooks. That's how one waiter handles many tables. A waiter who stood at the kitchen door until each dish was ready would be blocking. The comparison breaks down at the bug: a real waiter notices when they're stuck, but a task that blocks without awaiting freezes every other table and nothing warns you.",
+        "workedExample": {
+          "title": "Run 100 simulated requests in about 1 second on one thread",
+          "steps": [
+            {
+              "subgoal": "Write a coroutine that waits on 'I/O'",
+              "detail": "Save as `async_demo.py`:\n```python\nimport asyncio\nimport time\n\nasync def fake_request(i):\n    await asyncio.sleep(1)  # stands in for waiting on the network\n    return i\n\nasync def main():\n    start = time.perf_counter()\n    results = await asyncio.gather(*(fake_request(i) for i in range(100)))\n    elapsed = time.perf_counter() - start\n    print(len(results), \"results in\", round(elapsed, 2), \"s\")\n\nasyncio.run(main())\n```"
+            },
+            {
+              "subgoal": "Run it and read the timing",
+              "detail": "```bash\npython3 async_demo.py\n# 100 results in 1.0 s\n```\n`asyncio.gather` schedules all 100 tasks. Each one reaches `await asyncio.sleep(1)` and pauses, so the loop starts the next. All 100 wait at the same time."
+            },
+            {
+              "subgoal": "Confirm it's one thread",
+              "detail": "Add `import threading` at the top and `print(threading.active_count())` inside `main()`. It prints `1`. The concurrency comes from the event loop, not from threads."
+            },
+            {
+              "subgoal": "Break it on purpose",
+              "detail": "Change the sleep line to `time.sleep(1)` (the blocking version) and run again. It now takes about **100 s** (press Ctrl‑C to stop early). `time.sleep` never yields, so each task holds the thread for its full second and the tasks run one after another."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so that three 'downloads' of different lengths run concurrently and the program finishes in about 3 seconds, not 6.",
+          "partialSolution": "import asyncio\n\nasync def download(name, seconds):\n    ___ asyncio.sleep(seconds)\n    return f\"{name} done\"\n\nasync def main():\n    results = await asyncio.___(\n        download(\"a\", 1),\n        download(\"b\", 2),\n        download(\"c\", 3),\n    )\n    print(results)\n\nasyncio.run(main())",
+          "answer": "The first blank is `await` and the second is `gather`, so the lines read `    await asyncio.sleep(seconds)` and `    results = await asyncio.gather(`. After about 3 s, the length of the longest task, it prints `['a done', 'b done', 'c done']`. Without `await`, the sleep coroutine is created but never runs, and Python warns 'coroutine was never awaited'."
+        },
+        "independentProblem": {
+          "prompt": "Change `async_demo.py` so that no more than 10 fake requests are in flight at any moment, as you might do to avoid overloading a BMC. Predict the total runtime before you run it.",
+          "hints": [
+            "asyncio has a primitive that lets only N tasks into a section at once.",
+            "Look at `asyncio.Semaphore`. You use it with `async with`.",
+            "Create `sem = asyncio.Semaphore(10)` inside `main()`, pass it to `fake_request`, and wrap the sleep in `async with sem:`."
+          ],
+          "answer": "```python\nimport asyncio\nimport time\n\nasync def fake_request(i, sem):\n    async with sem:\n        await asyncio.sleep(1)\n    return i\n\nasync def main():\n    sem = asyncio.Semaphore(10)\n    start = time.perf_counter()\n    results = await asyncio.gather(*(fake_request(i, sem) for i in range(100)))\n    print(len(results), \"results in\", round(time.perf_counter() - start, 2), \"s\")\n\nasyncio.run(main())\n```\nThe runtime is about **10 s**: 100 requests in batches of 10, one second per batch. Create the semaphore inside `main()` so it belongs to the running event loop."
+        },
+        "selfExplanation": "Why does a single `time.sleep()` call (or any blocking call) inside an async function hurt *every* task in the program, not only the one that made the call?",
+        "checks": [
+          {
+            "question": "Which workload benefits most from async/await?",
+            "options": [
+              "Compressing a 10 GB file",
+              "Polling 2,000 servers' management controllers over HTTP",
+              "Computing SHA-256 hashes of data already in memory",
+              "Training a neural network on a GPU"
+            ],
+            "answer": "Polling 2,000 servers' management controllers over HTTP",
+            "explanation": "Async pays off when tasks spend most of their time waiting on I/O. Compression and hashing are CPU-bound and keep the thread busy. GPU training is limited by compute, not by lots of independent network waits."
+          },
+          {
+            "question": "An async service keeps freezing: it stops answering every request for 5 seconds at a time. What's the most likely cause?",
+            "options": [
+              "Too many tasks were created",
+              "A task is making a blocking call without awaiting",
+              "The event loop ran out of threads",
+              "`await` was used too many times"
+            ],
+            "answer": "A task is making a blocking call without awaiting",
+            "explanation": "Tasks yield only at `await`, so one blocking call freezes every task on that thread. Creating many tasks is cheap, which is the point of async. A Python event loop is single-threaded, so it can't run out of threads. Awaiting is how tasks yield, so it can't cause a stall."
+          },
+          {
+            "question": "What does `await` do?",
+            "options": [
+              "Starts a new OS thread for the call",
+              "Pauses the current task until the awaited operation finishes, letting other tasks run meanwhile",
+              "Blocks the whole program until the operation finishes",
+              "Makes a function run in parallel on another CPU core"
+            ],
+            "answer": "Pauses the current task until the awaited operation finishes, letting other tasks run meanwhile",
+            "explanation": "`await` is the point where a task hands control back to the scheduler. It doesn't create threads or parallelism, and unlike a blocking call it doesn't stop other tasks."
+          }
+        ],
+        "sources": []
+      },
+      {
+        "concept": "git-version-control",
+        "prequestions": [
+          {
+            "question": "In Git, what's the difference between saving a file and committing it?",
+            "answer": "Saving writes the file to disk. Committing records a snapshot of the staged files in the repository's history, with an author, a message and an ID, so you can come back to it later."
+          },
+          {
+            "question": "Two people edit different files on separate branches. What happens when the branches are merged?",
+            "answer": "Git combines both sets of changes automatically. You only have to step in when both branches changed the same lines of the same file. That's a conflict."
+          }
+        ],
+        "explanation": "**Git** records the history of a set of files. The core ideas:\n\n- **Repository (repo)**: a project directory plus a hidden `.git/` folder that holds its full history.\n- **Working tree**: the files you edit.\n- **Staging area (index)**: the changes that will go into the next commit. `git add` puts changes there.\n- **Commit**: a snapshot of the staged files, with author, timestamp, message and the ID of the commit before it (its *parent*). Each commit is identified by a hash such as `3f2a9c1`.\n- **Branch**: a movable name that points at a commit. `main` is the usual default. Branches are cheap to create, and you use one to work on a change in isolation.\n- **HEAD**: the commit you currently have checked out, usually reached through a branch.\n- **Merge**: combine another branch's commits into the current branch. If both sides changed the same lines, you get a **conflict**. Git writes `<<<<<<<` / `>>>>>>>` markers into the file, and you edit the file, `git add` it and commit.\n- **Remote**: another copy of the repo, e.g. on GitHub. `git push` sends your commits there, and `git pull` brings other people's commits back.\n\nThe daily loop is edit → `git status` → `git add` → `git commit -m \"why\"` → `git push`.\n\nTo undo a change that's already shared, use `git revert <hash>`. It creates a *new* commit that reverses an old one, so history only ever moves forward. `git reset --hard` rewrites history. That's fine for commits nobody else has, but it causes trouble for anyone who has already pulled them.\n\nThis matters for infrastructure because the repo can become the **source of truth** for what's deployed. In ch. 17 (GitOps with ArgoCD), you deploy by merging a commit and roll back by reverting one.",
+        "analogy": "Git is like a lab notebook where every entry is dated and signed, and no page can be torn out. A branch is a sticky note marking which page an experiment continues from. The comparison misses merging: with Git, two people can continue the same notebook on separate pages and later combine their work line by line.",
+        "workedExample": {
+          "title": "Create a repo, branch, and merge",
+          "steps": [
+            {
+              "subgoal": "Set your identity (once per machine)",
+              "detail": "```bash\ngit config --global user.name \"Your Name\"\ngit config --global user.email \"you@example.com\"\n```"
+            },
+            {
+              "subgoal": "Create a repo and the first commit",
+              "detail": "```bash\nmkdir inventory && cd inventory\ngit init -b main\necho \"server-01 b8:3f:d2:11:22:30\" > hosts.txt\ngit status          # hosts.txt is untracked\ngit add hosts.txt\ngit commit -m \"Add first host\"\n```\n(`-b main` needs Git ≥ 2.28. On older Git, run `git init` and then `git branch -m main`.)"
+            },
+            {
+              "subgoal": "Do work on a branch",
+              "detail": "```bash\ngit switch -c add-server-02\necho \"server-02 b8:3f:d2:11:22:40\" >> hosts.txt\ngit commit -am \"Add server-02\"\ngit log --oneline --graph --all\n```\n`-am` stages changes to files Git already tracks and commits them. It doesn't pick up new files."
+            },
+            {
+              "subgoal": "Merge back into main",
+              "detail": "```bash\ngit switch main\ncat hosts.txt              # server-02 isn't here yet\ngit merge add-server-02    # fast-forward: main moves up to the branch\ncat hosts.txt              # now it is\ngit branch -d add-server-02\n```"
+            },
+            {
+              "subgoal": "Inspect history",
+              "detail": "```bash\ngit log --oneline\ngit show HEAD          # the diff of the latest commit\ngit diff HEAD~1 HEAD   # same, as a range\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the two blanks so that this script ends with `TODO.md` on `main` and two commits in `git log --oneline`.",
+          "partialSolution": "git init -b main notes\ncd notes\necho \"# Notes\" > README.md\ngit ___ README.md\ngit commit -m \"Add README\"\ngit switch -c add-todo\necho \"- learn cgroups\" > TODO.md\ngit add TODO.md\ngit commit -m \"Add TODO list\"\ngit switch main\ngit ___ add-todo",
+          "answer": "The first blank is `add`, which stages README.md before the first commit. The second is `merge`, which brings the `add-todo` branch into `main`. `git log --oneline` then shows 'Add TODO list' above 'Add README'."
+        },
+        "independentProblem": {
+          "prompt": "In your `inventory` repo, commit a change that puts a typo in server-01's MAC. Pretend you've already pushed it. Undo the change so the file is correct again *without* rewriting history, then show that the bad commit is still in the log.",
+          "hints": [
+            "You want a command that makes a new commit, not one that moves the branch backwards.",
+            "First find the bad commit's hash with `git log --oneline`.",
+            "`git revert <hash>` opens an editor for the message (or add `--no-edit`). Afterwards `git log --oneline` shows both the bad commit and a 'Revert \"...\"' commit."
+          ],
+          "answer": "```bash\nsed -i.bak 's/22:30/ZZ:30/' hosts.txt && rm hosts.txt.bak\ngit commit -am \"Update server-01 MAC\"\ngit log --oneline           # note the hash, e.g. a1b2c3d\ngit revert --no-edit a1b2c3d\ncat hosts.txt               # original MAC is back\ngit log --oneline           # shows the Revert commit on top of the bad one\n```\n`git revert` is safe on shared branches because it only adds a commit. `git reset --hard HEAD~1` would also fix the file, but it rewrites history, so anyone who had already pulled the bad commit would be out of sync."
+        },
+        "selfExplanation": "Why is `git revert` usually better than `git reset --hard` for undoing a change on a branch that other people (or an automated deployer) have already pulled?",
+        "checks": [
+          {
+            "question": "You ran `git commit -am \"Add config\"`, but your new file `config.toml` isn't in the commit. Why?",
+            "options": [
+              "`-a` only stages files Git already tracks; new files need `git add` first",
+              "Commits ignore `.toml` files by default",
+              "You must push before files appear in a commit",
+              "`-m` overwrote the file list"
+            ],
+            "answer": "`-a` only stages files Git already tracks; new files need `git add` first",
+            "explanation": "`-a` automatically stages modifications and deletions of tracked files. Untracked files need an explicit `git add`. Git has no built-in rule against TOML files; only your `.gitignore` could exclude one. Pushing has nothing to do with what goes into a commit."
+          },
+          {
+            "question": "What is a Git branch?",
+            "options": [
+              "A full copy of the repository's files",
+              "A movable pointer to a commit",
+              "A separate remote server",
+              "A backup of the staging area"
+            ],
+            "answer": "A movable pointer to a commit",
+            "explanation": "A branch is a small reference to one commit, which is why creating one is instant. It doesn't copy any files. A remote is a separate copy of the repo, and the staging area has nothing to do with branches."
+          },
+          {
+            "question": "During a merge, Git reports a conflict in `hosts.txt`. What do you do?",
+            "options": [
+              "Run `git merge --force`",
+              "Edit the file to remove the conflict markers and keep the right content, then `git add hosts.txt` and `git commit`",
+              "Delete the branch and start again; conflicts can't be resolved",
+              "Run `git push` and the server resolves it"
+            ],
+            "answer": "Edit the file to remove the conflict markers and keep the right content, then `git add hosts.txt` and `git commit`",
+            "explanation": "You resolve conflicts by hand: decide what the file should contain, stage it to mark it resolved, and commit. `git merge` has no `--force` option, and remotes don't resolve conflicts for you."
+          }
+        ],
+        "sources": []
+      },
+      {
+        "concept": "linux-system-administration-basics",
+        "prequestions": [
+          {
+            "question": "A file shows `-rw-r----- 1 root ops ... secret.txt`. Can a user who isn't in the `ops` group read it?",
+            "answer": "No. The owner (root) can read and write it, members of `ops` can read it, and everyone else has no access."
+          },
+          {
+            "question": "After you reboot a Linux server, what decides which background programs (like an SSH server) start again?",
+            "answer": "The init system, which is systemd on most modern distributions. Services that are 'enabled' start at boot."
+          }
+        ],
+        "explanation": "**System administration** means configuring the operating system so programs run correctly and securely. Four areas cover most of it.\n\n**1. Files and the filesystem layout.** Everything lives under `/`. The key places are `/etc` (system configuration), `/var/log` (logs), `/usr/bin` (installed programs), `/home` (users' files) and `/tmp` (scratch space). Two directories are virtual windows into the kernel: `/proc` (processes and kernel state, e.g. `/proc/meminfo`) and `/sys` (devices; you used `/sys/class/net` in the NIC lesson).\n\n**2. Users, groups and permissions.** Every process runs as some **user**, and users belong to **groups**. `root` (user ID 0) is the administrator and can do anything. `sudo` lets permitted users run a single command as root. Every file has an owner, a group and permission bits, which `ls -l` shows as `rwxr-x---`: read/write/execute for the **owner**, the **group** and **others**. Change them with `chmod` (`chmod 640 f` gives the owner rw, the group r and others nothing) and `chown user:group f`. Check a user's IDs and groups with `id alice`.\n\n**3. Packages.** You install software from distribution repositories with a **package manager**: `apt` on Debian/Ubuntu, `dnf` on Fedora/RHEL. It handles dependencies and updates, e.g. `apt-get install -y curl`.\n\n**4. Services.** A **service (daemon)** is a long-running background program. On most distributions **systemd** starts services, restarts them when they crash and collects their logs. You describe a service in a **unit file** (`/etc/systemd/system/name.service`) and control it with:\n\n```\nsystemctl status|start|stop|restart NAME\nsystemctl enable NAME      # start at boot\nsystemctl daemon-reload    # after editing unit files\njournalctl -u NAME -f      # follow its logs\n```\n\nProcesses: `ps aux` lists them, and `kill PID` sends a signal (SIGTERM by default, SIGKILL with `-9`).\n\nThe next two lessons build on this. A container is a Linux process with a restricted view of these files, users and processes, and you configure cgroups through files under `/sys/fs/cgroup`.",
+        "analogy": "A Linux server is like an office building. `/etc` is the policy binder, users and groups are staff badges, and permissions are the door locks. The package manager is the supply department, and systemd is the facilities manager who opens up every morning and restarts the coffee machine when it breaks. The comparison breaks down at `root`: no badge in a real office opens every door without leaving a record, but root can do exactly that.",
+        "workedExample": {
+          "title": "Administer a throwaway Debian system in a container",
+          "steps": [
+            {
+              "subgoal": "Start a disposable Linux system",
+              "detail": "```bash\ndocker run --rm -it debian:12 bash\ncat /etc/os-release     # which distribution?\nwhoami                  # root\n```\nEverything below happens inside this container and disappears when you exit, so it's safe to experiment, including on macOS."
+            },
+            {
+              "subgoal": "Install packages",
+              "detail": "```bash\napt-get update\napt-get install -y procps less\nwhich ps                # /usr/bin/ps\n```\n`apt-get update` refreshes the package index. Without it, installs fail in fresh containers."
+            },
+            {
+              "subgoal": "Create a user and set file permissions",
+              "detail": "```bash\nuseradd -m -s /bin/bash alice\nid alice                         # uid=1000(alice) gid=1000(alice) groups=1000(alice)\necho \"top secret\" > /srv/secret.txt\nchmod 600 /srv/secret.txt\nls -l /srv/secret.txt            # -rw------- 1 root root ...\nsu alice -c 'cat /srv/secret.txt' # Permission denied\n```"
+            },
+            {
+              "subgoal": "Inspect processes and kernel files",
+              "detail": "```bash\nps aux                 # only a few processes: you're in a container\nhead -3 /proc/meminfo\nls /sys/class/net      # eth0 lo\n```"
+            },
+            {
+              "subgoal": "Manage a service with systemd (on a Linux host or VM)",
+              "detail": "Plain containers don't run systemd, so do this part on a Linux machine:\n```bash\nsystemctl list-units --type=service --state=running | head\nsystemctl status ssh        # 'sshd' on Fedora/RHEL\njournalctl -u ssh --since \"1 hour ago\" | tail\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this systemd unit file so that a tiny web server runs as the unprivileged user `webuser`, restarts if it crashes, and starts at boot in normal multi-user mode. It would be saved as `/etc/systemd/system/tinyweb.service`.",
+          "partialSolution": "[Unit]\nDescription=Tiny web server\nAfter=network.target\n\n[Service]\nExecStart=/usr/bin/python3 -m http.server 8080 --directory /srv/www\nUser=___\nRestart=on-failure\n\n[Install]\nWantedBy=___",
+          "answer": "`User=webuser` and `WantedBy=multi-user.target`. To activate it, run: `sudo useradd -r webuser; sudo mkdir -p /srv/www; sudo systemctl daemon-reload; sudo systemctl enable --now tinyweb; systemctl status tinyweb; curl localhost:8080`."
+        },
+        "independentProblem": {
+          "prompt": "In the Debian container from the worked example, let `alice` read `/srv/secret.txt` by adding her to a new group, `ops`. Others must still have no access, and root must stay the owner. Prove it works.",
+          "hints": [
+            "You need three things: a group, a membership, and the right group and permission bits on the file.",
+            "`groupadd`, `usermod -aG`, `chgrp`, `chmod`.",
+            "Mode 640 gives owner rw, group r, others none. `su` starts a fresh login, so it picks up the new group."
+          ],
+          "answer": "```bash\ngroupadd ops\nusermod -aG ops alice\nchgrp ops /srv/secret.txt\nchmod 640 /srv/secret.txt\nls -l /srv/secret.txt            # -rw-r----- 1 root ops ...\nsu alice -c 'cat /srv/secret.txt' # top secret\nuseradd bob; su bob -s /bin/sh -c 'cat /srv/secret.txt'  # Permission denied\n```\nThe `-a` in `usermod -aG` means append. Without it, `-G` replaces all of alice's supplementary groups."
+        },
+        "selfExplanation": "Why is it better practice to run a service as a dedicated unprivileged user (like `webuser`) than as root, even when it works either way?",
+        "checks": [
+          {
+            "question": "What does `chmod 640 config.toml` produce?",
+            "options": [
+              "Owner read/write, group read, others nothing",
+              "Owner read, group write, others execute",
+              "Everyone can read and write",
+              "Owner execute only"
+            ],
+            "answer": "Owner read/write, group read, others nothing",
+            "explanation": "Each digit is r=4 + w=2 + x=1, in the order owner, group, others: 6 = rw, 4 = r, 0 = none. The other options get the order or the values of the digits wrong."
+          },
+          {
+            "question": "You edited `/etc/systemd/system/tinyweb.service`, but `systemctl restart tinyweb` still uses the old settings. What did you skip?",
+            "options": [
+              "`systemctl daemon-reload`",
+              "`apt-get update`",
+              "Rebooting the machine",
+              "`chmod +x` on the unit file"
+            ],
+            "answer": "`systemctl daemon-reload`",
+            "explanation": "systemd caches unit files, and `daemon-reload` makes it reread them. `apt-get update` refreshes package lists and has nothing to do with this. A reboot would also work but isn't needed. Unit files are config, not executables, so they don't need `+x`."
+          },
+          {
+            "question": "Where would you look for a Linux system's configuration files and its logs?",
+            "options": [
+              "`/etc` and `/var/log`",
+              "`/usr/bin` and `/tmp`",
+              "`/proc` and `/sys`",
+              "`/home` and `/root`"
+            ],
+            "answer": "`/etc` and `/var/log`",
+            "explanation": "`/usr/bin` holds programs and `/tmp` is scratch space. `/proc` and `/sys` are virtual views of kernel state, not config files you edit by hand. `/home` and `/root` are users' personal directories. On systemd systems many logs also go to the journal, which you read with `journalctl`."
+          }
+        ],
+        "sources": []
+      },
+      {
+        "concept": "containers-and-container-images",
+        "prequestions": [
+          {
+            "question": "Does a container run its own Linux kernel, like a virtual machine does?",
+            "answer": "No. A container is an ordinary process on the host, sharing the host's kernel. The kernel gives it its own view of files, processes and the network. (On macOS, Docker runs a hidden Linux VM, and containers share *that VM's* kernel.)"
+          },
+          {
+            "question": "Can an image built on an amd64 laptop run on an arm64 server?",
+            "answer": "Not as is. The binaries inside are compiled for one CPU architecture (amd64 vs arm64 was covered in ch. 1). You need an image built for arm64, or a multi-architecture image that contains both."
+          }
+        ],
+        "explanation": "A **container image** is a packaged application filesystem. It holds the program, its libraries, a minimal OS userland (e.g. Debian's `/bin` and `/etc`) and some metadata: which command to run, environment variables, ports. It's stored as a stack of read-only **layers**, roughly one per build step. Images are named `registry/repository:tag`, for example `docker.io/library/python:3.12-slim`. Each image is built for one CPU architecture (amd64, arm64), or published as a multi-arch set.\n\nA **container** is a running instance of an image. It's a normal Linux process (as in the previous lesson) that the kernel isolates with two features:\n\n- **Namespaces** give it a private view. The PID namespace makes the container's main process PID 1. The mount namespace gives it the image as its root filesystem. The network namespace gives it its own `eth0`, which is a `veth` interface (from the NIC lesson). The UTS namespace gives it its own hostname.\n- **cgroups** limit and count its CPU and memory use (next lesson).\n\nThe kernel belongs to the host. That's why containers start in milliseconds and add little overhead, and also why they're less strongly isolated than VMs.\n\nOn top of the image's read-only layers, each container gets a thin **writable layer**. Anything written there is lost when the container is removed, unless you write it to a mounted **volume**.\n\nYou build images from a **Dockerfile**:\n\n```dockerfile\nFROM python:3.12-slim        # base image\nWORKDIR /app                 # cd (and create) inside the image\nCOPY app.py .                # copy from build context into the image\nRUN pip install --no-cache-dir requests   # run a command at build time, new layer\nEXPOSE 8000                  # document the port\nCMD [\"python\", \"app.py\"]     # default command at run time\n```\n\n`docker build` runs the steps and `docker run` starts a container. `docker push` and `docker pull` move images to and from a **registry** (ch. 13). Podman accepts the same commands.",
+        "analogy": "An image is like a frozen ready meal: recipe, ingredients and packaging sealed together, the same every time. A container is one portion being heated in your kitchen. Many portions share one oven (the kernel), and each gets its own plate (its namespaces). The comparison breaks down at the oven. A ready meal works in any oven, but an image only runs on the kernel and CPU type it was built for, so an arm64 server needs an arm64 meal.",
+        "workedExample": {
+          "title": "Build and run a tiny web server image",
+          "steps": [
+            {
+              "subgoal": "Write the app and Dockerfile",
+              "detail": "```bash\nmkdir hello-web && cd hello-web\necho '<h1>hello from a container</h1>' > index.html\ncat > Dockerfile <<'EOF'\nFROM python:3.12-slim\nWORKDIR /app\nCOPY index.html .\nEXPOSE 8000\nCMD [\"python\", \"-m\", \"http.server\", \"8000\"]\nEOF\n```"
+            },
+            {
+              "subgoal": "Build the image and look at its layers",
+              "detail": "```bash\ndocker build -t hello-web:1 .\ndocker history hello-web:1        # one row per layer\ndocker image inspect hello-web:1 --format '{{.Architecture}}'   # amd64 or arm64\n```"
+            },
+            {
+              "subgoal": "Run it with a port mapping",
+              "detail": "```bash\ndocker run -d --name web -p 8080:8000 hello-web:1\ncurl localhost:8080\ndocker logs web 2>&1 | tail -3     # http.server logs to stderr\n```\n`-p 8080:8000` forwards port 8080 on the host to port 8000 inside the container's network namespace."
+            },
+            {
+              "subgoal": "See that it's a process with a private view",
+              "detail": "```bash\ndocker exec web cat /proc/1/cmdline | tr '\\0' ' '; echo   # PID 1 is python\ndocker exec web hostname          # container ID, not your hostname\ndocker exec web cat /proc/version # the same kernel as the host (or Docker Desktop's VM)\nps aux | grep '[h]ttp.server'     # Linux host: the same process, with a normal host PID\n```"
+            },
+            {
+              "subgoal": "Clean up",
+              "detail": "```bash\ndocker rm -f web\n```\nAnything the container wrote to its writable layer is now gone. The image is still there (`docker images`)."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so this Dockerfile packages `app.py` (from the build directory) and runs it with Python when the container starts. Use the exec (JSON array) form for the command.",
+          "partialSolution": "FROM python:3.12-slim\nWORKDIR /app\n___ app.py .\nEXPOSE 8000\nCMD ___",
+          "answer": "`COPY app.py .` and `CMD [\"python\", \"app.py\"]`. With the exec form, python itself is the container's main process, so `docker stop`'s SIGTERM goes straight to python. With the shell form (`CMD python app.py`), it goes to the wrapping `/bin/sh -c`. There's a catch. Inside its PID namespace python is PID 1, and the kernel doesn't apply a signal's default action to PID 1. Unless the app installs its own SIGTERM handler, or you run the container with `--init` so a small init process sits at PID 1, it ignores the SIGTERM. `docker stop` then waits out its 10-second timeout and sends SIGKILL."
+        },
+        "independentProblem": {
+          "prompt": "Using one container from any small image (e.g. `alpine`), show three facts: (1) it has its own process list, (2) it has its own hostname and network interfaces, (3) it shares the host's kernel. Give the commands and say which output proves each fact.",
+          "hints": [
+            "Each fact maps to a namespace, except the kernel, which is about there being no separate one.",
+            "`ps`, `hostname`, `ip addr` or `ls /sys/class/net`, and `uname -r` all exist in alpine (busybox).",
+            "Run `uname -r` on the host and in the container and compare. On macOS, run `docker run --rm alpine uname -r` in two separate containers instead. Both show the Docker VM's kernel, not macOS's."
+          ],
+          "answer": "```bash\ndocker run --rm alpine sh -c 'ps; hostname; ls /sys/class/net; uname -r'\nuname -r   # on a Linux host\n```\n(1) `ps` shows only `sh` (as PID 1) and `ps` itself, because of the PID namespace. (2) The hostname is a random container ID and the only interfaces are `eth0` and `lo`, because of the UTS and network namespaces. (3) On Linux, `uname -r` matches the host's kernel version, because there's no separate kernel. On macOS, every container reports the Docker Desktop VM's Linux kernel."
+        },
+        "selfExplanation": "Why do containers start in milliseconds while virtual machines take seconds or more, and what do you give up in exchange?",
+        "checks": [
+          {
+            "question": "You run a container and write a file to `/data/out.txt` inside it. Then you `docker rm` the container and run a new one from the same image. Is the file there?",
+            "options": [
+              "Yes, images update automatically when containers write files",
+              "No, writes go to the removed container's writable layer unless `/data` is a volume",
+              "Yes, but only if you used `-d`",
+              "No, containers can't write files at all"
+            ],
+            "answer": "No, writes go to the removed container's writable layer unless `/data` is a volume",
+            "explanation": "Image layers are read-only. Each container has its own writable layer, which is deleted along with the container. Volumes are how you keep data. `-d` only detaches the container from your terminal."
+          },
+          {
+            "question": "What actually isolates a container's process list and network from the host?",
+            "options": [
+              "A hypervisor",
+              "Linux namespaces",
+              "The Dockerfile's `EXPOSE` line",
+              "cgroups"
+            ],
+            "answer": "Linux namespaces",
+            "explanation": "Namespaces control what a process can *see*, while cgroups control how much it can *use*. People often mix the two up. There's no hypervisor involved on a Linux host, and `EXPOSE` is documentation only."
+          },
+          {
+            "question": "An image works on your amd64 laptop but fails on an arm64 server with `exec format error`. Why?",
+            "options": [
+              "The registry corrupted it",
+              "The binaries in the image are compiled for amd64",
+              "arm64 servers can't run containers",
+              "The Dockerfile is missing `EXPOSE`"
+            ],
+            "answer": "The binaries in the image are compiled for amd64",
+            "explanation": "Containers share the host kernel and run the image's binaries natively, so the CPU architecture has to match. Build an arm64 or multi-arch image instead (ch. 13 covers Buildx)."
+          }
+        ],
+        "sources": []
+      },
+      {
+        "concept": "linux-memory-and-cgroups",
+        "prequestions": [
+          {
+            "question": "`free -h` reports only 300 MB 'free' on a 16 GB machine that's barely doing anything. Is it about to run out of memory?",
+            "answer": "Probably not. Linux uses spare RAM as page cache (cached file data) and gives it back when programs need it. Read the 'available' column instead."
+          },
+          {
+            "question": "A container started with `--memory=64m` tries to allocate 200 MB. What happens?",
+            "answer": "The kernel's OOM killer kills a process in that container's cgroup, usually the one doing the allocating. Docker reports exit code 137 (128 + SIGKILL's number, 9) and `OOMKilled: true`."
+          }
+        ],
+        "explanation": "**How Linux counts memory.**\n\n- **Virtual memory (VSZ)**: the address space a process has reserved. It can be huge and mostly unused, so it's rarely the number you want.\n- **Resident set size (RSS)**: the pages of a process that are actually in physical RAM, shown as `VmRSS` in `/proc/<pid>/status`. Memory a program allocates but never touches doesn't count until it's written to.\n- **Anonymous memory**: heap and stack, which have no file behind them. It's only freed when the process releases it or the kernel swaps it out.\n- **Page cache**: file contents the kernel keeps in RAM after reads and writes, so the next access is fast. It's reclaimable: the kernel drops clean cache when memory runs short. That's why `free` shows little 'free' memory but plenty 'available'.\n- **OOM killer**: when the kernel can't reclaim enough memory, it kills a process to free some.\n\n**cgroups (control groups)** are a kernel feature that puts processes into a group, then **accounts for** and **caps** the group's resources (memory, CPU, I/O, number of PIDs). Most current distributions use **cgroup v2**, a single tree under `/sys/fs/cgroup`. Each directory is a group, and the files inside it are the controls:\n\n- `memory.max`: the hard limit in bytes (`max` means unlimited). Going over it triggers reclaim and then an OOM kill *inside that group only*.\n- `memory.current`: the group's current usage, **including page cache** its processes caused.\n- `memory.stat`: a breakdown. `anon` is heap and stack, `file` is page cache, and `active_file`/`inactive_file` show how recently that cache was used.\n- `memory.events`: event counters, including `oom_kill`.\n\nContainer runtimes create one cgroup per container. `docker run --memory=128m` just writes 134217728 into that container's `memory.max`. With cgroup v2 and Docker's default private cgroup namespace, the same files appear at `/sys/fs/cgroup/` inside the container.\n\nBecause `memory.current` counts page cache, a container that only reads big files can look nearly full without being in any danger. That's why Kubernetes uses the **working set** (roughly, usage minus inactive file cache) when it decides whether to evict a pod (ch. 16). On older cgroup v1 hosts the files have different names, e.g. `memory/memory.limit_in_bytes`.",
+        "analogy": "A cgroup is like a prepaid card with a spending limit, shared by a team. Every purchase by any team member counts against it. When the team hits the limit, the bank declines the charge, in this case by firing a team member (the OOM kill). The comparison breaks down for page cache. It does count against the card, but it's more like a refundable deposit, because the kernel reclaims it before it kills anything.",
+        "workedExample": {
+          "title": "Watch RSS, cgroup limits and an OOM kill",
+          "steps": [
+            {
+              "subgoal": "Read system memory",
+              "detail": "On Linux (or in any container):\n```bash\nfree -h\ngrep -E 'MemTotal|MemAvailable|^Cached' /proc/meminfo\n```\nCompare `free` with `available`. The difference is mostly reclaimable page cache."
+            },
+            {
+              "subgoal": "See RSS grow only when memory is touched",
+              "detail": "```bash\npython3 -c \"\nimport os\ndef rss():\n    return [l for l in open(f'/proc/{os.getpid()}/status') if l.startswith('VmRSS')][0].strip()\nprint('before', rss())\nb = b'x' * (100 * 1024 * 1024)\nprint('after ', rss())\n\"\n```\n`after` is about 100 MB higher, because filling the bytes object wrote to every page. (Linux only. On macOS, run it inside `docker run --rm -it python:3.12-slim bash`.)"
+            },
+            {
+              "subgoal": "Read a container's cgroup limit",
+              "detail": "```bash\ndocker run --rm --memory=128m alpine sh -c \\\n  'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.current'\n# 134217728\n# a small number, typically around 1-2 million (1-2 MB)\n```\n128 × 1024 × 1024 = 134217728. Docker turned `--memory` into a value in the cgroup file."
+            },
+            {
+              "subgoal": "Trigger an OOM kill",
+              "detail": "```bash\ndocker run --name hog --memory=64m --memory-swap=64m python:3.12-slim \\\n  python -c \"b = b'x' * (200 * 1024 * 1024)\"\necho \"exit code: $?\"                                   # 137\ndocker inspect hog --format '{{.State.OOMKilled}}'     # true\ndocker rm hog\n```\nSetting `--memory-swap=64m` (equal to `--memory`) turns off swap, so the limit is strict. 137 = 128 + 9 (SIGKILL)."
+            },
+            {
+              "subgoal": "Confirm the kill was local",
+              "detail": "Your host and any other containers were unaffected, because the OOM kill happened only inside the `hog` cgroup. On a Linux host, `sudo dmesg | grep -i oom | tail` shows the kernel's report, which names the memory cgroup."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so this command prints the container's memory limit and then the number of OOM kills that have happened in its cgroup.",
+          "partialSolution": "docker run --rm --memory=256m alpine sh -c \\\n  'cat /sys/fs/cgroup/___; grep oom_kill /sys/fs/cgroup/___'",
+          "answer": "`memory.max` and `memory.events`. The output is `268435456` followed by `oom_kill 0`."
+        },
+        "independentProblem": {
+          "prompt": "Show that page cache is charged to a container's cgroup. In one container with `--memory=256m`, record the `file` value from `memory.stat`, write a 50 MB file inside the container, and record it again. Then explain why this container is *not* close to being OOM killed even though `memory.current` went up.",
+          "hints": [
+            "`dd` can create a file of a known size. `/tmp` inside the container is on its writable layer, which lives on disk.",
+            "Run `grep '^file ' /sys/fs/cgroup/memory.stat` before and after.",
+            "`dd if=/dev/zero of=/tmp/big bs=1M count=50`. Then think about which kind of memory the kernel can reclaim."
+          ],
+          "answer": "```bash\ndocker run --rm --memory=256m alpine sh -c '\n  grep \"^file \" /sys/fs/cgroup/memory.stat\n  dd if=/dev/zero of=/tmp/big bs=1M count=50 2>/dev/null\n  grep \"^file \" /sys/fs/cgroup/memory.stat\n  cat /sys/fs/cgroup/memory.current'\n```\n`file` rises by about 52428800 bytes (50 MB), and `memory.current` rises with it. That memory is page cache holding data that's also on disk. Once it has been written back it's clean, and the kernel can drop it under pressure before it ever calls the OOM killer. Only memory that can't be reclaimed (mostly `anon`) pushes a cgroup toward an OOM kill."
+        },
+        "selfExplanation": "Why can `memory.current` overstate how close a container is to an OOM kill, and which numbers in `memory.stat` would give you a truer picture?",
+        "checks": [
+          {
+            "question": "A container exits with code 137 and `docker inspect` shows `OOMKilled: true`. What happened?",
+            "options": [
+              "The app called `exit(137)` because of a bug",
+              "The kernel killed it with SIGKILL after its cgroup hit `memory.max` and couldn't reclaim enough",
+              "Docker stopped it because the host disk was full",
+              "It ran out of CPU time in its cgroup"
+            ],
+            "answer": "The kernel killed it with SIGKILL after its cgroup hit `memory.max` and couldn't reclaim enough",
+            "explanation": "137 = 128 + 9 (SIGKILL), and `OOMKilled` confirms that the memory cgroup killed it. CPU limits slow a process down but never kill it. A full disk causes write errors, not OOM kills. An app could exit with 137 on its own, but then `OOMKilled` would be false."
+          },
+          {
+            "question": "Which kind of memory can the kernel usually reclaim without killing anything?",
+            "options": [
+              "Anonymous heap memory of a running program",
+              "Clean page cache",
+              "Kernel stack memory",
+              "Memory locked with `mlock`"
+            ],
+            "answer": "Clean page cache",
+            "explanation": "Clean page cache is a copy of data that's already on disk, so the kernel can drop it and reread it later. Anonymous memory has no backing file, so it can only go to swap, if there is any. Kernel stacks and mlocked pages are pinned in RAM."
+          },
+          {
+            "question": "What is the difference between namespaces and cgroups?",
+            "options": [
+              "They are two names for the same feature",
+              "Namespaces limit resources and cgroups hide processes",
+              "Namespaces control what a process can see; cgroups account for and limit what it can use",
+              "cgroups exist only inside Docker"
+            ],
+            "answer": "Namespaces control what a process can see; cgroups account for and limit what it can use",
+            "explanation": "These are two separate kernel features that containers use together, and people often swap them around. cgroups also aren't Docker-specific: systemd puts every service in its own cgroup, with or without Docker."
+          }
+        ],
+        "sources": []
+      }
+    ],
+    "buildTask": {
+      "title": "Ship an async 'machine inspector' service in a memory-limited container, tracked in Git",
+      "goal": "Build a small asyncio HTTP service that reports the network interfaces (with MACs) and cgroup memory figures of whatever it runs on. Package it in a container image, run it with a 128 MB memory limit, and show that it handles 20 slow requests at the same time. Keep the work in a Git repo with a merged feature branch.",
+      "whyItMatters": "This is a small-scale version of how NICo's control-plane services work. They are async programs that spend most of their time waiting on the network. They run as containers with memory limits, report hardware identifiers such as NIC MAC addresses, and are shipped from Git. When you debug a NICo deployment later, you'll ask the same questions you answer here: which interface is this, what's the memory limit, why did this pod die, and which commit is running?",
+      "setup": [
+        "Linux or macOS with a terminal",
+        "Python 3.8+ (to run locally; the container brings its own 3.12)",
+        "Docker Engine or Docker Desktop (Podman works: replace `docker` with `podman`)",
+        "Git 2.28+",
+        "curl"
+      ],
+      "steps": [
+        {
+          "subgoal": "Create the repo",
+          "detail": "```bash\nmkdir inspector && cd inspector\ngit init -b main\nprintf '__pycache__/\\n' > .gitignore\ngit add .gitignore && git commit -m \"Initial commit\"\n```"
+        },
+        {
+          "subgoal": "Write the async service",
+          "detail": "Save as `app.py`:\n```python\nimport asyncio\nimport json\nimport os\n\n\ndef read(path):\n    try:\n        with open(path) as f:\n            return f.read().strip()\n    except OSError:\n        return None\n\n\ndef info():\n    nics = {}\n    if os.path.isdir(\"/sys/class/net\"):\n        for name in sorted(os.listdir(\"/sys/class/net\")):\n            nics[name] = read(f\"/sys/class/net/{name}/address\")\n    return {\n        \"nics\": nics,\n        \"memory_max\": read(\"/sys/fs/cgroup/memory.max\"),\n        \"memory_current\": read(\"/sys/fs/cgroup/memory.current\"),\n        \"pid\": os.getpid(),\n    }\n\n\nasync def handle(reader, writer):\n    request_line = await reader.readline()\n    while True:\n        line = await reader.readline()\n        if line in (b\"\\r\\n\", b\"\\n\", b\"\"):\n            break\n    parts = request_line.decode(errors=\"replace\").split()\n    path = parts[1] if len(parts) > 1 else \"/\"\n    if path == \"/slow\":\n        await asyncio.sleep(1)  # pretend we're waiting on a slow BMC\n        body = {\"slept\": 1}\n    else:\n        body = info()\n    data = json.dumps(body).encode()\n    writer.write(\n        b\"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\"\n        + b\"Content-Length: \" + str(len(data)).encode()\n        + b\"\\r\\nConnection: close\\r\\n\\r\\n\" + data\n    )\n    await writer.drain()\n    writer.close()\n    await writer.wait_closed()\n\n\nasync def main():\n    server = await asyncio.start_server(handle, \"0.0.0.0\", 8000)\n    print(\"listening on 8000\", flush=True)\n    async with server:\n        await server.serve_forever()\n\n\nasyncio.run(main())\n```\nTest it locally: run `python3 app.py &`, then `curl -s localhost:8000/; echo`, then `kill %1`. On macOS, `nics` is `{}` and the memory fields are `null`. That's expected, because macOS has no `/sys`. Commit:\n```bash\ngit add app.py && git commit -m \"Add async inspector service\"\n```"
+        },
+        {
+          "subgoal": "Containerise it",
+          "detail": "```bash\ncat > Dockerfile <<'EOF'\nFROM python:3.12-slim\nWORKDIR /app\nCOPY app.py .\nEXPOSE 8000\nCMD [\"python\", \"app.py\"]\nEOF\ndocker build -t inspector:dev .\ngit add Dockerfile && git commit -m \"Add Dockerfile\"\n```"
+        },
+        {
+          "subgoal": "Run it with a memory limit and inspect it",
+          "detail": "```bash\ndocker run -d --name inspector -p 8000:8000 --memory=128m --memory-swap=128m inspector:dev\ncurl -s localhost:8000/; echo\ndocker inspect inspector --format '{{range .NetworkSettings.Networks}}{{.MacAddress}}{{end}}'\ndocker logs inspector 2>&1 | tail -3\n```\nCheck three things: `memory_max` is `\"134217728\"`, `nics` contains `eth0` and `lo`, and the `eth0` MAC matches the one `docker inspect` printed."
+        },
+        {
+          "subgoal": "Prove async concurrency",
+          "detail": "```bash\ntime (for i in $(seq 20); do curl -s localhost:8000/slow > /dev/null & done; wait)\n```\n`real` should be close to 1 s, not 20 s: one thread, with 20 tasks waiting at the same time."
+        },
+        {
+          "subgoal": "Add a feature on a branch and merge it",
+          "detail": "```bash\ngit switch -c healthz\n```\nIn `app.py`, add these two lines directly after the line `        body = {\"slept\": 1}`. Put 4 spaces before `elif` and 8 before `body`:\n```python\n    elif path == \"/healthz\":\n        body = {\"ok\": True}\n```\n`elif` lines up with `if path == \"/slow\":` and `else:` at 4 spaces, and `body` sits at 8. Then:\n```bash\ngit commit -am \"Add /healthz endpoint\"\ngit switch main\ngit merge --no-ff healthz -m \"Merge branch 'healthz'\"\ndocker rm -f inspector\ndocker build -t inspector:$(git rev-parse --short HEAD) .\ndocker run -d --name inspector -p 8000:8000 --memory=128m --memory-swap=128m inspector:$(git rev-parse --short HEAD)\ncurl -s localhost:8000/healthz; echo\n```\nTagging the image with the commit hash ties the running container to an exact commit in Git."
+        }
+      ],
+      "verify": "With the container running, run all of these:\n```bash\ncurl -s localhost:8000/ | python3 -c \"import sys,json; d=json.load(sys.stdin); assert d['memory_max']=='134217728', d; assert 'eth0' in d['nics'], d; print('info OK', d['nics']['eth0'])\"\ncurl -s localhost:8000/healthz | grep -q '\"ok\": true' && echo 'healthz OK'\nstart=$(date +%s); for i in $(seq 20); do curl -s localhost:8000/slow >/dev/null & done; wait; echo \"20 slow requests took $(( $(date +%s) - start ))s (expect 1-2)\"\ngit log --oneline --graph | head\ndocker ps --filter name=inspector --format '{{.Image}}'\n```\nYou're done when you see `info OK` followed by a MAC, then `healthz OK`, then a time of 1–2 s. The Git graph must show a merge commit joining in the `/healthz` commit, and the running image's tag must match `git rev-parse --short HEAD`.",
+      "hints": [
+        "`bind: address already in use` on port 8000: something else is using the port, perhaps your local `python3 app.py`. Stop it, or map a different port with `-p 8001:8000` and change the curl commands to match.",
+        "`memory_max` is `null` inside the container: your host probably uses cgroup v1. Check with `stat -fc %T /sys/fs/cgroup` (`cgroup2fs` means v2). On v1 the limit is at `/sys/fs/cgroup/memory/memory.limit_in_bytes`, so change the paths in `info()`.",
+        "The concurrency test takes about 20 s: something in `handle` is blocking. Check that you wrote `await asyncio.sleep(1)`, not `time.sleep(1)`.",
+        "No logs appear: `docker logs` writes the container's stderr to your terminal's stderr, which `| tail` doesn't capture. Use `docker logs inspector 2>&1 | tail`.",
+        "`IndentationError` or `SyntaxError` after adding /healthz: `elif` must line up exactly with `if path == \"/slow\":` (4 spaces), and the `body` line under it needs 8 spaces.",
+        "The MAC from `docker inspect` is empty: some Docker versions store it under a different field. Compare against `docker exec inspector cat /sys/class/net/eth0/address` instead."
+      ],
+      "stretch": "Add a `/hog` endpoint that allocates memory in 10 MB steps (`chunks.append(b'x' * 10*1024*1024)`, with `await asyncio.sleep(0.1)` between steps) and reports `memory.current` as it grows. Call it, then confirm that `docker inspect inspector --format '{{.State.OOMKilled}} {{.State.ExitCode}}'` prints `true 137`. Add `--restart=on-failure` to the run command and watch `docker ps` show the container coming back. Finally, on a throwaway branch, put a blocking `time.sleep(1)` in `/slow`. Rerun the 20-request test to watch the requests run one at a time, then undo the change with `git revert`."
+    }
+  }
+}

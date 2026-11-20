@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "linux-memory-and-cgroups",
+        "severity": "major",
+        "problem": "Step 1 ('Read memory on the host') tells macOS users to run `free -m` and `ps -o pid,rss,vsz,comm -p $$` inside a container. The chapter's images (debian:stable-slim, python:3.12-slim) do not ship `free` or `ps`, because both come from the `procps` package. Following the step exactly gives 'command not found' (the same issue testers reported for sysctl).",
+        "fix": "Name the container and install procps first, e.g. `docker run --rm -it debian:stable-slim bash` then `apt-get update && apt-get install -y procps`. Alternatively, tell macOS users to use only `grep ... /proc/meminfo` and `grep VmRSS /proc/$$/status`."
+      },
+      {
+        "where": "linux-system-administration-basics",
+        "severity": "minor",
+        "problem": "The agent.service completion problem uses `After=network-online.target` without `Wants=network-online.target`. `After=` only orders units and does not pull the target in, so the service may start before the network is actually up.",
+        "fix": "Add `Wants=network-online.target` to the [Unit] section, or add a short note that After= only controls ordering."
+      }
+    ]
+  }
+}

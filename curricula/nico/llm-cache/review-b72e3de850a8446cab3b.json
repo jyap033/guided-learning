@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The local test runs `python3 app.py &` and then `curl` straight away. curl can run before the server has bound port 8000 and fail with 'connection refused', which makes learners think their code is broken.",
+        "fix": "Add a short wait before the curl, e.g. `python3 app.py & sleep 1; curl -s localhost:8000/; echo; kill %1`, or tell learners to wait until 'listening on 8000' is printed before running curl."
+      }
+    ]
+  }
+}

@@ -98,13 +98,13 @@ describe("buildChapterLessons", () => {
     };
     const r = await buildChapterLessons(cur, pages, 2, { provider, maxPageChars: 1000 });
     expect(kinds).toEqual(["lessons", "review", "revise", "review"]);
-    expect(r.revised).toBe(true);
+    expect(r.rewrites).toBe(1);
     expect(r.lessons.lessons.map((l) => l.concept)).toEqual(["dhcp", "pxe"]); // teaching order restored
     const md = renderChapter(r, "https://docs");
     expect(md).toContain("# Chapter 2: Booting");
     expect(md).toContain("<details>");
     expect(md).toContain("**B.** B1");
     expect(md).toContain("[net.md](https://docs/net.md)");
-    expect(md).toContain("rewritten using them");
+    expect(md).toContain("rewritten once");
   });
 });

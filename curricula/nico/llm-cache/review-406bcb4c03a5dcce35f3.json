@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The hint 'The intruder gets `000` and exits immediately rather than timing out' describes output that can't happen. The intruder's verify command has no `-w '%{http_code}'`, so it never prints a status code. With a `reject` policy it would fail at once with connection refused and print `exit 7`.",
+        "fix": "Reword the hint: 'The intruder prints `exit 7` (connection refused) immediately instead of `exit 28`: check that the policy is `drop`, not `reject`, and that you passed `--max-time 5`.'"
+      }
+    ]
+  }
+}

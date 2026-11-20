@@ -1,0 +1,52 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "containers-and-container-images",
+        "severity": "major",
+        "problem": "The 'Common Dockerfile instructions' snippet puts comments at the end of lines (`FROM python:3.12-slim      # base image`, `CMD [\"python\", \"app.py\"]   # what to run at start`). Dockerfiles only treat `#` as a comment at the start of a line. This snippet fails to build: FROM rejects the extra words, WORKDIR/ENV/USER take the comment text as part of their value, and CMD is no longer valid JSON, so Docker falls back to shell form.",
+        "fix": "Move each comment onto its own line above the instruction, or explain the instructions in a list below the code block."
+      },
+      {
+        "where": "linux-system-administration-basics",
+        "severity": "major",
+        "problem": "`sysctl -a 2>/dev/null | head -1   # bash: sysctl: command not found` doesn't print what the comment says. Bash writes its 'command not found' message to the command's stderr after applying redirections, so `2>/dev/null` hides it and the learner sees no output at all.",
+        "fix": "Use `sysctl -a | head -1` (no redirect), or `command -v sysctl || echo 'sysctl not installed'`."
+      },
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "The verify step needs `d[\"memory\"][\"max\"] == \"134217728\"`, but the `memory()` step never names the dictionary keys and doesn't say to strip the trailing newline from memory.max. A learner who uses keys such as `limit`/`current`, or returns `read_text()` unstripped (\"134217728\\n\"), fails verify with a working agent.",
+        "fix": "Spell out the return shape, e.g. `{\"current\": int, \"max\": str (stripped), \"anon\": int, \"file\": int}`, and say to `.strip()` memory.max."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "One hint says `uid` is 0 because USER 'comes after CMD in a way that doesn't apply. Put it before CMD.' That is wrong. CMD is image metadata, and a USER instruction anywhere in the final stage sets the runtime user whether it comes before or after CMD.",
+        "fix": "Change the hint to: the `USER 10001` line is missing, the image wasn't rebuilt, or `--user`/`-u 0` was passed to `docker run`."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The verify command pipes into `python3` on the host, but setup lists host Python as optional.",
+        "fix": "Make host Python 3 required for verify, or run the check in a container: `... | docker run --rm -i python:3.12-slim python3 -c '...'`."
+      },
+      {
+        "where": "containers-and-container-images",
+        "severity": "minor",
+        "problem": "The worked example says `docker image history` shows COPY and WORKDIR as the newest entries. The newest entries are actually CMD and EXPOSE (0 B metadata entries), followed by COPY and WORKDIR.",
+        "fix": "Say that CMD, EXPOSE, COPY and WORKDIR appear at the top, and that only COPY adds a non-zero-size layer."
+      },
+      {
+        "where": "network-interface-card",
+        "severity": "minor",
+        "problem": "The macOS fallback (`debian:stable-slim`) has no `ip`, `lspci` or `ethtool`, and `enp3s0` doesn't exist there, so the remaining steps can't be run as written. Also, the NO-CARRIER check says `ip -br link` 'shows UP', but the brief state column would show DOWN (as docker0 does in the example). UP only appears in the flags.",
+        "fix": "Tell macOS users to only run `ls -l /sys/class/net` and `readlink` on eth0 (or install iproute2), and reword the check to 'the flags include UP and NO-CARRIER'."
+      }
+    ]
+  }
+}

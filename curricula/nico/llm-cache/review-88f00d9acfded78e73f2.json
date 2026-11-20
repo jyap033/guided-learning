@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "protocol-buffers",
+        "severity": "minor",
+        "problem": "The completion-problem answer says that using `slot = 3` 'would make old readers read the slot bytes as `path`'. But `path = 3` is in the same message (PciDeviceProperties), so protoc rejects the schema with a duplicate field-number error. Old readers could only misread the bytes if `path` were removed and its number later reused.",
+        "fix": "Reword it: 'You can't use `slot = 3`: protoc rejects a number already used in the same message. And if `path` were ever removed, reusing 3 for `slot` would make old readers read the slot bytes as `path`. Reserve retired numbers instead.'"
+      },
+      {
+        "where": "yaml",
+        "severity": "minor",
+        "problem": "In 'Get PyYAML', the Docker alternative (`sh -c \"pip install -q pyyaml && python\"`) leaves the learner at a Python REPL. The next step is a shell command (`python3 -c ... <<'EOF'`) that can't be run from that prompt.",
+        "fix": "Make the Docker option start a shell, e.g. `docker run --rm -it python:3.12-slim sh -c \"pip install -q pyyaml && exec sh\"`, then run the next step's command there."
+      }
+    ]
+  }
+}

@@ -1,0 +1,776 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "libredfish and nv-redfish",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST/JSON API for managing servers through their BMC.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Both libraries are Redfish clients, so you need to know what Redfish exposes."
+          },
+          {
+            "name": "Redfish vendor detection and OEM extensions",
+            "definition": "How NICo picks vendor-specific behavior and handles non-standard Oem fields in Redfish.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "libredfish is organized around vendor-specific implementations."
+          },
+          {
+            "name": "Rust toolchain and Cargo",
+            "definition": "The Rust compiler and package manager used to build NICo.",
+            "kind": "procedural",
+            "confidence": 0.55,
+            "why": "Both are Rust crates, so you need Rust to read or use them."
+          }
+        ]
+      },
+      {
+        "concept": "Desired vs actual state reconciliation",
+        "prerequisites": []
+      },
+      {
+        "concept": "DPU-host pairing",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit, a NIC with its own Arm cores.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Pairing matches DPUs to the hosts they are installed in."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded management controller on a server.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Serial numbers are read from the host and DPU BMCs."
+          },
+          {
+            "name": "PCIe device",
+            "definition": "Hardware attached over the PCI Express bus.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "PCIe device serials are the primary path used for pairing."
+          },
+          {
+            "name": "DPU mode vs NIC mode",
+            "definition": "Whether the BlueField runs as a full DPU or as a plain NIC.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Pairing includes checking the DPU's mode."
+          },
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "How NICo finds new hardware and brings it under management.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Pairing is a step in Site Explorer's discovery."
+          }
+        ]
+      },
+      {
+        "concept": "Preingestion Manager",
+        "prerequisites": [
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "How NICo finds new hardware and brings it under management.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "It prepares hosts that can't yet be ingested normally."
+          },
+          {
+            "name": "Firmware inventory and update",
+            "definition": "Listing firmware versions and applying updates through Redfish UpdateService.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Its main job is updating firmware."
+          },
+          {
+            "name": "DPU BFB",
+            "definition": "The BlueField boot image used to install a DPU's OS.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "It recovers DPU BFB images."
+          },
+          {
+            "name": "Power control reset types",
+            "definition": "Redfish reset actions, from graceful restart to AC power cycle.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "It runs resets."
+          }
+        ]
+      },
+      {
+        "concept": "Machine Update Manager",
+        "prerequisites": [
+          {
+            "name": "Firmware baseline enforcement",
+            "definition": "Keeping machine firmware at configured target versions.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "It picks machines whose firmware is outdated compared with the baseline."
+          },
+          {
+            "name": "Firmware inventory and update",
+            "definition": "Listing firmware versions and applying updates through Redfish UpdateService.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "It compares reported firmware versions."
+          },
+          {
+            "name": "Managed Host",
+            "definition": "A host plus its DPUs, managed by NICo.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It schedules updates on managed hosts and their DPUs."
+          },
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "Lifecycle states and transitions that NICo drives resources through.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The ManagedHost state machine carries out the updates."
+          }
+        ]
+      },
+      {
+        "concept": "nico-dhcp and Kea hook",
+        "prerequisites": [
+          {
+            "name": "DHCP",
+            "definition": "The protocol that hands out IP addresses to devices on a network.",
+            "kind": "conceptual",
+            "confidence": 0.95,
+            "why": "It is a DHCP server."
+          },
+          {
+            "name": "mTLS / gRPC",
+            "definition": "The RPC framework, secured with mutual TLS, used between NICo components.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It forwards requests to Core as gRPC calls."
+          },
+          {
+            "name": "API Service (NICo Core)",
+            "definition": "NICo's central API and control service.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Core decides which IP addresses to assign."
+          }
+        ]
+      },
+      {
+        "concept": "Underlay and HostInband network segments",
+        "prerequisites": [
+          {
+            "name": "Underlay and overlay networks",
+            "definition": "The physical routed network versus the virtual networks built on top of it.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The segment types are defined by their role in the physical network."
+          },
+          {
+            "name": "Out-of-band (OOB) management",
+            "definition": "Managing hardware over a separate management path.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The underlay carries out-of-band interfaces."
+          },
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "HostInband serves hosts that have no DPU."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded management controller on a server.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Both segment types carry BMC interfaces."
+          }
+        ]
+      },
+      {
+        "concept": "Envelope encryption and KEK",
+        "prerequisites": [
+          {
+            "name": "AES-GCM symmetric encryption",
+            "definition": "An authenticated symmetric cipher that uses a shared key.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Data keys and the KEK use symmetric encryption."
+          }
+        ]
+      },
+      {
+        "concept": "AES-GCM symmetric encryption",
+        "prerequisites": []
+      },
+      {
+        "concept": "Factory default credentials",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded management controller on a server.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "These are the default BMC logins."
+          },
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "Server boot firmware and its signature checking.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "They include UEFI passwords."
+          },
+          {
+            "name": "HashiCorp Vault",
+            "definition": "A secrets management store.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Credentials are seeded into Vault."
+          }
+        ]
+      },
+      {
+        "concept": "SPIFFE",
+        "prerequisites": [
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "Public key infrastructure and X.509 certificates.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "X.509 SVIDs are certificates."
+          },
+          {
+            "name": "OIDC / JWT authentication (Keycloak)",
+            "definition": "Token-based authentication that uses signed JWTs.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "JWT-SVIDs are JWTs."
+          }
+        ]
+      },
+      {
+        "concept": "Machine identity (JWT-SVID issuance)",
+        "prerequisites": [
+          {
+            "name": "SPIFFE",
+            "definition": "A standard for workload identity built on SVIDs.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "The feature issues SPIFFE JWT-SVIDs."
+          },
+          {
+            "name": "Metadata Service (FMDS)",
+            "definition": "The instance metadata service (IMDS) that instances can query.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Workloads get SVIDs through IMDS."
+          },
+          {
+            "name": "Envelope encryption and KEK",
+            "definition": "Wrapping data keys with a master key encryption key.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The signing keys are encrypted under the site KEK."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Several tenants or orgs sharing one site with isolation between them.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Each org has its own signing keys."
+          }
+        ]
+      },
+      {
+        "concept": "Token delegation (RFC 8693 token exchange)",
+        "prerequisites": [
+          {
+            "name": "OAuth2 client credentials flow and JWT bearer tokens",
+            "definition": "How OAuth2 clients get tokens and present them as JWT bearer tokens.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Token exchange extends OAuth token flows."
+          },
+          {
+            "name": "Machine identity (JWT-SVID issuance)",
+            "definition": "NICo issuing JWT-SVIDs to workloads.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The delegated tokens are typically NICo-issued identity tokens."
+          }
+        ]
+      },
+      {
+        "concept": "Rate limiting (GCRA token bucket)",
+        "prerequisites": []
+      },
+      {
+        "concept": "Component Manager",
+        "prerequisites": [
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "A rack-scale system with compute trays, NVLink switch trays and power shelves.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "It manages these component classes."
+          },
+          {
+            "name": "Rack Management Service (RMS)",
+            "definition": "A service for rack-level hardware operations.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "RMS is one of its backends."
+          },
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing hardware through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Direct Redfish is another backend."
+          }
+        ]
+      },
+      {
+        "concept": "Asynchronous job polling",
+        "prerequisites": []
+      },
+      {
+        "concept": "Loki logging",
+        "prerequisites": [
+          {
+            "name": "Observability stack (Prometheus, Grafana, Loki, OpenTelemetry)",
+            "definition": "NICo's metrics, logs and tracing stack.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Loki is part of this stack and is queried through Grafana."
+          },
+          {
+            "name": "Serial-over-LAN and SSH Console Service",
+            "definition": "Remote access to host serial consoles.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Loki stores serial console logs."
+          }
+        ]
+      },
+      {
+        "concept": "Power control reset types",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing hardware through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "These are Redfish reset actions."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded management controller on a server.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The BMC carries out power control."
+          }
+        ]
+      },
+      {
+        "concept": "Redfish resource tree (Systems, Chassis, Managers)",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing hardware through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "This is how Redfish organizes its resources."
+          }
+        ]
+      },
+      {
+        "concept": "Redfish vendor detection and OEM extensions",
+        "prerequisites": [
+          {
+            "name": "Redfish resource tree (Systems, Chassis, Managers)",
+            "definition": "The hierarchy of Redfish resources under /redfish/v1.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The Vendor field and Oem sections live inside this tree."
+          }
+        ]
+      },
+      {
+        "concept": "Machine ID",
+        "prerequisites": [
+          {
+            "name": "DMI Platform Identity",
+            "definition": "System identity data from DMI/SMBIOS, such as serial number and manufacturer.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The ID is a hash of DMI data."
+          },
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "How NICo finds new hardware and brings it under management.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "IDs are assigned during discovery."
+          }
+        ]
+      },
+      {
+        "concept": "PCIe device",
+        "prerequisites": [
+          {
+            "name": "Redfish resource tree (Systems, Chassis, Managers)",
+            "definition": "The hierarchy of Redfish resources under /redfish/v1.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "NICo sees PCIe devices as Redfish resources."
+          }
+        ]
+      },
+      {
+        "concept": "MAC address",
+        "prerequisites": []
+      },
+      {
+        "concept": "UEFI device path",
+        "prerequisites": [
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "Server boot firmware and its signature checking.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Device paths are a UEFI construct."
+          },
+          {
+            "name": "PCIe device",
+            "definition": "Hardware attached over the PCI Express bus.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Paths encode PCI topology."
+          },
+          {
+            "name": "MAC address",
+            "definition": "The hardware address of a network interface.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "NICo extracts MACs from device paths."
+          }
+        ]
+      },
+      {
+        "concept": "UEFI/BIOS settings",
+        "prerequisites": [
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "Server boot firmware and its signature checking.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "These settings configure the firmware."
+          },
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing hardware through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Settings are read and written through Redfish."
+          }
+        ]
+      },
+      {
+        "concept": "Boot order and boot source override",
+        "prerequisites": [
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "Server boot firmware and its signature checking.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The firmware controls boot order."
+          },
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing hardware through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Overrides are set through Redfish."
+          },
+          {
+            "name": "PXE / iPXE boot",
+            "definition": "Booting a machine over the network.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "NICo sets the override so hosts network-boot."
+          }
+        ]
+      },
+      {
+        "concept": "Firmware inventory and update",
+        "prerequisites": [
+          {
+            "name": "Redfish resource tree (Systems, Chassis, Managers)",
+            "definition": "The hierarchy of Redfish resources under /redfish/v1.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "UpdateService and the firmware inventory are Redfish resources."
+          },
+          {
+            "name": "Redfish Task Service",
+            "definition": "Redfish resources that track long-running operations.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Firmware updates are tracked as tasks."
+          }
+        ]
+      },
+      {
+        "concept": "Redfish Task Service",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing hardware through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The Task Service is part of Redfish."
+          },
+          {
+            "name": "Asynchronous job polling",
+            "definition": "Polling a job ID until it completes or fails.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Clients poll tasks this way."
+          }
+        ]
+      },
+      {
+        "concept": "BMC sensors and event logs",
+        "prerequisites": [
+          {
+            "name": "Redfish resource tree (Systems, Chassis, Managers)",
+            "definition": "The hierarchy of Redfish resources under /redfish/v1.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Sensors and logs are exposed under Chassis and Managers."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded management controller on a server.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The BMC collects the sensor readings and logs."
+          }
+        ]
+      },
+      {
+        "concept": "SPDM attestation",
+        "prerequisites": [
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "Public key infrastructure and X.509 certificates.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "SPDM checks certificate chains and signatures."
+          },
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing hardware through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Evidence is collected through Redfish ComponentIntegrity."
+          },
+          {
+            "name": "TPM and Measured Boot attestation",
+            "definition": "Verifying firmware measurements recorded in the TPM.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Introduces the idea of measurement-based attestation."
+          }
+        ]
+      },
+      {
+        "concept": "rshim",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "rshim is a BlueField interface."
+          },
+          {
+            "name": "PCIe device",
+            "definition": "Hardware attached over the PCI Express bus.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "rshim reaches the DPU over PCIe."
+          },
+          {
+            "name": "Redfish vendor detection and OEM extensions",
+            "definition": "Vendor-specific Redfish behavior and Oem actions.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "rshim is enabled with NVIDIA OEM actions."
+          }
+        ]
+      },
+      {
+        "concept": "State handler outcomes",
+        "prerequisites": [
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "Lifecycle states and transitions for resources.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Outcomes decide which state comes next."
+          },
+          {
+            "name": "State controller work queue and claims",
+            "definition": "How resources are queued, claimed and processed.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Outcomes refer to requeueing and queue claims."
+          }
+        ]
+      },
+      {
+        "concept": "State controller work queue and claims",
+        "prerequisites": [
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "Lifecycle states and transitions for resources.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The queue drives state machine processing."
+          },
+          {
+            "name": "Desired vs actual state reconciliation",
+            "definition": "Background loops acting until reality matches the desired state.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Periodic requeueing implements reconciliation."
+          },
+          {
+            "name": "Database transaction",
+            "definition": "Writes that commit or roll back together.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Claims are stored in the database."
+          }
+        ]
+      },
+      {
+        "concept": "Optimistic concurrency / stale-write protection",
+        "prerequisites": [
+          {
+            "name": "Database transaction",
+            "definition": "Writes that commit or roll back together.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Conditional writes happen inside transactions."
+          }
+        ]
+      },
+      {
+        "concept": "Iteration invalidation",
+        "prerequisites": [
+          {
+            "name": "Optimistic concurrency / stale-write protection",
+            "definition": "Writing only if the stored version still matches the version that was read.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "A rejected conditional write triggers invalidation."
+          },
+          {
+            "name": "State controller work queue and claims",
+            "definition": "How resources are queued, claimed and processed.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The resource is requeued."
+          },
+          {
+            "name": "Database transaction",
+            "definition": "Writes that commit or roll back together.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The iteration's writes are rolled back."
+          }
+        ]
+      },
+      {
+        "concept": "Database transaction",
+        "prerequisites": []
+      },
+      {
+        "concept": "Idempotency",
+        "prerequisites": []
+      },
+      {
+        "concept": "Recovery point and crash-window reconciliation",
+        "prerequisites": [
+          {
+            "name": "Idempotency",
+            "definition": "Repeating an operation gives the same result as doing it once.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Resuming after a crash requires retry-safe effects."
+          },
+          {
+            "name": "Database transaction",
+            "definition": "Writes that commit or roll back together.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Durable state is persisted before the external call."
+          },
+          {
+            "name": "Desired vs actual state reconciliation",
+            "definition": "Background loops acting until reality matches the desired state.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Classifying the outcome after a crash is a form of reconciliation."
+          }
+        ]
+      },
+      {
+        "concept": "WorkLock lease and fencing",
+        "prerequisites": [
+          {
+            "name": "Database transaction",
+            "definition": "Writes that commit or roll back together.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The fence check must run in the same transaction as the protected write."
+          },
+          {
+            "name": "Optimistic concurrency / stale-write protection",
+            "definition": "Writing only if the stored version still matches the version that was read.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Fencing is a similar guard against stale writers."
+          }
+        ]
+      },
+      {
+        "concept": "Service-level agreement (SLA) for states",
+        "prerequisites": [
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "Lifecycle states and transitions for resources.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "SLAs limit how long a resource stays in each state."
+          }
+        ]
+      }
+    ]
+  }
+}

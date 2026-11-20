@@ -1,0 +1,860 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "Network planes (Ethernet, InfiniBand, NVLink)",
+        "prerequisites": [
+          {
+            "name": "IP networking fundamentals",
+            "definition": "How IP addresses, subnets, switches and routers move packets between machines on Ethernet networks.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "You need to know what a network fabric is before you can tell the separate planes apart."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Several tenants sharing one infrastructure while staying isolated from each other.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Each plane exists here so NICo can isolate tenants on it."
+          }
+        ]
+      },
+      {
+        "concept": "InfiniBand partitioning with UFM (P_Key)",
+        "prerequisites": [
+          {
+            "name": "InfiniBand fabric",
+            "definition": "A low-latency network fabric used for GPU-to-GPU traffic between nodes.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "P_Keys partition an InfiniBand fabric."
+          },
+          {
+            "name": "Network planes (Ethernet, InfiniBand, NVLink)",
+            "definition": "The separate fabrics in an AI cluster.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Shows where InfiniBand sits among the cluster's fabrics."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Isolated tenants sharing infrastructure.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Partitions exist to isolate tenants."
+          }
+        ]
+      },
+      {
+        "concept": "NVLink partitioning with NMX-C",
+        "prerequisites": [
+          {
+            "name": "NVLink scale-up fabric",
+            "definition": "The high-bandwidth GPU interconnect inside an NVLink domain.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "This concept partitions that fabric."
+          },
+          {
+            "name": "NMX-C / Fabric Manager",
+            "definition": "The controller software that manages the NVLink fabric.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "NICo partitions the fabric by calling NMX-C."
+          },
+          {
+            "name": "mTLS / gRPC",
+            "definition": "An RPC protocol secured by mutual TLS.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "NICo talks to NMX-C through its gRPC API."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Isolated tenants sharing infrastructure.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The partitions isolate tenants from each other."
+          }
+        ]
+      },
+      {
+        "concept": "GB200 NVL72 rack-scale management (NICo Flow)",
+        "prerequisites": [
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "NVIDIA rack-scale system of compute trays, NVLink switch trays and power shelves.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "This is the system being managed."
+          },
+          {
+            "name": "Bare-metal lifecycle management",
+            "definition": "Managing physical servers from discovery through provisioning and reuse.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Rack-scale management applies lifecycle management to whole racks."
+          },
+          {
+            "name": "Firmware baseline enforcement",
+            "definition": "Keeping devices on an approved firmware set.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Sequencing firmware across trays is one of its core jobs."
+          }
+        ]
+      },
+      {
+        "concept": "Static network fabric principle",
+        "prerequisites": [
+          {
+            "name": "Underlay and overlay networks",
+            "definition": "The physical routed network versus virtual networks tunneled over it.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The principle depends on doing isolation in overlays while the underlay stays fixed."
+          },
+          {
+            "name": "BlueField DPU",
+            "definition": "A programmable NIC with its own CPU that sits in front of the host.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Isolation is enforced on DPUs instead of switches."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Isolated tenants sharing infrastructure.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The principle is about tenant changes."
+          }
+        ]
+      },
+      {
+        "concept": "Underlay and overlay networks",
+        "prerequisites": [
+          {
+            "name": "IP networking fundamentals",
+            "definition": "How IP addresses, subnets, switches and routers move packets between machines on Ethernet networks.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Tunneling and routed underlays build on basic IP networking."
+          }
+        ]
+      },
+      {
+        "concept": "BGP",
+        "prerequisites": [
+          {
+            "name": "IP networking fundamentals",
+            "definition": "How IP addresses, subnets, switches and routers move packets between machines on Ethernet networks.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "BGP exchanges IP routes, so you need to understand routing first."
+          }
+        ]
+      },
+      {
+        "concept": "Autonomous System Number (ASN)",
+        "prerequisites": [
+          {
+            "name": "BGP",
+            "definition": "The routing protocol networks use to exchange routes.",
+            "kind": "conceptual",
+            "confidence": 0.95,
+            "why": "An ASN identifies a BGP routing domain."
+          }
+        ]
+      },
+      {
+        "concept": "VXLAN / EVPN",
+        "prerequisites": [
+          {
+            "name": "Underlay and overlay networks",
+            "definition": "The physical routed network versus virtual networks tunneled over it.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "VXLAN is the overlay tunneling mechanism."
+          },
+          {
+            "name": "BGP",
+            "definition": "The routing protocol networks use to exchange routes.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "EVPN is a BGP address family."
+          },
+          {
+            "name": "VLAN",
+            "definition": "A way to split one Layer-2 network into separate segments.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "VXLAN extends the idea of L2 segmentation."
+          }
+        ]
+      },
+      {
+        "concept": "VNI (L2VNI / L3VNI)",
+        "prerequisites": [
+          {
+            "name": "VXLAN / EVPN",
+            "definition": "Overlay encapsulation plus BGP-based overlay reachability.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "VNIs identify VXLAN segments."
+          },
+          {
+            "name": "VRF",
+            "definition": "A separate routing table on one device.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "An L3VNI is tied to a VRF."
+          }
+        ]
+      },
+      {
+        "concept": "VRF",
+        "prerequisites": [
+          {
+            "name": "IP networking fundamentals",
+            "definition": "How IP addresses, subnets, switches and routers move packets between machines on Ethernet networks.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "A VRF is a separate routing table, so you need to know what a routing table is first."
+          }
+        ]
+      },
+      {
+        "concept": "Route targets (import/export)",
+        "prerequisites": [
+          {
+            "name": "VXLAN / EVPN",
+            "definition": "Overlay encapsulation plus BGP-based overlay reachability.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Route targets are tags attached to EVPN routes."
+          },
+          {
+            "name": "VRF",
+            "definition": "A separate routing table on one device.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Route targets decide which VRFs import a route."
+          }
+        ]
+      },
+      {
+        "concept": "VPC (FNN VPC)",
+        "prerequisites": [
+          {
+            "name": "Multi-tenancy",
+            "definition": "Isolated tenants sharing infrastructure.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "A VPC is a tenant's isolated network."
+          },
+          {
+            "name": "VRF",
+            "definition": "A separate routing table on one device.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Each VPC is implemented as a VRF with an L3VNI."
+          },
+          {
+            "name": "CIDR prefixes and /31 point-to-point subnets",
+            "definition": "CIDR block sizes and two-address point-to-point links.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "FNN VPCs give each interface a routed /31."
+          },
+          {
+            "name": "Underlay and overlay networks",
+            "definition": "The physical routed network versus virtual networks tunneled over it.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "A VPC is an overlay network."
+          }
+        ]
+      },
+      {
+        "concept": "IP address pools",
+        "prerequisites": [
+          {
+            "name": "CIDR prefixes and /31 point-to-point subnets",
+            "definition": "CIDR block sizes and two-address point-to-point links.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Pools are defined as CIDR ranges."
+          },
+          {
+            "name": "Out-of-band (OOB) management",
+            "definition": "Managing servers through a separate management network and BMC.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "One of the pools is for OOB management addresses."
+          }
+        ]
+      },
+      {
+        "concept": "CIDR prefixes and /31 point-to-point subnets",
+        "prerequisites": [
+          {
+            "name": "IP networking fundamentals",
+            "definition": "How IP addresses, subnets, switches and routers move packets between machines on Ethernet networks.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "CIDR notation describes IP subnets."
+          }
+        ]
+      },
+      {
+        "concept": "PF and VF (SR-IOV)",
+        "prerequisites": [
+          {
+            "name": "PCIe device",
+            "definition": "A hardware device attached to a host over the PCI Express bus.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "PFs and VFs are PCIe functions of a NIC."
+          },
+          {
+            "name": "IP networking fundamentals",
+            "definition": "How IP addresses, subnets, switches and routers move packets between machines on Ethernet networks.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "You need to know what a network interface is."
+          }
+        ]
+      },
+      {
+        "concept": "MetalLB LoadBalancer VIPs",
+        "prerequisites": [
+          {
+            "name": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+            "definition": "The ways Kubernetes exposes pods over the network.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "MetalLB implements the LoadBalancer Service type."
+          },
+          {
+            "name": "Virtual IP address (VIP)",
+            "definition": "An IP address not tied to one physical interface.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "MetalLB hands out VIPs."
+          },
+          {
+            "name": "BGP",
+            "definition": "The routing protocol networks use to exchange routes.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "VIPs are advertised over BGP."
+          },
+          {
+            "name": "Layer 2 advertisement (ARP)",
+            "definition": "Announcing an IP address on a local network by answering ARP requests.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "L2 mode is the other way MetalLB advertises VIPs."
+          }
+        ]
+      },
+      {
+        "concept": "CNI",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "CNI is the Kubernetes pod networking plugin layer."
+          },
+          {
+            "name": "IP networking fundamentals",
+            "definition": "How IP addresses, subnets, switches and routers move packets between machines on Ethernet networks.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Pod networking and routed node connectivity are networking concepts."
+          }
+        ]
+      },
+      {
+        "concept": "PostgreSQL (Zalando operator)",
+        "prerequisites": [
+          {
+            "name": "Relational databases and SQL",
+            "definition": "Databases that store data in tables and are queried with SQL.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "PostgreSQL is a relational database."
+          },
+          {
+            "name": "Kubernetes Operator / CRDs",
+            "definition": "Controllers that manage applications through custom Kubernetes resources.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The Zalando operator deploys Postgres."
+          }
+        ]
+      },
+      {
+        "concept": "HashiCorp Vault",
+        "prerequisites": [
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "CA-signed certificates binding identities to keys.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Vault's PKI engine issues certificates."
+          },
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Services authenticate to Vault with Kubernetes auth."
+          }
+        ]
+      },
+      {
+        "concept": "PKI and TLS certificates",
+        "prerequisites": [
+          {
+            "name": "Public-key cryptography",
+            "definition": "Cryptography that uses a public/private key pair for encryption and digital signatures.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Certificates bind identities to public keys and are signed with private keys."
+          }
+        ]
+      },
+      {
+        "concept": "cert-manager",
+        "prerequisites": [
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "CA-signed certificates binding identities to keys.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "cert-manager issues and rotates these certificates."
+          },
+          {
+            "name": "Kubernetes Operator / CRDs",
+            "definition": "Controllers that manage applications through custom Kubernetes resources.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "cert-manager is a Kubernetes controller driven by CRDs."
+          }
+        ]
+      },
+      {
+        "concept": "External Secrets Operator (ESO)",
+        "prerequisites": [
+          {
+            "name": "Kubernetes Secret",
+            "definition": "A Kubernetes object that stores sensitive data.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "ESO creates Secret objects."
+          },
+          {
+            "name": "Kubernetes Operator / CRDs",
+            "definition": "Controllers that manage applications through custom Kubernetes resources.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "ESO is an operator."
+          },
+          {
+            "name": "HashiCorp Vault",
+            "definition": "A secrets manager.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Vault is a typical backing store for ESO."
+          }
+        ]
+      },
+      {
+        "concept": "Temporal workflow engine",
+        "prerequisites": [
+          {
+            "name": "NICo REST (JSON API)",
+            "definition": "NICo's REST API layer.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Temporal runs NICo REST's multi-step operations."
+          },
+          {
+            "name": "Idempotency",
+            "definition": "An operation can be repeated safely and gives the same result.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Durable workflows retry steps, so those steps must be safe to repeat."
+          }
+        ]
+      },
+      {
+        "concept": "Observability stack (Prometheus, Grafana, Loki, OpenTelemetry)",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The stack is deployed on the cluster and monitors workloads running there."
+          }
+        ]
+      },
+      {
+        "concept": "Hardware Health service",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "A REST standard for managing servers through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "The service scrapes BMCs over Redfish."
+          },
+          {
+            "name": "BMC sensors and event logs",
+            "definition": "Hardware readings and logs that the BMC exposes.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Sensor data is what the service collects."
+          },
+          {
+            "name": "Prometheus metrics",
+            "definition": "Time-series metrics in Prometheus format.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The service exposes /metrics."
+          },
+          {
+            "name": "API Service (NICo Core)",
+            "definition": "NICo's core API service.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Health alerts are reported to the API Service."
+          }
+        ]
+      },
+      {
+        "concept": "Serial-over-LAN and SSH Console Service",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded controller for out-of-band server management.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "The console is carried through the BMC."
+          },
+          {
+            "name": "SSH",
+            "definition": "A protocol for secure remote shell access.",
+            "kind": "procedural",
+            "confidence": 0.7,
+            "why": "Console access is provided over SSH."
+          },
+          {
+            "name": "Loki logging",
+            "definition": "Log aggregation with Grafana Loki.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Console output is logged to Loki."
+          }
+        ]
+      },
+      {
+        "concept": "OIDC / JWT authentication (Keycloak)",
+        "prerequisites": [
+          {
+            "name": "HTTP and web APIs",
+            "definition": "How clients call servers over HTTP, including headers, status codes and tokens.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Tokens travel in HTTP requests, and OIDC login is built on HTTP redirects."
+          },
+          {
+            "name": "Public-key cryptography",
+            "definition": "Cryptography using public/private key pairs.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "JWTs are signed, and services check those signatures."
+          }
+        ]
+      },
+      {
+        "concept": "GitOps with ArgoCD",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "ArgoCD syncs Kubernetes cluster state."
+          },
+          {
+            "name": "Git version control",
+            "definition": "Tracking file changes in repositories with commits and branches.",
+            "kind": "procedural",
+            "confidence": 0.8,
+            "why": "In GitOps, Git holds the desired state."
+          },
+          {
+            "name": "Helm and helmfile",
+            "definition": "Packaging and deploying Kubernetes applications with charts.",
+            "kind": "procedural",
+            "confidence": 0.5,
+            "why": "NICo is packaged as Helm charts that ArgoCD deploys."
+          }
+        ]
+      },
+      {
+        "concept": "NICo scope boundaries",
+        "prerequisites": [
+          {
+            "name": "NICo (NVIDIA Infra Controller)",
+            "definition": "NVIDIA's bare-metal infrastructure controller.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "You need to know what NICo does before you can see where its scope ends."
+          },
+          {
+            "name": "Bare-metal lifecycle management",
+            "definition": "Managing physical servers from discovery through reuse.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Its scope is defined in lifecycle terms."
+          }
+        ]
+      },
+      {
+        "concept": "Scale guidance vs hard limit",
+        "prerequisites": [
+          {
+            "name": "NICo (NVIDIA Infra Controller)",
+            "definition": "NVIDIA's bare-metal infrastructure controller.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The guidance is about NICo fleet sizes."
+          },
+          {
+            "name": "Machine-a-tron",
+            "definition": "NICo's fleet simulator.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Some of the figures were validated in simulation."
+          }
+        ]
+      },
+      {
+        "concept": "GB200 NVL72 rack",
+        "prerequisites": [
+          {
+            "name": "NVLink scale-up fabric",
+            "definition": "The high-bandwidth GPU interconnect inside an NVLink domain.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The rack is defined by its single shared NVLink domain."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded controller for out-of-band server management.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Each tray is managed through its own BMC."
+          }
+        ]
+      },
+      {
+        "concept": "NVLink switch tray",
+        "prerequisites": [
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "NVIDIA rack-scale system of compute trays, switch trays and power shelves.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The tray is a component of the rack."
+          },
+          {
+            "name": "NVLink scale-up fabric",
+            "definition": "The high-bandwidth GPU interconnect.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Its switches connect the GPUs over NVLink."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded controller for out-of-band server management.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The tray has its own BMC."
+          }
+        ]
+      },
+      {
+        "concept": "Power shelf",
+        "prerequisites": [
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "NVIDIA rack-scale system.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Power shelves are rack components."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded controller for out-of-band server management.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The shelf is managed through its BMC."
+          },
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "Resources moving through defined lifecycle states.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "NICo moves the shelf through states until it reaches ready."
+          }
+        ]
+      },
+      {
+        "concept": "Rack profile",
+        "prerequisites": [
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "NVIDIA rack-scale system.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "A profile describes the makeup of a rack type."
+          },
+          {
+            "name": "NVLink switch tray",
+            "definition": "Rack tray with NVLink switches.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Switch trays are counted in the profile."
+          },
+          {
+            "name": "Power shelf",
+            "definition": "Rack power component.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Power shelves are counted in the profile."
+          },
+          {
+            "name": "Helm chart values",
+            "definition": "Configuration values that customize a Helm chart.",
+            "kind": "procedural",
+            "confidence": 0.6,
+            "why": "The profile is set in the nico-api chart values."
+          }
+        ]
+      },
+      {
+        "concept": "State controller concurrency",
+        "prerequisites": [
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "Resources moving through defined lifecycle states.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Concurrency limits how many machines move through the state machine at once."
+          },
+          {
+            "name": "Managed Host",
+            "definition": "A host under NICo management.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The controller advances managed machines."
+          }
+        ]
+      },
+      {
+        "concept": "Fleet-up and time to ready",
+        "prerequisites": [
+          {
+            "name": "Machine-a-tron",
+            "definition": "NICo's fleet simulator.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The measurement is defined in terms of simulator pods and simulated BMCs."
+          },
+          {
+            "name": "State controller concurrency",
+            "definition": "How many machines move through their states at once.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Concurrency is what determines time to ready."
+          }
+        ]
+      },
+      {
+        "concept": "Machine-a-tron",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded controller for out-of-band server management.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It simulates BMCs."
+          },
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The simulators run in Kubernetes pods."
+          },
+          {
+            "name": "Site Controller",
+            "definition": "The NICo control plane at a site.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The site controller's control plane is what it scale-tests."
+          }
+        ]
+      },
+      {
+        "concept": "DOCA Platform Framework (DPF)",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "A programmable NIC with its own CPU.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "DPF provisions and orchestrates DPUs."
+          },
+          {
+            "name": "Kubernetes Operator / CRDs",
+            "definition": "Controllers that manage applications through custom Kubernetes resources.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "DPF runs as Kubernetes operators driven by CRDs."
+          }
+        ]
+      },
+      {
+        "concept": "Rack Management Service (RMS)",
+        "prerequisites": [
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "NVIDIA rack-scale system.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "RMS handles rack-level setup."
+          },
+          {
+            "name": "NICo (NVIDIA Infra Controller)",
+            "definition": "NVIDIA's bare-metal infrastructure controller.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "RMS is a service that NICo uses."
+          }
+        ]
+      }
+    ]
+  }
+}

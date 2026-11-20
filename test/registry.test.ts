@@ -29,6 +29,17 @@ describe("ConceptRegistry", () => {
     expect(concept.firstSeen).toBe(2);
     expect(concept.pages.sort()).toEqual(["x.md", "y.md"]);
   });
+  it("keeps concepts apart when they only share an alias", () => {
+    const r = new ConceptRegistry();
+    const vlan = r.add({ name: "VLAN", aliases: ["pools.vlan-id"], origin: "docs", depth: 0 });
+    const pools = r.add({ name: "NICo resource pools", aliases: ["pools.vlan-id", "pools.vni"], origin: "docs", depth: 0 });
+    expect(pools).not.toBe(vlan);
+  });
+  it("merges when an alias names an existing concept", () => {
+    const r = new ConceptRegistry();
+    const k = r.add({ name: "Kubernetes", origin: "docs", depth: 0 });
+    expect(r.add({ name: "K8s", aliases: ["Kubernetes"], origin: "docs", depth: 0 })).toBe(k);
+  });
   it("absorb moves names over so later lookups find the kept concept", () => {
     const r = new ConceptRegistry();
     const k = r.add({ name: "Kubernetes", origin: "docs", depth: 0 });

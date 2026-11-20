@@ -1,0 +1,711 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "Tokio worker threads",
+        "prerequisites": [
+          {
+            "name": "Asynchronous programming (async/await)",
+            "definition": "A programming style where tasks pause while waiting for I/O, so a small number of threads can run many tasks.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Tokio is an async runtime, and its worker threads only make sense once you understand async tasks."
+          },
+          {
+            "name": "Rust toolchain and Cargo",
+            "definition": "Rust's compiler and package/build tool.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Tokio is a Rust library, and its configuration is specific to Rust."
+          },
+          {
+            "name": "Kubernetes resource limits",
+            "definition": "Per-container caps on CPU and memory.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The thread count is tuned to match nico-api's CPU limit."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes resource limits",
+        "prerequisites": [
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "Pods, StatefulSets, Secrets, ConfigMaps, Jobs and Services.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Limits are set on the containers inside pod specs."
+          }
+        ]
+      },
+      {
+        "concept": "Kubelet working set and OOM kill",
+        "prerequisites": [
+          {
+            "name": "Kubernetes resource limits",
+            "definition": "Per-container caps on CPU and memory.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "An OOM kill happens when a container goes over its memory limit."
+          },
+          {
+            "name": "Linux memory and cgroups",
+            "definition": "How Linux tracks resident memory and page cache, and how cgroups cap and account for the resources of a group of processes.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The working set and the oom_kill counter are cgroup memory measurements."
+          }
+        ]
+      },
+      {
+        "concept": "Helm chart values",
+        "prerequisites": [
+          {
+            "name": "Helm and helmfile",
+            "definition": "The Kubernetes package manager, plus a declarative tool for managing several Helm releases.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Values files only make sense once you know how Helm charts work."
+          }
+        ]
+      },
+      {
+        "concept": "Pod anti-affinity",
+        "prerequisites": [
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "The basic Kubernetes resources, such as pods and StatefulSets.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Anti-affinity is a rule for where pods get scheduled."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes Service externalIP",
+        "prerequisites": [
+          {
+            "name": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+            "definition": "The ways a Kubernetes Service can be exposed.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "externalIP is another way to expose a Service, and it is easiest to understand next to the standard types."
+          }
+        ]
+      },
+      {
+        "concept": "kube-proxy IPVS mode",
+        "prerequisites": [
+          {
+            "name": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+            "definition": "The ways a Kubernetes Service can be exposed.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "kube-proxy is the component that carries out Service routing."
+          },
+          {
+            "name": "Kubernetes Service externalIP",
+            "definition": "A Service field that exposes the Service on a specific IP address.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The ipset limit is reached because the simulator publishes every BMC address as an externalIP."
+          }
+        ]
+      },
+      {
+        "concept": "Calico networking",
+        "prerequisites": [
+          {
+            "name": "CNI",
+            "definition": "The Container Network Interface, the plugin standard that gives pods their network connectivity.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Calico is a CNI plugin."
+          },
+          {
+            "name": "BGP",
+            "definition": "The Border Gateway Protocol, which routers use to exchange routes.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Calico uses the BIRD BGP daemon to distribute routes."
+          }
+        ]
+      },
+      {
+        "concept": "API admission control",
+        "prerequisites": [
+          {
+            "name": "Client identity",
+            "definition": "The identity, usually taken from the client's certificate, that nico-api uses to apply per-client limits.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Admission control applies limits for each client identity."
+          },
+          {
+            "name": "API Service (NICo Core)",
+            "definition": "The core nico-api service.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Admission control is a setting of nico-api."
+          }
+        ]
+      },
+      {
+        "concept": "Client identity",
+        "prerequisites": [
+          {
+            "name": "mTLS / gRPC",
+            "definition": "Mutual TLS authentication over gRPC.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The identity comes from the client's mTLS certificate."
+          },
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "The certificate infrastructure used to establish identity.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Reading the identity requires understanding what a certificate contains."
+          }
+        ]
+      },
+      {
+        "concept": "Prometheus metrics",
+        "prerequisites": []
+      },
+      {
+        "concept": "BMC network IP addressing",
+        "prerequisites": [
+          {
+            "name": "CIDR prefixes and /31 point-to-point subnets",
+            "definition": "Notation for IP address ranges and their sizes.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Planning BMC ranges means knowing how many addresses a subnet such as a /16 holds."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "The out-of-band management controller on a server.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "You need to know what a BMC endpoint is before planning addresses for them."
+          }
+        ]
+      },
+      {
+        "concept": "VXLAN and VNI",
+        "prerequisites": [
+          {
+            "name": "Underlay and overlay networks",
+            "definition": "A physical routed network (the underlay) carrying virtual networks on top of it (the overlays).",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "VXLAN is an overlay technology that runs over an underlay."
+          },
+          {
+            "name": "VLAN",
+            "definition": "Splitting one physical Layer 2 network into isolated segments identified by a VLAN ID.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "A VNI is a Layer 2 segment identifier, similar to a VLAN ID."
+          }
+        ]
+      },
+      {
+        "concept": "VNI resource pool",
+        "prerequisites": [
+          {
+            "name": "VXLAN and VNI",
+            "definition": "Layer 2 overlay networks, each identified by a VNI.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "The pool hands out VNIs."
+          },
+          {
+            "name": "NICo resource pools",
+            "definition": "Operator-configured ranges of values that NICo allocates.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "A VNI pool is one kind of NICo resource pool."
+          },
+          {
+            "name": "VPC (FNN VPC)",
+            "definition": "A tenant's isolated virtual network.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "VNIs are allocated to VPCs, which is why the pool size limits the VPC count."
+          }
+        ]
+      },
+      {
+        "concept": "InfiniBand partition",
+        "prerequisites": [
+          {
+            "name": "InfiniBand fabric",
+            "definition": "A high-performance network fabric managed by a subnet manager.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "A partition is an isolation group within an InfiniBand fabric."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Several tenants sharing infrastructure while kept isolated from each other.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "In NICo the partition is a tenancy object."
+          }
+        ]
+      },
+      {
+        "concept": "Network security group",
+        "prerequisites": [
+          {
+            "name": "DPU Agent",
+            "definition": "The NICo agent that runs on the DPU and enforces network configuration.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The DPU agent enforces the group's rules."
+          },
+          {
+            "name": "Firewall rules",
+            "definition": "Rules that allow or deny traffic based on addresses, ports and protocols.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "A security group is a set of firewall rules."
+          }
+        ]
+      },
+      {
+        "concept": "Docker BuildKit and Buildx",
+        "prerequisites": [
+          {
+            "name": "Containers and container images",
+            "definition": "Packaged application filesystems that run as isolated processes, built from Dockerfiles.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "BuildKit builds container images."
+          }
+        ]
+      },
+      {
+        "concept": "Multi-architecture image manifest",
+        "prerequisites": [
+          {
+            "name": "Containers and container images",
+            "definition": "Packaged application filesystems that run as isolated processes.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The manifest points to separate images for each architecture."
+          },
+          {
+            "name": "Container registry",
+            "definition": "A server that stores and serves container images.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Manifests and tags are stored in registries."
+          }
+        ]
+      },
+      {
+        "concept": "Container registry",
+        "prerequisites": [
+          {
+            "name": "Containers and container images",
+            "definition": "Packaged application filesystems that run as isolated processes.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "A registry stores images."
+          }
+        ]
+      },
+      {
+        "concept": "Cross-architecture emulation (binfmt/QEMU)",
+        "prerequisites": [
+          {
+            "name": "Docker BuildKit and Buildx",
+            "definition": "Docker's build engine and its CLI front end.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Buildx relies on emulation to build images for other architectures."
+          },
+          {
+            "name": "CPU architectures (amd64 vs arm64)",
+            "definition": "Different processor instruction sets. A binary built for one cannot run natively on the other.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Emulation exists to bridge the gap between architectures."
+          }
+        ]
+      },
+      {
+        "concept": "Building local dev images (make images-dev)",
+        "prerequisites": [
+          {
+            "name": "Docker BuildKit and Buildx",
+            "definition": "Docker's build engine and its CLI front end.",
+            "kind": "procedural",
+            "confidence": 0.8,
+            "why": "The target builds its images with Docker Buildx."
+          },
+          {
+            "name": "Build host bootstrap (make bootstrap)",
+            "definition": "The one-time setup that installs everything the builds need.",
+            "kind": "procedural",
+            "confidence": 0.65,
+            "why": "The tools must be installed before building."
+          }
+        ]
+      },
+      {
+        "concept": "Tilt",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Tilt deploys services to a Kubernetes cluster."
+          },
+          {
+            "name": "Containers and container images",
+            "definition": "Packaged application filesystems that run as isolated processes.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Tilt builds images whenever code changes."
+          }
+        ]
+      },
+      {
+        "concept": "Build host bootstrap (make bootstrap)",
+        "prerequisites": [
+          {
+            "name": "Rust toolchain and Cargo",
+            "definition": "Rust's compiler and package/build tool.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Bootstrap installs rustup and the cargo tooling."
+          },
+          {
+            "name": "Cross-architecture emulation (binfmt/QEMU)",
+            "definition": "QEMU registration that lets a host build and run images for another architecture.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Bootstrap sets up Docker with emulation."
+          }
+        ]
+      },
+      {
+        "concept": "Rust toolchain and Cargo",
+        "prerequisites": []
+      },
+      {
+        "concept": "Building all images (make images)",
+        "prerequisites": [
+          {
+            "name": "Multi-architecture image manifest",
+            "definition": "A single tag that points to images for each architecture.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The targets assemble the multi-architecture tags and then check their platforms."
+          },
+          {
+            "name": "Container registry",
+            "definition": "A server that stores and serves images.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The targets push the images to a registry."
+          },
+          {
+            "name": "Build host bootstrap (make bootstrap)",
+            "definition": "The one-time setup of the build host.",
+            "kind": "procedural",
+            "confidence": 0.7,
+            "why": "The full build needs the tooling that bootstrap installs."
+          },
+          {
+            "name": "Boot artifacts",
+            "definition": "The OS images and binaries that NICo serves to network-boot machines.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "The boot-artifact images can optionally be built too."
+          }
+        ]
+      },
+      {
+        "concept": "Boot artifacts",
+        "prerequisites": [
+          {
+            "name": "PXE / iPXE boot",
+            "definition": "Booting a machine over the network.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Boot artifacts are what network-booting hosts download."
+          },
+          {
+            "name": "Containers and container images",
+            "definition": "Packaged application filesystems that run as isolated processes.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The artifacts are packaged into containers."
+          }
+        ]
+      },
+      {
+        "concept": "DPU BFB",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit, a NIC with its own Arm cores.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "A BFB installs software on a BlueField DPU."
+          },
+          {
+            "name": "Boot artifacts",
+            "definition": "The OS images that NICo serves to boot machines.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "NICo builds the BFB as one of its boot artifacts."
+          }
+        ]
+      },
+      {
+        "concept": "setup.sh orchestrator",
+        "prerequisites": [
+          {
+            "name": "Helm and helmfile",
+            "definition": "The Kubernetes package manager and its multi-release tool.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The script installs its components as Helm releases."
+          },
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Everything the script installs goes into a cluster."
+          },
+          {
+            "name": "Idempotency",
+            "definition": "Repeating an operation gives the same result as running it once.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Upgrades rely on the script being safe to re-run."
+          }
+        ]
+      },
+      {
+        "concept": "Preflight checks (preflight.sh)",
+        "prerequisites": [
+          {
+            "name": "setup.sh orchestrator",
+            "definition": "The phased script that installs NICo.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The preflight checks run at the start of setup.sh."
+          },
+          {
+            "name": "MetalLB LoadBalancer VIPs",
+            "definition": "External IPs for LoadBalancer Services on bare metal, supplied by MetalLB.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "One of the checks validates the MetalLB config."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes workload and config objects",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "These objects are Kubernetes resources."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+        "prerequisites": [
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "The basic Kubernetes resources, including Services.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "These are variants of the Service object."
+          }
+        ]
+      },
+      {
+        "concept": "Persistent storage (StorageClass, PVC, local-path-provisioner)",
+        "prerequisites": [
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "The basic Kubernetes resources, such as pods and StatefulSets.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Volume claims are mounted by pods and StatefulSets."
+          }
+        ]
+      },
+      {
+        "concept": "Helm and helmfile",
+        "prerequisites": [
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "The basic Kubernetes resources.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Charts package Kubernetes manifests."
+          },
+          {
+            "name": "YAML",
+            "definition": "A human-readable data format that uses indentation for structure.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Charts and values files are written in YAML."
+          }
+        ]
+      },
+      {
+        "concept": "Kustomize",
+        "prerequisites": [
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "The basic Kubernetes resources.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Kustomize changes Kubernetes manifests."
+          },
+          {
+            "name": "YAML",
+            "definition": "A human-readable data format that uses indentation for structure.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Overlays are YAML files."
+          }
+        ]
+      },
+      {
+        "concept": "Out-of-band (OOB) management network",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "The management controller on a server.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "This network connects the BMCs."
+          },
+          {
+            "name": "DHCP",
+            "definition": "A protocol that assigns IP addresses automatically.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The switches relay the BMCs' DHCP requests."
+          },
+          {
+            "name": "Virtual IP address (VIP)",
+            "definition": "A stable IP address assigned to a service.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The relays point at the nico-dhcp VIP."
+          }
+        ]
+      },
+      {
+        "concept": "NTP time synchronization",
+        "prerequisites": [
+          {
+            "name": "DHCP",
+            "definition": "A protocol that assigns IP addresses and options automatically.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "NTP server addresses are handed to DPUs through DHCP."
+          }
+        ]
+      },
+      {
+        "concept": "Virtual IP address (VIP)",
+        "prerequisites": [
+          {
+            "name": "IP addressing basics",
+            "definition": "How IP addresses identify hosts on a network.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "A VIP is an IP address that is not bound to one machine."
+          }
+        ]
+      },
+      {
+        "concept": "Layer 2 advertisement (ARP)",
+        "prerequisites": [
+          {
+            "name": "MetalLB LoadBalancer VIPs",
+            "definition": "External IPs for LoadBalancer Services on bare metal, supplied by MetalLB.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "L2 advertisement is a MetalLB mode."
+          },
+          {
+            "name": "Virtual IP address (VIP)",
+            "definition": "A stable IP address assigned to a service.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The VIP is the address being announced over ARP."
+          }
+        ]
+      },
+      {
+        "concept": "VLAN",
+        "prerequisites": [
+          {
+            "name": "Layer 2 Ethernet networking",
+            "definition": "How switches forward frames by MAC address within a local network segment.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "VLANs split a Layer 2 network into segments."
+          }
+        ]
+      },
+      {
+        "concept": "siteConfig (site TOML configuration)",
+        "prerequisites": [
+          {
+            "name": "TOML",
+            "definition": "A simple key-value configuration file format.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "siteConfig is written in TOML."
+          },
+          {
+            "name": "NICo resource pools",
+            "definition": "Operator-configured ranges of values that NICo allocates.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "siteConfig defines the resource pools."
+          },
+          {
+            "name": "CIDR prefixes and /31 point-to-point subnets",
+            "definition": "Notation for IP address ranges.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The fabric and deny prefixes are given in CIDR notation."
+          },
+          {
+            "name": "Helm chart values",
+            "definition": "Configuration files that customize a Helm deployment.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "siteConfig sits inside the nico-core.yaml values file."
+          }
+        ]
+      }
+    ]
+  }
+}

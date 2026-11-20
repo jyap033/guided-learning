@@ -1,0 +1,271 @@
+{
+  "kind": "dedupe",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "groups": [
+      {
+        "keep": "pxe-ipxe-boot",
+        "merge": [
+          "pxe-ipxe-network-boot",
+          "pxe-and-ipxe-boot"
+        ]
+      },
+      {
+        "keep": "tpm-and-measured-boot-attestation",
+        "merge": [
+          "measured-boot-with-tpm-2-0",
+          "measured-boot-attestation"
+        ]
+      },
+      {
+        "keep": "kubernetes",
+        "merge": [
+          "kubernetes-cluster"
+        ]
+      },
+      {
+        "keep": "kubernetes-operator-crds",
+        "merge": [
+          "kubernetes-operator"
+        ]
+      },
+      {
+        "keep": "pki-and-tls-certificates",
+        "merge": [
+          "public-key-infrastructure-and-ca-trust"
+        ]
+      },
+      {
+        "keep": "tls-certificates-and-x-509-san",
+        "merge": [
+          "tls-certificate"
+        ]
+      },
+      {
+        "keep": "temporal-workflow-engine",
+        "merge": [
+          "temporal-workflows"
+        ]
+      },
+      {
+        "keep": "oidc-jwt-authentication",
+        "merge": [
+          "openid-connect-and-identity-providers"
+        ]
+      },
+      {
+        "keep": "gitops-with-argocd",
+        "merge": [
+          "argo-cd"
+        ]
+      },
+      {
+        "keep": "serial-over-lan-and-ssh-console-service",
+        "merge": [
+          "ssh-console"
+        ]
+      },
+      {
+        "keep": "hardware-health-service",
+        "merge": [
+          "nico-hardware-health"
+        ]
+      },
+      {
+        "keep": "container-registry",
+        "merge": [
+          "container-image-registry"
+        ]
+      },
+      {
+        "keep": "building-all-images",
+        "merge": [
+          "building-nico-containers"
+        ]
+      },
+      {
+        "keep": "infiniband-partitioning-with-ufm",
+        "merge": [
+          "infiniband-partitions-and-ufm",
+          "infiniband-partitioning-and-ufm"
+        ]
+      },
+      {
+        "keep": "cidr-prefixes-and-31-point-to-point-subnets",
+        "merge": [
+          "ip-subnets-and-cidr-notation"
+        ]
+      },
+      {
+        "keep": "postgresql",
+        "merge": [
+          "zalando-postgres-operator"
+        ]
+      },
+      {
+        "keep": "dns",
+        "merge": [
+          "nico-dns-and-unbound"
+        ]
+      },
+      {
+        "keep": "nico-dhcp-and-kea-hook",
+        "merge": [
+          "kea-dhcp-server-with-nico-hook"
+        ]
+      },
+      {
+        "keep": "hardware-discovery-and-ingestion",
+        "merge": [
+          "host-ingestion",
+          "machine-ingestion"
+        ]
+      },
+      {
+        "keep": "sku-validation",
+        "merge": [
+          "sku-and-bom-validation"
+        ]
+      },
+      {
+        "keep": "expected-machines-manifest",
+        "merge": [
+          "expected-machines"
+        ]
+      },
+      {
+        "keep": "site-wide-bmc-root-credential",
+        "merge": [
+          "bmc-site-wide-root-credential"
+        ]
+      },
+      {
+        "keep": "day-0-day-1-day-2-lifecycle",
+        "merge": [
+          "day-0-vs-day-1-configuration"
+        ]
+      },
+      {
+        "keep": "tenant-instance",
+        "merge": [
+          "bare-metal-instance-and-tenant"
+        ]
+      },
+      {
+        "keep": "machine-capabilities-and-instance-types",
+        "merge": [
+          "instance-type-and-machine-capabilities"
+        ]
+      },
+      {
+        "keep": "multi-tenancy",
+        "merge": [
+          "multi-tenancy-and-isolation"
+        ]
+      },
+      {
+        "keep": "nvlink-switch-tray",
+        "merge": [
+          "nvlink-switch"
+        ]
+      },
+      {
+        "keep": "optimistic-concurrency-stale-write-protection",
+        "merge": [
+          "optimistic-concurrency-with-versions"
+        ]
+      },
+      {
+        "keep": "worklock-lease-and-fencing",
+        "merge": [
+          "leader-lease-work-lock"
+        ]
+      },
+      {
+        "keep": "aggregated-host-health",
+        "merge": [
+          "aggregate-host-health"
+        ]
+      },
+      {
+        "keep": "managed-host-lifecycle",
+        "merge": [
+          "machine-state-machine"
+        ]
+      },
+      {
+        "keep": "uefi-bios-settings",
+        "merge": [
+          "uefi-bios-configuration"
+        ]
+      },
+      {
+        "keep": "host-reprovision",
+        "merge": [
+          "firmware-upgrade-host-reprovision"
+        ]
+      },
+      {
+        "keep": "dpu-reprovisioning",
+        "merge": [
+          "dpu-reprovision"
+        ]
+      },
+      {
+        "keep": "force-delete-of-managed-host",
+        "merge": [
+          "force-deletion"
+        ]
+      },
+      {
+        "keep": "nic-firmware-recovery-engine",
+        "merge": [
+          "nic-firmware-recovery"
+        ]
+      },
+      {
+        "keep": "supernic-lockdown",
+        "merge": [
+          "supernic-lockdown-and-ikm-keys"
+        ]
+      },
+      {
+        "keep": "mellanox-firmware-tools",
+        "merge": [
+          "mlx-configuration"
+        ]
+      },
+      {
+        "keep": "machine-id",
+        "merge": [
+          "machineid"
+        ]
+      },
+      {
+        "keep": "siteconfig",
+        "merge": [
+          "nico-site-config"
+        ]
+      },
+      {
+        "keep": "setup-sh-orchestrator",
+        "merge": [
+          "setup-sh-automated-install"
+        ]
+      },
+      {
+        "keep": "dpu-mode-vs-nic-mode",
+        "merge": [
+          "bluefield-operating-mode"
+        ]
+      },
+      {
+        "keep": "ntp-time-synchronization",
+        "merge": [
+          "clock-synchronization"
+        ]
+      }
+    ]
+  }
+}

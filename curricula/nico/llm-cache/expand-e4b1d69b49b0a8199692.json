@@ -1,0 +1,207 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "Server hardware basics",
+        "prerequisites": []
+      },
+      {
+        "concept": "Network interface card (NIC)",
+        "prerequisites": [
+          {
+            "name": "Server hardware basics",
+            "definition": "How a physical server is built: CPU, memory, drives, NICs and firmware, and how servers sit in datacenter racks.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "A NIC is a server component, so you need a picture of server hardware first."
+          }
+        ]
+      },
+      {
+        "concept": "Computer networking basics (IP, subnets)",
+        "prerequisites": []
+      },
+      {
+        "concept": "REST APIs and HTTPS",
+        "prerequisites": [
+          {
+            "name": "HTTP and web APIs",
+            "definition": "How clients call servers over HTTP, including headers, status codes and tokens.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "REST builds on HTTP verbs, URLs and status codes."
+          }
+        ]
+      },
+      {
+        "concept": "Microservices architecture",
+        "prerequisites": [
+          {
+            "name": "HTTP and web APIs",
+            "definition": "How clients call servers over HTTP, including headers, status codes and tokens.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Services talk to each other over network APIs."
+          }
+        ]
+      },
+      {
+        "concept": "Containers",
+        "prerequisites": [
+          {
+            "name": "Linux system administration basics",
+            "definition": "Configuring users, packages, files and services on a Linux OS.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Containers are isolated Linux processes with their own filesystems and packages."
+          }
+        ]
+      },
+      {
+        "concept": "Linux system administration basics",
+        "prerequisites": []
+      },
+      {
+        "concept": "Cryptographic hashing",
+        "prerequisites": []
+      },
+      {
+        "concept": "IP networking fundamentals",
+        "prerequisites": [
+          {
+            "name": "Layer 2 Ethernet networking",
+            "definition": "How switches forward frames by MAC address within a local network segment.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "IP routing runs on top of Ethernet switching."
+          },
+          {
+            "name": "IP addressing basics",
+            "definition": "How IP addresses identify hosts on a network.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Subnets and routing build on IP addresses."
+          }
+        ]
+      },
+      {
+        "concept": "Relational databases and SQL",
+        "prerequisites": []
+      },
+      {
+        "concept": "Public-key cryptography",
+        "prerequisites": [
+          {
+            "name": "Cryptographic hashing",
+            "definition": "One-way functions that produce a fixed-size digest of data.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Digital signatures sign a hash of the data."
+          }
+        ]
+      },
+      {
+        "concept": "SSH",
+        "prerequisites": [
+          {
+            "name": "Public-key cryptography",
+            "definition": "Cryptography that uses a public/private key pair for encryption and digital signatures.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "SSH logs you in with key pairs and checks host keys."
+          },
+          {
+            "name": "IP addressing basics",
+            "definition": "How IP addresses identify hosts on a network.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "You connect to remote hosts by their address."
+          }
+        ]
+      },
+      {
+        "concept": "HTTP and web APIs",
+        "prerequisites": []
+      },
+      {
+        "concept": "Git version control",
+        "prerequisites": []
+      },
+      {
+        "concept": "Asynchronous programming (async/await)",
+        "prerequisites": []
+      },
+      {
+        "concept": "Linux memory and cgroups",
+        "prerequisites": [
+          {
+            "name": "Linux system administration basics",
+            "definition": "Configuring users, packages, files and services on a Linux OS.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Cgroups and memory accounting are Linux OS features that build on knowing processes and services."
+          }
+        ]
+      },
+      {
+        "concept": "Firewall rules",
+        "prerequisites": [
+          {
+            "name": "IP networking fundamentals",
+            "definition": "How IP addresses, subnets, switches and routers move packets between machines on Ethernet networks.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Firewall rules match on addresses, ports and protocols."
+          }
+        ]
+      },
+      {
+        "concept": "Containers and container images",
+        "prerequisites": [
+          {
+            "name": "Linux system administration basics",
+            "definition": "Configuring users, packages, files and services on a Linux OS.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Images package Linux filesystems and installed packages, and Dockerfiles script admin steps."
+          }
+        ]
+      },
+      {
+        "concept": "CPU architectures (amd64 vs arm64)",
+        "prerequisites": [
+          {
+            "name": "Server hardware basics",
+            "definition": "How a physical server is built: CPU, memory, drives, NICs and firmware, and how servers sit in datacenter racks.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "It helps to know what a CPU is and what role it plays."
+          }
+        ]
+      },
+      {
+        "concept": "YAML",
+        "prerequisites": []
+      },
+      {
+        "concept": "IP addressing basics",
+        "prerequisites": []
+      },
+      {
+        "concept": "Layer 2 Ethernet networking",
+        "prerequisites": [
+          {
+            "name": "Network interface card (NIC)",
+            "definition": "The hardware that connects a server to a network.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "MAC addresses belong to NICs, and switches forward frames between NIC ports."
+          }
+        ]
+      }
+    ]
+  }
+}

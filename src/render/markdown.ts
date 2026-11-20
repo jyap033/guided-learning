@@ -43,12 +43,19 @@ export function renderCurriculum(cur: Curriculum, docsBase: string): string {
   out.push(`**Assumed starting knowledge:** ${floor.map((c) => c.name).join("; ")}.`, "");
   if (known.length) out.push(`**Skipped because you know them:** ${known.map((c) => c.name).join(", ")}.`, "");
 
-  out.push("## Chapters", "");
-  for (const ch of cur.chapters) out.push(`${ch.number}. [${ch.title}](#chapter-${ch.number}) (${ch.concepts.length})`);
+  out.push("## Contents", "");
+  let lastPart = "";
+  for (const ch of cur.chapters) {
+    if (ch.part !== lastPart) {
+      out.push("", `**${ch.part}**`, "");
+      lastPart = ch.part;
+    }
+    out.push(`${ch.number}. [${ch.title}](#chapter-${ch.number}) (${ch.concepts.length})`);
+  }
   out.push("");
 
   for (const ch of cur.chapters) {
-    out.push(`<a id="chapter-${ch.number}"></a>`, `## Chapter ${ch.number}: ${ch.title}`, "");
+    out.push(`<a id="chapter-${ch.number}"></a>`, `## Chapter ${ch.number}: ${ch.title}`, "", `*Part: ${ch.part}*`, "");
     const needs = new Set<number>();
     for (const id of ch.concepts) for (const p of prereqs.get(id) ?? []) {
       const n = chapterOf.get(p);

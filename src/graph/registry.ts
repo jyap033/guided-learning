@@ -55,11 +55,18 @@ export interface ConceptInput {
 }
 
 /**
- * Holds the concept set and merges duplicates deterministically: two names are
- * the same concept if any of their match keys (name or aliases) collide.
+ * Holds the concept set and merges duplicates deterministically. A new
+ * concept merges into an existing one when its name matches the existing
+ * concept's name or one of its aliases, or when one of its aliases matches the
+ * existing concept's name. Two concepts that merely share an alias stay
+ * separate: models often list loose aliases (config keys, related terms), and
+ * merging on those joins unrelated ideas.
  */
 export class ConceptRegistry {
   private byId = new Map<string, Concept>();
+  /** Keys of canonical names (and names absorbed by merges). */
+  private byNameKey = new Map<string, string>();
+  /** Keys of aliases. */
   private byKey = new Map<string, string>();
 
   get size(): number {
@@ -74,9 +81,14 @@ export class ConceptRegistry {
     return this.byId.get(id);
   }
 
+  /** Look up a concept by name or alias (names win). */
   find(name: string): Concept | undefined {
+    return this.findIn(this.byNameKey, name) ?? this.findIn(this.byKey, name);
+  }
+
+  private findIn(index: Map<string, string>, name: string): Concept | undefined {
     for (const k of matchKeys(name)) {
-      const id = this.byKey.get(k);
+      const id = index.get(k);
       if (id) return this.byId.get(id);
     }
     return undefined;
@@ -85,7 +97,9 @@ export class ConceptRegistry {
   /** Add a concept or merge it into an existing match. Returns the concept id. */
   add(input: ConceptInput): string {
     const names = [input.name, ...(input.aliases ?? [])];
-    const existing = names.map((n) => this.find(n)).find((c) => c !== undefined);
+    const existing =
+      this.find(input.name) ??
+      (input.aliases ?? []).map((a) => this.findIn(this.byNameKey, a)).find((c) => c !== undefined);
     if (existing) {
       this.mergeInto(existing, input);
       return existing.id;
@@ -105,7 +119,7 @@ export class ConceptRegistry {
       known: false,
     };
     this.byId.set(id, concept);
-    this.indexNames(concept, names);
+    this.indexNames(concept, [input.name], input.aliases ?? []);
     return id;
   }
 
@@ -121,12 +135,14 @@ export class ConceptRegistry {
     // docs beats prerequisite; floor stays floor
     if (c.origin === "prerequisite" && input.origin === "docs") c.origin = "docs";
     if (input.origin === "floor") c.origin = "floor";
-    this.indexNames(c, names);
+    this.indexNames(c, [input.name], input.aliases ?? []);
   }
 
-  private indexNames(c: Concept, names: string[]): void {
-    for (const n of names) for (const k of matchKeys(n)) if (!this.byKey.has(k)) this.byKey.set(k, c.id);
+  private indexNames(c: Concept, names: string[], aliases: string[]): void {
+    for (const n of names) for (const k of matchKeys(n)) if (!this.byNameKey.has(k)) this.byNameKey.set(k, c.id);
+    for (const n of aliases) for (const k of matchKeys(n)) if (!this.byKey.has(k)) this.byKey.set(k, c.id);
   }
+
 
   /** Merge concept `dropId` into `keepId` (used by the AI dedupe pass). */
   absorb(keepId: string, dropId: string): void {
@@ -143,6 +159,6 @@ export class ConceptRegistry {
       depth: drop.depth,
     });
     this.byId.delete(dropId);
-    for (const [k, v] of this.byKey) if (v === dropId) this.byKey.set(k, keepId);
+    for (const index of [this.byNameKey, this.byKey]) for (const [k, v] of index) if (v === dropId) index.set(k, keepId);
   }
 }

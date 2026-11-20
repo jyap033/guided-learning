@@ -1,0 +1,844 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "NICo (NVIDIA Infra Controller)",
+        "prerequisites": [
+          {
+            "name": "Bare-metal lifecycle management",
+            "definition": "Managing physical servers from racking through provisioning, operation and cleanup for reuse.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "NICo exists to automate bare-metal lifecycle management."
+          },
+          {
+            "name": "Zero-trust host model",
+            "definition": "The principle that host OS software is never trusted, so enforcement happens on the DPU and monitoring happens out-of-band.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "NICo's design is built around zero-trust management of hosts."
+          },
+          {
+            "name": "BlueField DPU",
+            "definition": "An NVIDIA SmartNIC with its own ARM CPU, OS and BMC, used as NICo's trust anchor.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Provisioning DPUs and enforcing isolation through them is a core NICo function."
+          }
+        ]
+      },
+      {
+        "concept": "Bare-metal lifecycle management",
+        "prerequisites": [
+          {
+            "name": "Server hardware basics",
+            "definition": "How a physical server is built: CPU, memory, drives, NICs and firmware, and how servers sit in datacenter racks.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "You need to know what a physical server is before you can manage its lifecycle."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Several customers sharing the same physical infrastructure while staying isolated from each other.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "The goal of making machines behave like cloud instances assumes they are shared and reused across tenants."
+          }
+        ]
+      },
+      {
+        "concept": "Managed Host",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "An NVIDIA SmartNIC with its own ARM CPU, OS and BMC.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "A managed host is defined as a host paired with DPUs."
+          },
+          {
+            "name": "Bare-metal lifecycle management",
+            "definition": "Managing physical servers through their whole lifecycle.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Managed hosts are the units that move through lifecycle management."
+          }
+        ]
+      },
+      {
+        "concept": "BlueField DPU",
+        "prerequisites": [
+          {
+            "name": "Network interface card (NIC)",
+            "definition": "The hardware that connects a server to a network.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "A DPU is a SmartNIC, so you first need to understand a plain NIC."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An independent controller that allows remote power control, monitoring and firmware updates.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "A DPU has its own BMC, which NICo manages."
+          },
+          {
+            "name": "Server hardware basics",
+            "definition": "The components of a physical server, such as CPU, memory, drives, NICs and firmware.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "A DPU is a card installed in a host server and works alongside it."
+          }
+        ]
+      },
+      {
+        "concept": "DPU mode vs NIC mode",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "An NVIDIA SmartNIC with its own ARM CPU and OS.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "These are the two operating modes of a BlueField."
+          },
+          {
+            "name": "DHCP",
+            "definition": "The protocol devices use to get IP addresses automatically.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The practical difference between the modes is where DHCP is served."
+          },
+          {
+            "name": "HostInband Network Segment",
+            "definition": "The network segment that carries host in-band traffic.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Hosts in NIC mode and zero-DPU hosts use central DHCP on HostInband."
+          }
+        ]
+      },
+      {
+        "concept": "Baseboard Management Controller (BMC)",
+        "prerequisites": [
+          {
+            "name": "Server hardware basics",
+            "definition": "The components of a physical server, such as CPU, memory, drives, NICs and firmware.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "A BMC is a component of server hardware that runs separately from the main system."
+          },
+          {
+            "name": "Computer networking basics (IP, subnets)",
+            "definition": "IP addresses, subnets, switches and how hosts talk over a network.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "A BMC is reached over a management network."
+          }
+        ]
+      },
+      {
+        "concept": "Redfish API",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An independent controller on a server or DPU used for remote management.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Redfish is the API that BMCs expose."
+          },
+          {
+            "name": "REST APIs and HTTPS",
+            "definition": "Web APIs that use HTTP verbs on resource URLs, usually exchanging JSON over TLS.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Redfish is a REST/HTTPS API."
+          }
+        ]
+      },
+      {
+        "concept": "Out-of-band (OOB) management",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An independent controller on a server or DPU used for remote management.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "OOB management is carried out through BMCs."
+          },
+          {
+            "name": "Computer networking basics (IP, subnets)",
+            "definition": "IP addresses, subnets, switches and how hosts talk over a network.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "OOB management relies on a separate management network."
+          }
+        ]
+      },
+      {
+        "concept": "Zero-trust host model",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "An NVIDIA SmartNIC with its own ARM CPU and OS.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "In this model, enforcement happens on the DPU."
+          },
+          {
+            "name": "Out-of-band (OOB) management",
+            "definition": "Managing hardware through BMCs on a separate network, without going through the host OS.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "In this model, monitoring happens out-of-band."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Several customers sharing the same physical infrastructure while staying isolated from each other.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Host software is untrusted because tenants control it."
+          }
+        ]
+      },
+      {
+        "concept": "Site Controller",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "The site controller runs on a Kubernetes cluster."
+          },
+          {
+            "name": "Microservices architecture",
+            "definition": "Building a system as many small, independently deployed services that talk over the network.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The site controller is a suite of microservices."
+          }
+        ]
+      },
+      {
+        "concept": "API Service (NICo Core)",
+        "prerequisites": [
+          {
+            "name": "Site Controller",
+            "definition": "The NICo control plane running on Kubernetes.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The API Service is the central service of the site controller."
+          },
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "A model where resources move through defined states with controlled transitions.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The API Service implements state machines for managed resources."
+          },
+          {
+            "name": "PostgreSQL (Zalando operator)",
+            "definition": "The relational database that stores NICo's state.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The API Service is the only service that reads and writes PostgreSQL."
+          },
+          {
+            "name": "mTLS / gRPC",
+            "definition": "A binary RPC protocol used over mutually authenticated TLS.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Other services talk to the API Service over mTLS/gRPC."
+          }
+        ]
+      },
+      {
+        "concept": "State machine (resource lifecycle)",
+        "prerequisites": []
+      },
+      {
+        "concept": "NICo REST (JSON API)",
+        "prerequisites": [
+          {
+            "name": "REST APIs and HTTPS",
+            "definition": "Web APIs that use HTTP verbs on resource URLs, usually exchanging JSON over TLS.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "NICo REST is a REST/JSON API."
+          },
+          {
+            "name": "OIDC / JWT authentication (Keycloak)",
+            "definition": "Token-based authentication where an identity provider issues signed JWTs.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "NICo REST authenticates callers with JWT."
+          },
+          {
+            "name": "API Service (NICo Core)",
+            "definition": "NICo's central control-plane service.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "NICo REST exposes the functions the API Service provides."
+          }
+        ]
+      },
+      {
+        "concept": "Site Agent",
+        "prerequisites": [
+          {
+            "name": "NICo REST (JSON API)",
+            "definition": "The REST API that exposes NICo to operators.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The Site Agent connects sites to NICo REST."
+          },
+          {
+            "name": "API Service (NICo Core)",
+            "definition": "NICo's central control-plane service.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The Site Agent passes requests on to the local API Service."
+          },
+          {
+            "name": "Temporal workflow engine",
+            "definition": "A durable workflow orchestration system.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The Site Agent's connection to NICo REST runs over Temporal."
+          }
+        ]
+      },
+      {
+        "concept": "Admin CLI",
+        "prerequisites": [
+          {
+            "name": "API Service (NICo Core)",
+            "definition": "NICo's central control-plane service.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The Admin CLI connects directly to the API Service."
+          },
+          {
+            "name": "mTLS / gRPC",
+            "definition": "A binary RPC protocol used over mutually authenticated TLS.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The CLI connects using mTLS/gRPC, which requires client certificates."
+          }
+        ]
+      },
+      {
+        "concept": "Scout",
+        "prerequisites": [
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "NICo's Day 0 process of finding hosts and bringing them under management.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Scout runs as part of the discovery process."
+          },
+          {
+            "name": "API Service (NICo Core)",
+            "definition": "NICo's central control-plane service.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Scout reports its results to the API Service."
+          },
+          {
+            "name": "PXE / iPXE boot",
+            "definition": "Booting a machine over the network.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Scout is a temporary agent that is network-booted onto the host."
+          }
+        ]
+      },
+      {
+        "concept": "DPU Agent",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "An NVIDIA SmartNIC with its own ARM CPU and OS.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The DPU Agent runs on the DPU's ARM OS."
+          },
+          {
+            "name": "Host-Based Networking (HBN)",
+            "definition": "NVIDIA's container-based routing stack on the DPU.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The agent applies network configuration through HBN."
+          },
+          {
+            "name": "API Service (NICo Core)",
+            "definition": "NICo's central control-plane service.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The agent polls the API Service for the desired configuration."
+          },
+          {
+            "name": "Desired vs actual state reconciliation",
+            "definition": "Repeatedly comparing the target state with the observed state and correcting any difference.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The agent's poll-apply-report loop is a reconciliation loop."
+          }
+        ]
+      },
+      {
+        "concept": "Metadata Service (FMDS)",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "An NVIDIA SmartNIC with its own ARM CPU and OS.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "FMDS runs on the DPU."
+          },
+          {
+            "name": "Instance and instance type",
+            "definition": "A host allocated to a tenant, and the hardware class used to request it.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "FMDS serves metadata about the instance."
+          },
+          {
+            "name": "REST APIs and HTTPS",
+            "definition": "Web APIs that use HTTP verbs on resource URLs.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "FMDS is a local HTTP API."
+          }
+        ]
+      },
+      {
+        "concept": "Host-Based Networking (HBN)",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "An NVIDIA SmartNIC with its own ARM CPU and OS.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "HBN runs on the DPU."
+          },
+          {
+            "name": "VXLAN / EVPN",
+            "definition": "An overlay tunneling technique (VXLAN) and the BGP-based control plane that distributes its routes (EVPN).",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "HBN enforces tenant isolation using VXLAN/EVPN."
+          },
+          {
+            "name": "Containers",
+            "definition": "Lightweight isolated packages of an application and its dependencies.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "HBN runs its routing stack in containers."
+          }
+        ]
+      },
+      {
+        "concept": "mTLS / gRPC",
+        "prerequisites": [
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "Certificates issued by certificate authorities that prove identity and enable encrypted connections.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Mutual TLS depends on both sides presenting certificates."
+          },
+          {
+            "name": "Protocol Buffers",
+            "definition": "Google's binary serialization format and schema language.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "gRPC messages and services are defined with protobuf."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes",
+        "prerequisites": [
+          {
+            "name": "Containers",
+            "definition": "Lightweight isolated packages of an application and its dependencies.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Kubernetes orchestrates containers."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes Operator / CRDs",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Operators and CRDs extend Kubernetes."
+          },
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "Core Kubernetes resources such as Pods, Deployments and ConfigMaps.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Custom resources follow the same pattern as the built-in objects."
+          }
+        ]
+      },
+      {
+        "concept": "DHCP",
+        "prerequisites": [
+          {
+            "name": "Computer networking basics (IP, subnets)",
+            "definition": "IP addresses, subnets, switches and how hosts talk over a network.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "DHCP hands out IP addresses within subnets."
+          }
+        ]
+      },
+      {
+        "concept": "PXE / iPXE boot",
+        "prerequisites": [
+          {
+            "name": "DHCP",
+            "definition": "The protocol devices use to get IP addresses automatically.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "PXE uses DHCP to find its boot server."
+          },
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "The server firmware that initializes hardware and picks the boot device.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Network boot is started by the firmware."
+          }
+        ]
+      },
+      {
+        "concept": "cloud-init",
+        "prerequisites": [
+          {
+            "name": "Linux system administration basics",
+            "definition": "Configuring users, packages, files and services on a Linux OS.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "cloud-init automates first-boot OS configuration."
+          }
+        ]
+      },
+      {
+        "concept": "DNS (authoritative and recursive)",
+        "prerequisites": [
+          {
+            "name": "Computer networking basics (IP, subnets)",
+            "definition": "IP addresses, subnets, switches and how hosts talk over a network.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "DNS maps names to IP addresses."
+          }
+        ]
+      },
+      {
+        "concept": "UEFI firmware and Secure Boot",
+        "prerequisites": [
+          {
+            "name": "Server hardware basics",
+            "definition": "The components of a physical server, such as CPU, memory, drives, NICs and firmware.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "UEFI is the firmware that initializes server hardware."
+          },
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "Certificates and signatures issued by certificate authorities.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "Secure Boot checks signatures on bootloaders and kernels."
+          }
+        ]
+      },
+      {
+        "concept": "UEFI lockdown",
+        "prerequisites": [
+          {
+            "name": "UEFI/BIOS settings",
+            "definition": "Configurable firmware options on a server.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Lockdown locks these settings."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An independent controller used for remote management.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Lockdown also disables in-band host-to-BMC access."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Shared infrastructure with isolated tenants.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The point of lockdown is to stop a tenant from changing firmware configuration."
+          }
+        ]
+      },
+      {
+        "concept": "TPM and Measured Boot attestation",
+        "prerequisites": [
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "Server firmware and the signed-boot chain.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Measured boot records each component in the firmware boot chain."
+          },
+          {
+            "name": "Cryptographic hashing",
+            "definition": "One-way functions that produce a fixed-size digest of data.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "PCRs store hashes of boot components."
+          },
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "Certificates and signatures issued by certificate authorities.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Attestation verifies TPM signatures against the manufacturer CA."
+          }
+        ]
+      },
+      {
+        "concept": "Hardware discovery and ingestion",
+        "prerequisites": [
+          {
+            "name": "Redfish API",
+            "definition": "The REST API that BMCs expose for out-of-band management.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Inventory is collected through Redfish."
+          },
+          {
+            "name": "DHCP",
+            "definition": "Automatic IP address assignment.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "BMCs are found through their relayed DHCP requests."
+          },
+          {
+            "name": "LLDP",
+            "definition": "A layer-2 protocol for advertising identity to directly connected neighbors.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "DPU-to-host pairing uses LLDP."
+          },
+          {
+            "name": "Expected Machines Manifest",
+            "definition": "A JSON list of hosts that are allowed to be ingested.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Only hosts listed in the manifest are ingested."
+          }
+        ]
+      },
+      {
+        "concept": "LLDP",
+        "prerequisites": [
+          {
+            "name": "Computer networking basics (IP, subnets)",
+            "definition": "IP addresses, subnets, switches and how hosts talk over a network.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "LLDP works between neighboring devices on a layer-2 link."
+          }
+        ]
+      },
+      {
+        "concept": "SKU validation and burn-in",
+        "prerequisites": [
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "NICo's Day 0 process of finding hosts and bringing them under management.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Validation compares the discovered inventory against the expected SKU."
+          },
+          {
+            "name": "Network planes (Ethernet, InfiniBand, NVLink)",
+            "definition": "The separate network fabrics that connect hosts.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Burn-in includes NVLink and InfiniBand multi-node tests."
+          }
+        ]
+      },
+      {
+        "concept": "Firmware baseline enforcement",
+        "prerequisites": [
+          {
+            "name": "Firmware inventory and update",
+            "definition": "Listing firmware versions and applying updates through the BMC.",
+            "kind": "procedural",
+            "confidence": 0.8,
+            "why": "Enforcement takes inventory and then updates firmware."
+          },
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "The server firmware that initializes hardware.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "UEFI is one of the firmware types brought to the baseline."
+          },
+          {
+            "name": "Redfish API",
+            "definition": "The REST API that BMCs expose.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Firmware is inventoried and updated through Redfish."
+          }
+        ]
+      },
+      {
+        "concept": "Expected Machines Manifest",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An independent controller used for remote management.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The manifest lists BMC identifiers and credentials."
+          },
+          {
+            "name": "MAC address",
+            "definition": "A hardware address that identifies a network interface.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Hosts in the manifest are keyed by BMC MAC address."
+          },
+          {
+            "name": "Factory default credentials",
+            "definition": "The credentials a device ships with from the factory.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The manifest holds the factory BMC credentials."
+          }
+        ]
+      },
+      {
+        "concept": "Site-wide BMC and UEFI credentials",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An independent controller used for remote management.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "These are BMC passwords."
+          },
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "Server firmware.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "These also cover UEFI passwords."
+          },
+          {
+            "name": "Factory default credentials",
+            "definition": "The credentials a device ships with from the factory.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Site-wide credentials replace the factory defaults."
+          }
+        ]
+      },
+      {
+        "concept": "Day 0 / Day 1 / Day 2 lifecycle",
+        "prerequisites": [
+          {
+            "name": "Bare-metal lifecycle management",
+            "definition": "Managing physical servers through their whole lifecycle.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The three phases divide up the lifecycle."
+          }
+        ]
+      },
+      {
+        "concept": "Instance and instance type",
+        "prerequisites": [
+          {
+            "name": "Managed Host",
+            "definition": "A host paired with DPUs that NICo manages.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "An instance is a managed host allocated to a tenant."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Shared infrastructure with isolated tenants.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Instances are allocated to tenants."
+          }
+        ]
+      },
+      {
+        "concept": "Multi-tenancy",
+        "prerequisites": []
+      },
+      {
+        "concept": "Tenant sanitization",
+        "prerequisites": [
+          {
+            "name": "Instance and instance type",
+            "definition": "A host allocated to a tenant.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Sanitization runs after a tenant releases an instance."
+          },
+          {
+            "name": "Secure Erase",
+            "definition": "A drive-level command that wipes all data.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Secure erase is a core step of sanitization."
+          },
+          {
+            "name": "TPM and Measured Boot attestation",
+            "definition": "TPM-based proof that a host booted untampered.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Sanitization includes a TPM clear and re-attestation."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Shared infrastructure with isolated tenants.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Sanitization prevents data leaking between tenants."
+          }
+        ]
+      },
+      {
+        "concept": "Secure Erase",
+        "prerequisites": [
+          {
+            "name": "Server hardware basics",
+            "definition": "The components of a physical server, including storage drives.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Secure Erase is a command that NVMe/SAS/SATA drives support."
+          }
+        ]
+      }
+    ]
+  }
+}

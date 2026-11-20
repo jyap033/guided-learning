@@ -26,7 +26,8 @@ export function renderMindmap(
   }
   const lines = ["mindmap", `  root((${mermaidLabel(rootName)}))`];
   const walk = (parent: string | null, depth: number) => {
-    for (const t of (kids.get(parent) ?? []).sort((a, b) => a.name.localeCompare(b.name))) {
+    // themes keep the order they were given in: foundational first
+    for (const t of kids.get(parent) ?? []) {
       lines.push(`${"  ".repeat(depth)}${mermaidLabel(t.name)}`);
       walk(t.id, depth + 1);
       const cs = (inTheme.get(t.id) ?? []).sort((a, b) => a.firstSeen - b.firstSeen || a.name.localeCompare(b.name));

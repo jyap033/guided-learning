@@ -41,6 +41,21 @@ describe("buildChapters", () => {
     expect(chapters[0]?.concepts.sort()).toEqual(["dhcp", "ip", "pxe", "vlan"]);
   });
 
+  it("teaches foundational themes first, in the order the themes are listed", () => {
+    // NICo concept with no prerequisites, seen first in the docs: still taught after the earlier themes
+    const chapters = buildChapters({ ...input, ids: [...ids, "health"], conceptTheme: { ...conceptTheme, health: "nico" }, firstSeen: new Map([["health", -1], ...input.firstSeen]) });
+    expect(chapters[0]?.part).toBe("Networking");
+    expect(chapters[chapters.length - 1]?.concepts).toContain("health");
+  });
+
+  it("names chapters after their sub-themes", () => {
+    const sub: Theme[] = [...themes, { id: "boot", name: "Booting", parent: "net" }, { id: "addr", name: "Addressing", parent: "net" }];
+    const chapters = buildChapters({ ...input, themes: sub, conceptTheme: { ...conceptTheme, ip: "addr", vlan: "addr", dhcp: "boot", pxe: "boot" } });
+    const net = chapters.filter((c) => c.part === "Networking");
+    expect(net.map((c) => c.title).join(" | ")).toMatch(/Addressing|Booting/);
+    expect(validateChapters(chapters, ids, edges)).toEqual([]);
+  });
+
   it("splits a theme that is too big", () => {
     const chapters = buildChapters({ ...input, maxConcepts: 2, minConcepts: 1 });
     expect(chapters.filter((c) => c.theme === "net")).toHaveLength(2);
@@ -49,7 +64,7 @@ describe("buildChapters", () => {
   });
 
   it("validateChapters reports out-of-order prerequisites", () => {
-    const bad = [{ number: 1, title: "x", theme: "net", concepts: ["dhcp", "ip"] }];
+    const bad = [{ number: 1, title: "x", part: "Networking", theme: "net", concepts: ["dhcp", "ip"] }];
     expect(validateChapters(bad, ["ip", "dhcp"], [e("ip", "dhcp")])[0]).toMatch(/before its prerequisite/);
   });
 });

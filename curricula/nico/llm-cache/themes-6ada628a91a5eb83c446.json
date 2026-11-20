@@ -1,0 +1,1598 @@
+{
+  "kind": "themes",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "themes": [
+      {
+        "id": "foundations",
+        "name": "Foundations",
+        "parent": null
+      },
+      {
+        "id": "fnd-hardware",
+        "name": "Hardware Basics",
+        "parent": "foundations"
+      },
+      {
+        "id": "fnd-networking",
+        "name": "Networking Basics",
+        "parent": "foundations"
+      },
+      {
+        "id": "fnd-software",
+        "name": "Software & Linux Basics",
+        "parent": "foundations"
+      },
+      {
+        "id": "fnd-data",
+        "name": "Data & Formats",
+        "parent": "foundations"
+      },
+      {
+        "id": "architecture",
+        "name": "NICo Architecture",
+        "parent": null
+      },
+      {
+        "id": "arch-control-plane",
+        "name": "Control Plane Services",
+        "parent": "architecture"
+      },
+      {
+        "id": "arch-agents",
+        "name": "Host & DPU Agents",
+        "parent": "architecture"
+      },
+      {
+        "id": "arch-state-framework",
+        "name": "State Machine Framework",
+        "parent": "architecture"
+      },
+      {
+        "id": "sm-basics",
+        "name": "State Controller Basics",
+        "parent": "arch-state-framework"
+      },
+      {
+        "id": "sm-safety",
+        "name": "Concurrency & Crash Safety",
+        "parent": "arch-state-framework"
+      },
+      {
+        "id": "hardware-oob",
+        "name": "Hardware & OOB Management",
+        "parent": null
+      },
+      {
+        "id": "hw-bmc-redfish",
+        "name": "BMC & Redfish",
+        "parent": "hardware-oob"
+      },
+      {
+        "id": "hw-dpu",
+        "name": "BlueField DPU",
+        "parent": "hardware-oob"
+      },
+      {
+        "id": "hw-firmware",
+        "name": "UEFI & Firmware",
+        "parent": "hardware-oob"
+      },
+      {
+        "id": "networking",
+        "name": "Networking & Isolation",
+        "parent": null
+      },
+      {
+        "id": "net-underlay",
+        "name": "Underlay & BGP",
+        "parent": "networking"
+      },
+      {
+        "id": "net-overlay",
+        "name": "VXLAN/EVPN Overlay",
+        "parent": "networking"
+      },
+      {
+        "id": "net-vpc",
+        "name": "VPCs & Segments",
+        "parent": "networking"
+      },
+      {
+        "id": "net-dpu",
+        "name": "DPU Networking",
+        "parent": "networking"
+      },
+      {
+        "id": "net-services",
+        "name": "Boot & Network Services",
+        "parent": "networking"
+      },
+      {
+        "id": "net-addressing",
+        "name": "Addressing & Pools",
+        "parent": "networking"
+      },
+      {
+        "id": "net-gpu-fabrics",
+        "name": "GPU Fabrics",
+        "parent": "networking"
+      },
+      {
+        "id": "net-infiniband",
+        "name": "InfiniBand",
+        "parent": "net-gpu-fabrics"
+      },
+      {
+        "id": "net-nvlink",
+        "name": "NVLink",
+        "parent": "net-gpu-fabrics"
+      },
+      {
+        "id": "k8s-deploy",
+        "name": "Kubernetes & Deployment",
+        "parent": null
+      },
+      {
+        "id": "k8s-basics",
+        "name": "Kubernetes Basics",
+        "parent": "k8s-deploy"
+      },
+      {
+        "id": "k8s-networking",
+        "name": "Cluster Networking",
+        "parent": "k8s-deploy"
+      },
+      {
+        "id": "k8s-helm",
+        "name": "Helm & GitOps",
+        "parent": "k8s-deploy"
+      },
+      {
+        "id": "k8s-install",
+        "name": "Installation & Setup",
+        "parent": "k8s-deploy"
+      },
+      {
+        "id": "k8s-build",
+        "name": "Building Images",
+        "parent": "k8s-deploy"
+      },
+      {
+        "id": "build-tooling",
+        "name": "Build Tooling",
+        "parent": "k8s-build"
+      },
+      {
+        "id": "build-images",
+        "name": "Image Builds",
+        "parent": "k8s-build"
+      },
+      {
+        "id": "k8s-scale",
+        "name": "Scale & Sizing",
+        "parent": "k8s-deploy"
+      },
+      {
+        "id": "scale-tuning",
+        "name": "Resource Tuning",
+        "parent": "k8s-scale"
+      },
+      {
+        "id": "scale-sim",
+        "name": "Fleet Simulation",
+        "parent": "k8s-scale"
+      },
+      {
+        "id": "security",
+        "name": "Security & Identity",
+        "parent": null
+      },
+      {
+        "id": "sec-crypto",
+        "name": "Cryptography",
+        "parent": "security"
+      },
+      {
+        "id": "sec-pki",
+        "name": "PKI & Certificates",
+        "parent": "security"
+      },
+      {
+        "id": "sec-credentials",
+        "name": "Credentials & Secrets",
+        "parent": "security"
+      },
+      {
+        "id": "sec-auth",
+        "name": "Authentication & Identity",
+        "parent": "security"
+      },
+      {
+        "id": "sec-lockdown",
+        "name": "SuperNIC Lockdown",
+        "parent": "security"
+      },
+      {
+        "id": "lifecycle",
+        "name": "Host Lifecycle",
+        "parent": null
+      },
+      {
+        "id": "lc-discovery",
+        "name": "Discovery & Ingestion",
+        "parent": "lifecycle"
+      },
+      {
+        "id": "lc-states",
+        "name": "Managed Host States",
+        "parent": "lifecycle"
+      },
+      {
+        "id": "lc-validation",
+        "name": "Validation & Updates",
+        "parent": "lifecycle"
+      },
+      {
+        "id": "lc-tenancy",
+        "name": "Tenants & Instances",
+        "parent": "lifecycle"
+      },
+      {
+        "id": "lc-sanitization",
+        "name": "Sanitization",
+        "parent": "lifecycle"
+      },
+      {
+        "id": "lc-nic-fw",
+        "name": "NIC Firmware Recovery",
+        "parent": "lifecycle"
+      },
+      {
+        "id": "health",
+        "name": "Health & Operations",
+        "parent": null
+      },
+      {
+        "id": "health-model",
+        "name": "Health Model",
+        "parent": "health"
+      },
+      {
+        "id": "health-monitoring",
+        "name": "Hardware Monitoring",
+        "parent": "health"
+      },
+      {
+        "id": "health-observability",
+        "name": "Observability",
+        "parent": "health"
+      },
+      {
+        "id": "health-console",
+        "name": "Console Access",
+        "parent": "health"
+      },
+      {
+        "id": "dpf",
+        "name": "DOCA Platform Framework",
+        "parent": null
+      },
+      {
+        "id": "dpf-crs",
+        "name": "DPF Custom Resources",
+        "parent": "dpf"
+      },
+      {
+        "id": "dpf-rollout",
+        "name": "Rollout & Reprovisioning",
+        "parent": "dpf"
+      },
+      {
+        "id": "dpf-setup",
+        "name": "DPF Setup",
+        "parent": "dpf"
+      },
+      {
+        "id": "rack-scale",
+        "name": "Rack-Scale Systems",
+        "parent": null
+      },
+      {
+        "id": "rack-hw",
+        "name": "GB200 Rack Hardware",
+        "parent": "rack-scale"
+      },
+      {
+        "id": "rack-states",
+        "name": "Rack & Device States",
+        "parent": "rack-scale"
+      },
+      {
+        "id": "rack-maint",
+        "name": "Rack Maintenance",
+        "parent": "rack-scale"
+      },
+      {
+        "id": "rack-rms",
+        "name": "RMS & Switch Config",
+        "parent": "rack-scale"
+      }
+    ],
+    "assignments": [
+      {
+        "concept": "server-hardware-basics",
+        "theme": "fnd-hardware"
+      },
+      {
+        "concept": "network-interface-card",
+        "theme": "fnd-hardware"
+      },
+      {
+        "concept": "cpu-architectures",
+        "theme": "fnd-hardware"
+      },
+      {
+        "concept": "pcie-device",
+        "theme": "fnd-hardware"
+      },
+      {
+        "concept": "numa-node",
+        "theme": "fnd-hardware"
+      },
+      {
+        "concept": "pci-device-and-slot-address",
+        "theme": "fnd-hardware"
+      },
+      {
+        "concept": "mac-address",
+        "theme": "fnd-hardware"
+      },
+      {
+        "concept": "ip-networking-fundamentals",
+        "theme": "fnd-networking"
+      },
+      {
+        "concept": "ip-addressing-basics",
+        "theme": "fnd-networking"
+      },
+      {
+        "concept": "layer-2-ethernet-networking",
+        "theme": "fnd-networking"
+      },
+      {
+        "concept": "firewall-rules",
+        "theme": "fnd-networking"
+      },
+      {
+        "concept": "http-and-web-apis",
+        "theme": "fnd-networking"
+      },
+      {
+        "concept": "ssh",
+        "theme": "fnd-networking"
+      },
+      {
+        "concept": "cidr-prefixes-and-31-point-to-point-subnets",
+        "theme": "fnd-networking"
+      },
+      {
+        "concept": "linux-system-administration-basics",
+        "theme": "fnd-software"
+      },
+      {
+        "concept": "linux-memory-and-cgroups",
+        "theme": "fnd-software"
+      },
+      {
+        "concept": "git-version-control",
+        "theme": "fnd-software"
+      },
+      {
+        "concept": "asynchronous-programming",
+        "theme": "fnd-software"
+      },
+      {
+        "concept": "microservices-architecture",
+        "theme": "fnd-software"
+      },
+      {
+        "concept": "containers-and-container-images",
+        "theme": "fnd-software"
+      },
+      {
+        "concept": "relational-databases-and-sql",
+        "theme": "fnd-data"
+      },
+      {
+        "concept": "yaml",
+        "theme": "fnd-data"
+      },
+      {
+        "concept": "toml",
+        "theme": "fnd-data"
+      },
+      {
+        "concept": "protocol-buffers",
+        "theme": "fnd-data"
+      },
+      {
+        "concept": "nico",
+        "theme": "architecture"
+      },
+      {
+        "concept": "bare-metal-lifecycle-management",
+        "theme": "architecture"
+      },
+      {
+        "concept": "zero-trust-host-model",
+        "theme": "architecture"
+      },
+      {
+        "concept": "nico-scope-boundaries",
+        "theme": "architecture"
+      },
+      {
+        "concept": "day-0-day-1-day-2-lifecycle",
+        "theme": "architecture"
+      },
+      {
+        "concept": "site-controller",
+        "theme": "arch-control-plane"
+      },
+      {
+        "concept": "api-service",
+        "theme": "arch-control-plane"
+      },
+      {
+        "concept": "nico-rest",
+        "theme": "arch-control-plane"
+      },
+      {
+        "concept": "site-agent",
+        "theme": "arch-control-plane"
+      },
+      {
+        "concept": "admin-cli",
+        "theme": "arch-control-plane"
+      },
+      {
+        "concept": "nicocli",
+        "theme": "arch-control-plane"
+      },
+      {
+        "concept": "temporal-workflow-engine",
+        "theme": "arch-control-plane"
+      },
+      {
+        "concept": "scout",
+        "theme": "arch-agents"
+      },
+      {
+        "concept": "dpu-agent",
+        "theme": "arch-agents"
+      },
+      {
+        "concept": "metadata-service",
+        "theme": "arch-agents"
+      },
+      {
+        "concept": "ipv6-metadata-transport",
+        "theme": "arch-agents"
+      },
+      {
+        "concept": "rate-limiting",
+        "theme": "arch-agents"
+      },
+      {
+        "concept": "state-machine",
+        "theme": "sm-basics"
+      },
+      {
+        "concept": "desired-vs-actual-state-reconciliation",
+        "theme": "sm-basics"
+      },
+      {
+        "concept": "state-handler-outcomes",
+        "theme": "sm-basics"
+      },
+      {
+        "concept": "state-controller-tick",
+        "theme": "sm-basics"
+      },
+      {
+        "concept": "controller-state-persistence",
+        "theme": "sm-basics"
+      },
+      {
+        "concept": "service-level-agreement-for-states",
+        "theme": "sm-basics"
+      },
+      {
+        "concept": "state-controller-work-queue-and-claims",
+        "theme": "sm-basics"
+      },
+      {
+        "concept": "optimistic-concurrency-stale-write-protection",
+        "theme": "sm-safety"
+      },
+      {
+        "concept": "iteration-invalidation",
+        "theme": "sm-safety"
+      },
+      {
+        "concept": "database-transaction",
+        "theme": "sm-safety"
+      },
+      {
+        "concept": "idempotency",
+        "theme": "sm-safety"
+      },
+      {
+        "concept": "recovery-point-and-crash-window-reconciliation",
+        "theme": "sm-safety"
+      },
+      {
+        "concept": "worklock-lease-and-fencing",
+        "theme": "sm-safety"
+      },
+      {
+        "concept": "asynchronous-job-polling",
+        "theme": "sm-safety"
+      },
+      {
+        "concept": "out-of-band-management",
+        "theme": "hardware-oob"
+      },
+      {
+        "concept": "out-of-band-interface",
+        "theme": "hardware-oob"
+      },
+      {
+        "concept": "baseboard-management-controller",
+        "theme": "hw-bmc-redfish"
+      },
+      {
+        "concept": "redfish-api",
+        "theme": "hw-bmc-redfish"
+      },
+      {
+        "concept": "redfish-resource-tree",
+        "theme": "hw-bmc-redfish"
+      },
+      {
+        "concept": "redfish-vendor-detection-and-oem-extensions",
+        "theme": "hw-bmc-redfish"
+      },
+      {
+        "concept": "libredfish-and-nv-redfish",
+        "theme": "hw-bmc-redfish"
+      },
+      {
+        "concept": "redfish-task-service",
+        "theme": "hw-bmc-redfish"
+      },
+      {
+        "concept": "power-control-reset-types",
+        "theme": "hw-bmc-redfish"
+      },
+      {
+        "concept": "bluefield-dpu",
+        "theme": "hw-dpu"
+      },
+      {
+        "concept": "dpu-mode-vs-nic-mode",
+        "theme": "hw-dpu"
+      },
+      {
+        "concept": "host-dpu-policy",
+        "theme": "hw-dpu"
+      },
+      {
+        "concept": "mellanox-device-kind",
+        "theme": "hw-dpu"
+      },
+      {
+        "concept": "rshim",
+        "theme": "hw-dpu"
+      },
+      {
+        "concept": "dpu-restricted-mode",
+        "theme": "hw-dpu"
+      },
+      {
+        "concept": "dpa",
+        "theme": "hw-dpu"
+      },
+      {
+        "concept": "uefi-firmware-and-secure-boot",
+        "theme": "hw-firmware"
+      },
+      {
+        "concept": "uefi-bios-settings",
+        "theme": "hw-firmware"
+      },
+      {
+        "concept": "boot-order-and-boot-source-override",
+        "theme": "hw-firmware"
+      },
+      {
+        "concept": "uefi-device-path",
+        "theme": "hw-firmware"
+      },
+      {
+        "concept": "firmware-inventory-and-update",
+        "theme": "hw-firmware"
+      },
+      {
+        "concept": "uefi-lockdown",
+        "theme": "hw-firmware"
+      },
+      {
+        "concept": "dmi-platform-identity",
+        "theme": "hw-firmware"
+      },
+      {
+        "concept": "underlay-and-overlay-networks",
+        "theme": "net-underlay"
+      },
+      {
+        "concept": "bgp",
+        "theme": "net-underlay"
+      },
+      {
+        "concept": "autonomous-system-number",
+        "theme": "net-underlay"
+      },
+      {
+        "concept": "bgp-peering-with-top-of-rack-switch",
+        "theme": "net-underlay"
+      },
+      {
+        "concept": "top-of-rack-uplink",
+        "theme": "net-underlay"
+      },
+      {
+        "concept": "static-network-fabric-principle",
+        "theme": "net-underlay"
+      },
+      {
+        "concept": "jumbo-frames-mtu",
+        "theme": "net-underlay"
+      },
+      {
+        "concept": "vxlan-evpn",
+        "theme": "net-overlay"
+      },
+      {
+        "concept": "vxlan-and-vni",
+        "theme": "net-overlay"
+      },
+      {
+        "concept": "vni",
+        "theme": "net-overlay"
+      },
+      {
+        "concept": "evpn",
+        "theme": "net-overlay"
+      },
+      {
+        "concept": "vrf",
+        "theme": "net-overlay"
+      },
+      {
+        "concept": "route-targets",
+        "theme": "net-overlay"
+      },
+      {
+        "concept": "vni-resource-pool",
+        "theme": "net-overlay"
+      },
+      {
+        "concept": "vpc",
+        "theme": "net-vpc"
+      },
+      {
+        "concept": "flat-vpc",
+        "theme": "net-vpc"
+      },
+      {
+        "concept": "hostinband-network-segment",
+        "theme": "net-vpc"
+      },
+      {
+        "concept": "underlay-and-hostinband-network-segments",
+        "theme": "net-vpc"
+      },
+      {
+        "concept": "admin-and-underlay-networks",
+        "theme": "net-vpc"
+      },
+      {
+        "concept": "admin-network-isolation",
+        "theme": "net-vpc"
+      },
+      {
+        "concept": "network-security-group",
+        "theme": "net-vpc"
+      },
+      {
+        "concept": "host-based-networking",
+        "theme": "net-dpu"
+      },
+      {
+        "concept": "nvos-nvue",
+        "theme": "net-dpu"
+      },
+      {
+        "concept": "pf-and-vf",
+        "theme": "net-dpu"
+      },
+      {
+        "concept": "scalable-functions",
+        "theme": "net-dpu"
+      },
+      {
+        "concept": "network-configuration-version-acknowledgement",
+        "theme": "net-dpu"
+      },
+      {
+        "concept": "dhcp",
+        "theme": "net-services"
+      },
+      {
+        "concept": "nico-dhcp-and-kea-hook",
+        "theme": "net-services"
+      },
+      {
+        "concept": "dns",
+        "theme": "net-services"
+      },
+      {
+        "concept": "pxe-ipxe-boot",
+        "theme": "net-services"
+      },
+      {
+        "concept": "cloud-init",
+        "theme": "net-services"
+      },
+      {
+        "concept": "ntp-time-synchronization",
+        "theme": "net-services"
+      },
+      {
+        "concept": "out-of-band-management-network",
+        "theme": "net-services"
+      },
+      {
+        "concept": "ip-address-pools",
+        "theme": "net-addressing"
+      },
+      {
+        "concept": "nico-resource-pools",
+        "theme": "net-addressing"
+      },
+      {
+        "concept": "vlan",
+        "theme": "net-addressing"
+      },
+      {
+        "concept": "bmc-network-ip-addressing",
+        "theme": "net-addressing"
+      },
+      {
+        "concept": "network-planes",
+        "theme": "net-gpu-fabrics"
+      },
+      {
+        "concept": "infiniband-fabric",
+        "theme": "net-infiniband"
+      },
+      {
+        "concept": "infiniband-device",
+        "theme": "net-infiniband"
+      },
+      {
+        "concept": "infiniband-guid-and-lid",
+        "theme": "net-infiniband"
+      },
+      {
+        "concept": "infiniband-partitioning-with-ufm",
+        "theme": "net-infiniband"
+      },
+      {
+        "concept": "instanceinfinibandconfig",
+        "theme": "net-infiniband"
+      },
+      {
+        "concept": "device-instance-to-hardware-mapping",
+        "theme": "net-infiniband"
+      },
+      {
+        "concept": "mellanox-firmware-tools",
+        "theme": "net-infiniband"
+      },
+      {
+        "concept": "nvlink-partitioning-with-nmx-c",
+        "theme": "net-nvlink"
+      },
+      {
+        "concept": "nvlink-scale-up-fabric",
+        "theme": "net-nvlink"
+      },
+      {
+        "concept": "nvlink-partition-monitor",
+        "theme": "net-nvlink"
+      },
+      {
+        "concept": "nvlink-isolation",
+        "theme": "net-nvlink"
+      },
+      {
+        "concept": "nmx-c-fabric-manager",
+        "theme": "net-nvlink"
+      },
+      {
+        "concept": "nmx-t",
+        "theme": "net-nvlink"
+      },
+      {
+        "concept": "kubernetes",
+        "theme": "k8s-basics"
+      },
+      {
+        "concept": "kubernetes-workload-and-config-objects",
+        "theme": "k8s-basics"
+      },
+      {
+        "concept": "kubernetes-service-types",
+        "theme": "k8s-basics"
+      },
+      {
+        "concept": "kubernetes-custom-resource",
+        "theme": "k8s-basics"
+      },
+      {
+        "concept": "kubernetes-secret",
+        "theme": "k8s-basics"
+      },
+      {
+        "concept": "kubernetes-rbac",
+        "theme": "k8s-basics"
+      },
+      {
+        "concept": "persistent-storage",
+        "theme": "k8s-basics"
+      },
+      {
+        "concept": "cni",
+        "theme": "k8s-networking"
+      },
+      {
+        "concept": "calico-networking",
+        "theme": "k8s-networking"
+      },
+      {
+        "concept": "metallb-loadbalancer-vips",
+        "theme": "k8s-networking"
+      },
+      {
+        "concept": "virtual-ip-address",
+        "theme": "k8s-networking"
+      },
+      {
+        "concept": "layer-2-advertisement",
+        "theme": "k8s-networking"
+      },
+      {
+        "concept": "kubernetes-ingress-and-ingress-controllers",
+        "theme": "k8s-networking"
+      },
+      {
+        "concept": "helm-and-helmfile",
+        "theme": "k8s-helm"
+      },
+      {
+        "concept": "helm-chart-values",
+        "theme": "k8s-helm"
+      },
+      {
+        "concept": "kustomize",
+        "theme": "k8s-helm"
+      },
+      {
+        "concept": "gitops-with-argocd",
+        "theme": "k8s-helm"
+      },
+      {
+        "concept": "setup-sh-orchestrator",
+        "theme": "k8s-install"
+      },
+      {
+        "concept": "preflight-checks",
+        "theme": "k8s-install"
+      },
+      {
+        "concept": "siteconfig",
+        "theme": "k8s-install"
+      },
+      {
+        "concept": "site-and-site-uuid-registration",
+        "theme": "k8s-install"
+      },
+      {
+        "concept": "org-bootstrap",
+        "theme": "k8s-install"
+      },
+      {
+        "concept": "upgrade-and-teardown",
+        "theme": "k8s-install"
+      },
+      {
+        "concept": "postgresql",
+        "theme": "k8s-install"
+      },
+      {
+        "concept": "docker-buildkit-and-buildx",
+        "theme": "build-tooling"
+      },
+      {
+        "concept": "multi-architecture-image-manifest",
+        "theme": "build-tooling"
+      },
+      {
+        "concept": "container-registry",
+        "theme": "build-tooling"
+      },
+      {
+        "concept": "cross-architecture-emulation",
+        "theme": "build-tooling"
+      },
+      {
+        "concept": "tilt",
+        "theme": "build-tooling"
+      },
+      {
+        "concept": "build-host-bootstrap",
+        "theme": "build-tooling"
+      },
+      {
+        "concept": "rust-toolchain-and-cargo",
+        "theme": "build-tooling"
+      },
+      {
+        "concept": "building-local-dev-images",
+        "theme": "build-images"
+      },
+      {
+        "concept": "building-all-images",
+        "theme": "build-images"
+      },
+      {
+        "concept": "boot-artifacts",
+        "theme": "build-images"
+      },
+      {
+        "concept": "dpu-bfb",
+        "theme": "build-images"
+      },
+      {
+        "concept": "scale-guidance-vs-hard-limit",
+        "theme": "k8s-scale"
+      },
+      {
+        "concept": "state-controller-concurrency",
+        "theme": "scale-tuning"
+      },
+      {
+        "concept": "tokio-worker-threads",
+        "theme": "scale-tuning"
+      },
+      {
+        "concept": "kubernetes-resource-limits",
+        "theme": "scale-tuning"
+      },
+      {
+        "concept": "kubelet-working-set-and-oom-kill",
+        "theme": "scale-tuning"
+      },
+      {
+        "concept": "pod-anti-affinity",
+        "theme": "scale-tuning"
+      },
+      {
+        "concept": "api-admission-control",
+        "theme": "scale-tuning"
+      },
+      {
+        "concept": "machine-a-tron",
+        "theme": "scale-sim"
+      },
+      {
+        "concept": "fleet-up-and-time-to-ready",
+        "theme": "scale-sim"
+      },
+      {
+        "concept": "kubernetes-service-externalip",
+        "theme": "scale-sim"
+      },
+      {
+        "concept": "kube-proxy-ipvs-mode",
+        "theme": "scale-sim"
+      },
+      {
+        "concept": "tpm-and-measured-boot-attestation",
+        "theme": "security"
+      },
+      {
+        "concept": "spdm-attestation",
+        "theme": "security"
+      },
+      {
+        "concept": "cryptographic-hashing",
+        "theme": "sec-crypto"
+      },
+      {
+        "concept": "public-key-cryptography",
+        "theme": "sec-crypto"
+      },
+      {
+        "concept": "aes-gcm-symmetric-encryption",
+        "theme": "sec-crypto"
+      },
+      {
+        "concept": "envelope-encryption-and-kek",
+        "theme": "sec-crypto"
+      },
+      {
+        "concept": "kmip-kek-provider",
+        "theme": "sec-crypto"
+      },
+      {
+        "concept": "key-derivation-function",
+        "theme": "sec-crypto"
+      },
+      {
+        "concept": "pki-and-tls-certificates",
+        "theme": "sec-pki"
+      },
+      {
+        "concept": "tls-certificates-and-x-509-san",
+        "theme": "sec-pki"
+      },
+      {
+        "concept": "mtls-grpc",
+        "theme": "sec-pki"
+      },
+      {
+        "concept": "cert-manager",
+        "theme": "sec-pki"
+      },
+      {
+        "concept": "dpu-agent-bootstrap-ca",
+        "theme": "sec-pki"
+      },
+      {
+        "concept": "external-secrets-operator",
+        "theme": "sec-pki"
+      },
+      {
+        "concept": "hashicorp-vault",
+        "theme": "sec-credentials"
+      },
+      {
+        "concept": "credential-store",
+        "theme": "sec-credentials"
+      },
+      {
+        "concept": "credential-source-modes",
+        "theme": "sec-credentials"
+      },
+      {
+        "concept": "factory-default-credentials",
+        "theme": "sec-credentials"
+      },
+      {
+        "concept": "site-wide-bmc-and-uefi-credentials",
+        "theme": "sec-credentials"
+      },
+      {
+        "concept": "site-wide-bmc-root-credential",
+        "theme": "sec-credentials"
+      },
+      {
+        "concept": "bmc-credential-rotation",
+        "theme": "sec-credentials"
+      },
+      {
+        "concept": "oidc-jwt-authentication",
+        "theme": "sec-auth"
+      },
+      {
+        "concept": "oauth2-client-credentials-flow-and-jwt-bearer-tokens",
+        "theme": "sec-auth"
+      },
+      {
+        "concept": "role-based-access-control",
+        "theme": "sec-auth"
+      },
+      {
+        "concept": "spiffe",
+        "theme": "sec-auth"
+      },
+      {
+        "concept": "machine-identity",
+        "theme": "sec-auth"
+      },
+      {
+        "concept": "token-delegation",
+        "theme": "sec-auth"
+      },
+      {
+        "concept": "client-identity",
+        "theme": "sec-auth"
+      },
+      {
+        "concept": "supernic-lockdown",
+        "theme": "sec-lockdown"
+      },
+      {
+        "concept": "s-vpc",
+        "theme": "sec-lockdown"
+      },
+      {
+        "concept": "hkdf-sha256",
+        "theme": "sec-lockdown"
+      },
+      {
+        "concept": "input-key-material",
+        "theme": "sec-lockdown"
+      },
+      {
+        "concept": "kdf-context",
+        "theme": "sec-lockdown"
+      },
+      {
+        "concept": "entropy-and-offline-guessing",
+        "theme": "sec-lockdown"
+      },
+      {
+        "concept": "lockdown-ikm-rotation",
+        "theme": "sec-lockdown"
+      },
+      {
+        "concept": "dpa-interface",
+        "theme": "sec-lockdown"
+      },
+      {
+        "concept": "hardware-discovery-and-ingestion",
+        "theme": "lc-discovery"
+      },
+      {
+        "concept": "bmc-discovery",
+        "theme": "lc-discovery"
+      },
+      {
+        "concept": "expected-machines-manifest",
+        "theme": "lc-discovery"
+      },
+      {
+        "concept": "lldp",
+        "theme": "lc-discovery"
+      },
+      {
+        "concept": "dpu-host-pairing",
+        "theme": "lc-discovery"
+      },
+      {
+        "concept": "machine-id",
+        "theme": "lc-discovery"
+      },
+      {
+        "concept": "discovery-data",
+        "theme": "lc-discovery"
+      },
+      {
+        "concept": "preingestion-manager",
+        "theme": "lc-discovery"
+      },
+      {
+        "concept": "managed-host",
+        "theme": "lc-states"
+      },
+      {
+        "concept": "managed-host-lifecycle",
+        "theme": "lc-states"
+      },
+      {
+        "concept": "failed-state-and-failure-causes",
+        "theme": "lc-states"
+      },
+      {
+        "concept": "decommissioning",
+        "theme": "lc-states"
+      },
+      {
+        "concept": "managed-host-reset",
+        "theme": "lc-states"
+      },
+      {
+        "concept": "force-delete-of-managed-host",
+        "theme": "lc-states"
+      },
+      {
+        "concept": "host-reprovision",
+        "theme": "lc-states"
+      },
+      {
+        "concept": "disable-onboard-nics",
+        "theme": "lc-states"
+      },
+      {
+        "concept": "sku-validation-and-burn-in",
+        "theme": "lc-validation"
+      },
+      {
+        "concept": "sku-validation",
+        "theme": "lc-validation"
+      },
+      {
+        "concept": "machine-validation-tests",
+        "theme": "lc-validation"
+      },
+      {
+        "concept": "firmware-baseline-enforcement",
+        "theme": "lc-validation"
+      },
+      {
+        "concept": "machine-update-manager",
+        "theme": "lc-validation"
+      },
+      {
+        "concept": "managed-machine-update-scheduling-budget",
+        "theme": "lc-validation"
+      },
+      {
+        "concept": "managed-artifact-cache",
+        "theme": "lc-validation"
+      },
+      {
+        "concept": "multi-tenancy",
+        "theme": "lc-tenancy"
+      },
+      {
+        "concept": "instance-and-instance-type",
+        "theme": "lc-tenancy"
+      },
+      {
+        "concept": "tenant-instance",
+        "theme": "lc-tenancy"
+      },
+      {
+        "concept": "machine-capabilities-and-instance-types",
+        "theme": "lc-tenancy"
+      },
+      {
+        "concept": "targeted-instance-creation",
+        "theme": "lc-tenancy"
+      },
+      {
+        "concept": "live-network-update",
+        "theme": "lc-tenancy"
+      },
+      {
+        "concept": "repair-workflow",
+        "theme": "lc-tenancy"
+      },
+      {
+        "concept": "tenant-sanitization",
+        "theme": "lc-sanitization"
+      },
+      {
+        "concept": "secure-erase",
+        "theme": "lc-sanitization"
+      },
+      {
+        "concept": "boss-controller",
+        "theme": "lc-sanitization"
+      },
+      {
+        "concept": "nic-firmware-recovery-engine",
+        "theme": "lc-nic-fw"
+      },
+      {
+        "concept": "nic-firmware-baseline-policy",
+        "theme": "lc-nic-fw"
+      },
+      {
+        "concept": "nic-firmware-execution-phases",
+        "theme": "lc-nic-fw"
+      },
+      {
+        "concept": "firmware-supervisor-and-receipt",
+        "theme": "lc-nic-fw"
+      },
+      {
+        "concept": "nic-readiness-qualification-and-restoration-obligations",
+        "theme": "lc-nic-fw"
+      },
+      {
+        "concept": "tracked-dispatch",
+        "theme": "lc-nic-fw"
+      },
+      {
+        "concept": "operator-reconciliation",
+        "theme": "lc-nic-fw"
+      },
+      {
+        "concept": "pn-psid",
+        "theme": "lc-nic-fw"
+      },
+      {
+        "concept": "healthreport",
+        "theme": "health-model"
+      },
+      {
+        "concept": "aggregated-host-health",
+        "theme": "health-model"
+      },
+      {
+        "concept": "health-alert-classifications",
+        "theme": "health-model"
+      },
+      {
+        "concept": "health-report-overrides",
+        "theme": "health-model"
+      },
+      {
+        "concept": "health-probe-id",
+        "theme": "health-model"
+      },
+      {
+        "concept": "suppressexternalalerting",
+        "theme": "health-model"
+      },
+      {
+        "concept": "alert-debouncing",
+        "theme": "health-model"
+      },
+      {
+        "concept": "maintenance-mode",
+        "theme": "health-model"
+      },
+      {
+        "concept": "hardware-health-service",
+        "theme": "health-monitoring"
+      },
+      {
+        "concept": "bmc-sensors-and-event-logs",
+        "theme": "health-monitoring"
+      },
+      {
+        "concept": "bmc-sensor-thresholds",
+        "theme": "health-monitoring"
+      },
+      {
+        "concept": "leak-detection",
+        "theme": "health-monitoring"
+      },
+      {
+        "concept": "building-management-system",
+        "theme": "health-monitoring"
+      },
+      {
+        "concept": "switch-reachability-monitor",
+        "theme": "health-monitoring"
+      },
+      {
+        "concept": "state-history-and-manual-intervention-alerts",
+        "theme": "health-monitoring"
+      },
+      {
+        "concept": "observability-stack",
+        "theme": "health-observability"
+      },
+      {
+        "concept": "prometheus-metrics",
+        "theme": "health-observability"
+      },
+      {
+        "concept": "loki-logging",
+        "theme": "health-observability"
+      },
+      {
+        "concept": "serial-over-lan-and-ssh-console-service",
+        "theme": "health-console"
+      },
+      {
+        "concept": "key-group",
+        "theme": "health-console"
+      },
+      {
+        "concept": "key-group-synchronization",
+        "theme": "health-console"
+      },
+      {
+        "concept": "ssh-public-keys",
+        "theme": "health-console"
+      },
+      {
+        "concept": "doca-platform-framework",
+        "theme": "dpf"
+      },
+      {
+        "concept": "doca",
+        "theme": "dpf"
+      },
+      {
+        "concept": "dpfoperatorconfig",
+        "theme": "dpf-crs"
+      },
+      {
+        "concept": "dpucluster",
+        "theme": "dpf-crs"
+      },
+      {
+        "concept": "dpudeployment",
+        "theme": "dpf-crs"
+      },
+      {
+        "concept": "dpuflavor-dpuflavortemplate",
+        "theme": "dpf-crs"
+      },
+      {
+        "concept": "bf-cfg-parameters",
+        "theme": "dpf-crs"
+      },
+      {
+        "concept": "dpuservice-cr-set",
+        "theme": "dpf-crs"
+      },
+      {
+        "concept": "dpuservice-rollout-gating",
+        "theme": "dpf-rollout"
+      },
+      {
+        "concept": "dpf-maintenance-hold",
+        "theme": "dpf-rollout"
+      },
+      {
+        "concept": "dpu-reprovisioning",
+        "theme": "dpf-rollout"
+      },
+      {
+        "concept": "https-socks5-forward-proxy-for-dpu-egress",
+        "theme": "dpf-rollout"
+      },
+      {
+        "concept": "containerd",
+        "theme": "dpf-rollout"
+      },
+      {
+        "concept": "kamaji",
+        "theme": "dpf-setup"
+      },
+      {
+        "concept": "node-feature-discovery",
+        "theme": "dpf-setup"
+      },
+      {
+        "concept": "selectorless-service-with-manual-endpoints",
+        "theme": "dpf-setup"
+      },
+      {
+        "concept": "cert-manager-approver-policy",
+        "theme": "dpf-setup"
+      },
+      {
+        "concept": "ipxe-based-dpu-provisioning",
+        "theme": "dpf-setup"
+      },
+      {
+        "concept": "gb200-nvl72-rack",
+        "theme": "rack-hw"
+      },
+      {
+        "concept": "gb200-nvl72-rack-scale-management",
+        "theme": "rack-hw"
+      },
+      {
+        "concept": "nvlink-switch-tray",
+        "theme": "rack-hw"
+      },
+      {
+        "concept": "power-shelf",
+        "theme": "rack-hw"
+      },
+      {
+        "concept": "rack-profile",
+        "theme": "rack-hw"
+      },
+      {
+        "concept": "primary-switch",
+        "theme": "rack-hw"
+      },
+      {
+        "concept": "tray-replacement-topology-change",
+        "theme": "rack-hw"
+      },
+      {
+        "concept": "rack-state-machine",
+        "theme": "rack-states"
+      },
+      {
+        "concept": "switch-state-machine",
+        "theme": "rack-states"
+      },
+      {
+        "concept": "power-shelf-state-machine",
+        "theme": "rack-states"
+      },
+      {
+        "concept": "switch-reprovisioning",
+        "theme": "rack-states"
+      },
+      {
+        "concept": "bom-validation",
+        "theme": "rack-states"
+      },
+      {
+        "concept": "rack-validation",
+        "theme": "rack-states"
+      },
+      {
+        "concept": "rack-ingestion",
+        "theme": "rack-states"
+      },
+      {
+        "concept": "rack-maintenance",
+        "theme": "rack-maint"
+      },
+      {
+        "concept": "on-demand-maintenance",
+        "theme": "rack-maint"
+      },
+      {
+        "concept": "on-demand-rack-maintenance",
+        "theme": "rack-maint"
+      },
+      {
+        "concept": "maintenance-scope",
+        "theme": "rack-maint"
+      },
+      {
+        "concept": "maintenance-activities",
+        "theme": "rack-maint"
+      },
+      {
+        "concept": "sot-json",
+        "theme": "rack-maint"
+      },
+      {
+        "concept": "powersequence-reboot-barrier",
+        "theme": "rack-maint"
+      },
+      {
+        "concept": "rack-management-service",
+        "theme": "rack-rms"
+      },
+      {
+        "concept": "component-manager",
+        "theme": "rack-rms"
+      },
+      {
+        "concept": "submission-outcome-semantics",
+        "theme": "rack-rms"
+      },
+      {
+        "concept": "switch-certificate-configuration",
+        "theme": "rack-rms"
+      },
+      {
+        "concept": "switch-mtls-services",
+        "theme": "rack-rms"
+      }
+    ]
+  }
+}

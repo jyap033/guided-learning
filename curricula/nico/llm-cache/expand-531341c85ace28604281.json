@@ -1,0 +1,837 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "NICo resource pools",
+        "prerequisites": [
+          {
+            "name": "CIDR prefixes and /31 point-to-point subnets",
+            "definition": "Notation for IP address ranges and the small subnets used for point-to-point links.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Loopback IP pools are given as address ranges or prefixes."
+          },
+          {
+            "name": "VLAN",
+            "definition": "A way to split one physical Ethernet network into separate logical networks, each tagged with an ID.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "One pool hands out VLAN IDs."
+          },
+          {
+            "name": "VXLAN and VNI",
+            "definition": "VXLAN carries layer-2 traffic over a layer-3 network, and each overlay segment gets a VNI number.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "One pool hands out VXLAN VNIs."
+          },
+          {
+            "name": "siteConfig (site TOML configuration)",
+            "definition": "NICo's site configuration file, written in TOML.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The pools are declared in the site config."
+          }
+        ]
+      },
+      {
+        "concept": "Admin and underlay networks",
+        "prerequisites": [
+          {
+            "name": "Underlay and overlay networks",
+            "definition": "The underlay is the physical routed network. Overlays are virtual networks that run on top of it.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "You need the underlay/overlay idea to understand underlay data-plane networks."
+          },
+          {
+            "name": "CIDR prefixes and /31 point-to-point subnets",
+            "definition": "Notation for IP address ranges and small point-to-point subnets.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Each network is defined by an IPv4 prefix and a gateway."
+          },
+          {
+            "name": "siteConfig (site TOML configuration)",
+            "definition": "NICo's site configuration file, written in TOML.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "These networks are defined in the site config."
+          }
+        ]
+      },
+      {
+        "concept": "TLS certificates and X.509 SAN",
+        "prerequisites": [
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "Public-key infrastructure: certificate authorities sign certificates that bind public keys to identities.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "SANs are a field inside a certificate issued under a PKI."
+          },
+          {
+            "name": "DNS (authoritative and recursive)",
+            "definition": "The system that turns hostnames into IP addresses.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "SANs and wildcards follow DNS naming and its labels."
+          }
+        ]
+      },
+      {
+        "concept": "Credential store (Vault vs Postgres)",
+        "prerequisites": [
+          {
+            "name": "HashiCorp Vault",
+            "definition": "A secrets manager that stores, encrypts and controls access to sensitive data.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Vault is the default store."
+          },
+          {
+            "name": "PostgreSQL (Zalando operator)",
+            "definition": "A relational database, run in Kubernetes by the Zalando operator.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Postgres is the alternative store."
+          },
+          {
+            "name": "Site-wide BMC and UEFI credentials",
+            "definition": "The shared BMC and UEFI passwords that NICo applies to managed hardware.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "These are the credentials the store holds."
+          },
+          {
+            "name": "cert-manager",
+            "definition": "A Kubernetes add-on that issues and renews certificates through Issuers and ClusterIssuers.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "In the Postgres case, certificates come from a ClusterIssuer instead."
+          }
+        ]
+      },
+      {
+        "concept": "KMIP KEK provider",
+        "prerequisites": [
+          {
+            "name": "Envelope encryption and KEK",
+            "definition": "Data is encrypted with data keys, and those data keys are encrypted with a key-encryption key (KEK).",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The provider supplies the KEKs."
+          },
+          {
+            "name": "mTLS / gRPC",
+            "definition": "Mutual TLS, where both client and server present certificates, plus the gRPC RPC framework.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The KMIP connection authenticates with client TLS files."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes Ingress and ingress controllers",
+        "prerequisites": [
+          {
+            "name": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+            "definition": "The different ways a Kubernetes Service exposes pods.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "An Ingress routes to Services and is an alternative to a NodePort."
+          },
+          {
+            "name": "TLS certificates and X.509 SAN",
+            "definition": "Certificates that prove a server's identity, and the list of hostnames they cover.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "An Ingress terminates TLS for a hostname."
+          },
+          {
+            "name": "DNS (authoritative and recursive)",
+            "definition": "The system that turns hostnames into IP addresses.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Ingress routing is based on hostname."
+          }
+        ]
+      },
+      {
+        "concept": "OAuth2 client credentials flow and JWT bearer tokens",
+        "prerequisites": [
+          {
+            "name": "OIDC / JWT authentication (Keycloak)",
+            "definition": "Identity tokens issued by an OIDC provider such as Keycloak, in the signed JWT format.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "You need to know JWTs and the issuer before the flow and the iss check make sense."
+          }
+        ]
+      },
+      {
+        "concept": "Site and site UUID registration",
+        "prerequisites": [
+          {
+            "name": "Site Controller",
+            "definition": "The per-site NICo deployment that manages the hardware at one site.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "A site corresponds to one controller installation."
+          },
+          {
+            "name": "setup.sh orchestrator",
+            "definition": "The script that installs and configures every NICo component.",
+            "kind": "procedural",
+            "confidence": 0.75,
+            "why": "setup.sh is what handles the UUID and registers the site."
+          },
+          {
+            "name": "NICo REST (JSON API)",
+            "definition": "NICo's JSON REST API for managing sites and tenants.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Sites are registered through the REST layer."
+          }
+        ]
+      },
+      {
+        "concept": "Org bootstrap (InfrastructureProvider, Tenant, TenantAccount)",
+        "prerequisites": [
+          {
+            "name": "NICo REST (JSON API)",
+            "definition": "NICo's JSON REST API.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The bootstrap is a REST call."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Many tenants sharing the same infrastructure while kept isolated from each other.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It creates the provider and tenant entities."
+          },
+          {
+            "name": "OAuth2 client credentials flow and JWT bearer tokens",
+            "definition": "Getting a bearer token by exchanging a client ID and secret.",
+            "kind": "procedural",
+            "confidence": 0.6,
+            "why": "The GET call has to be authenticated."
+          }
+        ]
+      },
+      {
+        "concept": "nicocli",
+        "prerequisites": [
+          {
+            "name": "NICo REST (JSON API)",
+            "definition": "NICo's JSON REST API.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "nicocli is a client for this API."
+          },
+          {
+            "name": "OAuth2 client credentials flow and JWT bearer tokens",
+            "definition": "Getting a bearer token by exchanging a client ID and secret.",
+            "kind": "procedural",
+            "confidence": 0.6,
+            "why": "The CLI must authenticate to the API."
+          }
+        ]
+      },
+      {
+        "concept": "Upgrade and teardown",
+        "prerequisites": [
+          {
+            "name": "setup.sh orchestrator",
+            "definition": "The NICo install script.",
+            "kind": "procedural",
+            "confidence": 0.85,
+            "why": "Upgrading means re-running setup.sh."
+          },
+          {
+            "name": "Persistent storage (StorageClass, PVC, local-path-provisioner)",
+            "definition": "Kubernetes persistent volumes and how they are provisioned.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Teardown removes released volumes, and upgrade keeps data."
+          },
+          {
+            "name": "Site and site UUID registration",
+            "definition": "Each install manages one site with a stable UUID.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Upgrade preserves the site UUID."
+          }
+        ]
+      },
+      {
+        "concept": "iPXE-based DPU provisioning",
+        "prerequisites": [
+          {
+            "name": "PXE / iPXE boot",
+            "definition": "Booting a machine over the network from an image served by a server.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "This path network-boots DPUs with iPXE."
+          },
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit, a SmartNIC with its own Arm cores and OS.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "DPUs are the devices being provisioned."
+          },
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's Kubernetes-based framework for provisioning DPUs and running services on them.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "This path is defined as the alternative to DPF (dpf_enabled = false)."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes Custom Resource (CR/CRD)",
+        "prerequisites": [
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "Built-in Kubernetes objects such as Pods, Deployments and ConfigMaps.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "CRDs extend the built-in object model."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes Secret",
+        "prerequisites": [
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "Built-in Kubernetes objects such as Pods, Deployments and ConfigMaps.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "A Secret is a config object that Pods reference."
+          }
+        ]
+      },
+      {
+        "concept": "Kubernetes RBAC",
+        "prerequisites": [
+          {
+            "name": "Kubernetes workload and config objects",
+            "definition": "Built-in Kubernetes objects.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "RBAC grants verbs on these resources."
+          },
+          {
+            "name": "Role-Based Access Control (RBAC)",
+            "definition": "The general model of granting permissions to roles and assigning roles to identities.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Kubernetes RBAC is one instance of this general model."
+          }
+        ]
+      },
+      {
+        "concept": "cert-manager approver-policy",
+        "prerequisites": [
+          {
+            "name": "cert-manager",
+            "definition": "A Kubernetes add-on that issues certificates.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "approver-policy is an add-on component for cert-manager."
+          },
+          {
+            "name": "Kubernetes Custom Resource (CR/CRD)",
+            "definition": "User-defined Kubernetes object types.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "CertificateRequestPolicy is a custom resource."
+          }
+        ]
+      },
+      {
+        "concept": "Kamaji",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Kamaji runs Kubernetes control planes as pods."
+          },
+          {
+            "name": "Kubernetes Operator / CRDs",
+            "definition": "Controllers that reconcile custom resources into real state.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Kamaji is an operator that manages control planes."
+          }
+        ]
+      },
+      {
+        "concept": "Node Feature Discovery (NFD)",
+        "prerequisites": [
+          {
+            "name": "Kubernetes",
+            "definition": "A container orchestration platform.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "NFD labels Kubernetes nodes."
+          },
+          {
+            "name": "PCIe device",
+            "definition": "Hardware attached over the PCIe bus, identified by class and vendor codes.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Labelling uses PCI class 0200."
+          }
+        ]
+      },
+      {
+        "concept": "DPFOperatorConfig",
+        "prerequisites": [
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's framework for provisioning DPUs and running services on them.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "This is DPF's operator-level configuration."
+          },
+          {
+            "name": "Kubernetes Custom Resource (CR/CRD)",
+            "definition": "User-defined Kubernetes object types.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It is a custom resource."
+          },
+          {
+            "name": "Redfish API",
+            "definition": "A standard REST API for managing hardware through the BMC.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "It turns on Redfish-based install."
+          }
+        ]
+      },
+      {
+        "concept": "DPUCluster",
+        "prerequisites": [
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's framework for provisioning DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "DPUCluster is a DPF resource."
+          },
+          {
+            "name": "Kamaji",
+            "definition": "Runs Kubernetes control planes as pods.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The cluster's control plane is Kamaji-based."
+          },
+          {
+            "name": "Virtual IP address (VIP)",
+            "definition": "An IP address not tied to a single machine, which can move between nodes.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The control plane is reached through a keepalived VIP."
+          }
+        ]
+      },
+      {
+        "concept": "Selectorless Service with manual Endpoints",
+        "prerequisites": [
+          {
+            "name": "Kubernetes Service types (LoadBalancer, NodePort, ClusterIP)",
+            "definition": "The ways Kubernetes Services expose pods.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "You need to know Services and selectors before a Service without a selector makes sense."
+          }
+        ]
+      },
+      {
+        "concept": "Site-wide BMC root credential",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded controller for out-of-band server management.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "This is the BMC password."
+          },
+          {
+            "name": "Kubernetes Secret",
+            "definition": "A Kubernetes object that holds sensitive data.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The credential is copied into a Secret for DPF."
+          },
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's framework for provisioning DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "DPF consumes the credential to reach BMCs."
+          }
+        ]
+      },
+      {
+        "concept": "Credential source modes (local / local_first / backend)",
+        "prerequisites": [
+          {
+            "name": "Site-wide BMC root credential",
+            "definition": "The shared BMC password NICo applies to managed hardware.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The modes decide where this credential is read from."
+          },
+          {
+            "name": "Credential store (Vault vs Postgres)",
+            "definition": "The persistent backend for credentials.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Backend mode reads from this store."
+          }
+        ]
+      },
+      {
+        "concept": "BMC credential rotation",
+        "prerequisites": [
+          {
+            "name": "Site-wide BMC root credential",
+            "definition": "The shared, versioned BMC password.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Rotation moves BMCs to a new version of it."
+          },
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's framework for provisioning DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The restriction comes from DPF."
+          }
+        ]
+      },
+      {
+        "concept": "TOML",
+        "prerequisites": []
+      },
+      {
+        "concept": "DPUService CR set (Interface/Template/Configuration/NAD)",
+        "prerequisites": [
+          {
+            "name": "Kubernetes Custom Resource (CR/CRD)",
+            "definition": "User-defined Kubernetes object types.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "These are custom resources."
+          },
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's framework for provisioning DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "DPF defines these resources."
+          },
+          {
+            "name": "Helm and helmfile",
+            "definition": "Kubernetes package management with charts and values.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "A service is defined by a chart and its configuration."
+          },
+          {
+            "name": "CNI",
+            "definition": "The Container Network Interface for attaching pod networks.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "A NAD is a network attachment for CNI."
+          }
+        ]
+      },
+      {
+        "concept": "DPUDeployment",
+        "prerequisites": [
+          {
+            "name": "DPUFlavor / DPUFlavorTemplate",
+            "definition": "The DPF resource for a DPU's OS configuration.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "A deployment references a flavor."
+          },
+          {
+            "name": "DPU BFB",
+            "definition": "The BlueField bootstream image that installs a DPU's OS.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "A deployment references a BFB."
+          },
+          {
+            "name": "DPUService CR set (Interface/Template/Configuration/NAD)",
+            "definition": "The DPF resources that define each DPU service.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "A deployment ties together service templates."
+          }
+        ]
+      },
+      {
+        "concept": "DPUFlavor / DPUFlavorTemplate",
+        "prerequisites": [
+          {
+            "name": "Kubernetes Custom Resource (CR/CRD)",
+            "definition": "User-defined Kubernetes object types.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "A flavor is a custom resource."
+          },
+          {
+            "name": "bf.cfg parameters",
+            "definition": "Install-time variables for the BFB installer.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "A flavor carries bf.cfg parameters."
+          },
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's framework for provisioning DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Flavors are a DPF resource."
+          }
+        ]
+      },
+      {
+        "concept": "bf.cfg parameters",
+        "prerequisites": [
+          {
+            "name": "DPU BFB",
+            "definition": "The BlueField bootstream image that installs a DPU's OS.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The BFB installer sources these variables."
+          }
+        ]
+      },
+      {
+        "concept": "DPU reprovisioning",
+        "prerequisites": [
+          {
+            "name": "DPUFlavor / DPUFlavorTemplate",
+            "definition": "The DPF resource for a DPU's OS configuration.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "A flavor change triggers reprovisioning."
+          },
+          {
+            "name": "DPU BFB",
+            "definition": "The BlueField OS image.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "A BFB change triggers reprovisioning."
+          }
+        ]
+      },
+      {
+        "concept": "DPUService rollout gating",
+        "prerequisites": [
+          {
+            "name": "DPF maintenance hold (NodeEffect)",
+            "definition": "A DPF phase where a DPU waits behind a hold before a disruptive change.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Gating holds DPUs in this phase."
+          },
+          {
+            "name": "DPUDeployment",
+            "definition": "The DPF resource that ties a BFB, a flavor and services together for one DPU generation.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "A DPU is held until it matches its DPUDeployment."
+          },
+          {
+            "name": "Managed host state (Ready/HostInit)",
+            "definition": "NICo's lifecycle state for a host.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Automatic release only happens for idle Ready hosts."
+          },
+          {
+            "name": "Tenant instance",
+            "definition": "A tenant workload allocated to a host.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Releasing a hold on a host with an instance needs operator action."
+          }
+        ]
+      },
+      {
+        "concept": "DPF maintenance hold (NodeEffect)",
+        "prerequisites": [
+          {
+            "name": "DOCA Platform Framework (DPF)",
+            "definition": "NVIDIA's framework for provisioning DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "NodeEffect is a DPF phase."
+          }
+        ]
+      },
+      {
+        "concept": "Managed host state (Ready/HostInit)",
+        "prerequisites": [
+          {
+            "name": "Managed Host",
+            "definition": "A server, together with its DPU, that NICo manages.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "This is the state of a managed host."
+          },
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "Resources moving through defined lifecycle states.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Ready and HostInit are states in a state machine."
+          }
+        ]
+      },
+      {
+        "concept": "Tenant instance",
+        "prerequisites": [
+          {
+            "name": "Instance and instance type",
+            "definition": "A host allocated to a tenant, and the hardware class it belongs to.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "A tenant instance is an instance."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Many tenants sharing the same infrastructure while kept isolated.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Instances belong to tenants."
+          }
+        ]
+      },
+      {
+        "concept": "DPU agent bootstrap CA",
+        "prerequisites": [
+          {
+            "name": "DPU Agent",
+            "definition": "NICo's agent that runs on the DPU.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The policy governs how this agent gets its CA."
+          },
+          {
+            "name": "PKI and TLS certificates",
+            "definition": "Certificate authorities and certificate trust chains.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "It is about root CA trust and rotation."
+          },
+          {
+            "name": "Kubernetes Secret",
+            "definition": "A Kubernetes object that holds sensitive data.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The CA can be mounted from a Secret or ConfigMap."
+          }
+        ]
+      },
+      {
+        "concept": "HTTPS/SOCKS5 forward proxy for DPU egress",
+        "prerequisites": [
+          {
+            "name": "containerd",
+            "definition": "The container runtime on the DPU.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The proxy is configured in a containerd drop-in."
+          },
+          {
+            "name": "DPUFlavor / DPUFlavorTemplate",
+            "definition": "The DPF resource for a DPU's OS configuration.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The drop-in lives in the flavor, which is why changing it reprovisions."
+          }
+        ]
+      },
+      {
+        "concept": "containerd",
+        "prerequisites": [
+          {
+            "name": "Container registry",
+            "definition": "A server that stores and serves container images.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "containerd pulls images from registries."
+          }
+        ]
+      },
+      {
+        "concept": "Scalable Functions (SF)",
+        "prerequisites": [
+          {
+            "name": "PF and VF (SR-IOV)",
+            "definition": "Physical and virtual functions of a network adapter.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "SFs are carved from a physical function."
+          },
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's SmartNIC with its own Arm cores.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "SFs are DPU functions."
+          }
+        ]
+      },
+      {
+        "concept": "Jumbo frames / MTU",
+        "prerequisites": []
+      },
+      {
+        "concept": "IPv6 metadata transport",
+        "prerequisites": [
+          {
+            "name": "Metadata Service (FMDS)",
+            "definition": "NICo's metadata service that serves instance metadata to hosts.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "This setup serves FMDS over IPv6."
+          },
+          {
+            "name": "Host-Based Networking (HBN)",
+            "definition": "Routing that runs on the DPU.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The DPU agent overlay selects the HBN peer."
+          },
+          {
+            "name": "Helm chart values",
+            "definition": "Configuration overrides passed to Helm charts.",
+            "kind": "procedural",
+            "confidence": 0.65,
+            "why": "It is set up through chart overlays."
+          }
+        ]
+      }
+    ]
+  }
+}

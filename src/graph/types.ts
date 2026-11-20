@@ -45,7 +45,9 @@ export interface Theme {
 export interface Chapter {
   number: number;
   title: string;
-  theme: string; // theme id the chapter is grouped by
+  /** Name of the top-level theme this chapter belongs to; the course's "part". */
+  part: string;
+  theme: string; // top-level theme id
   concepts: string[]; // concept ids, in teaching order
 }
 

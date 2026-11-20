@@ -1,0 +1,743 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "Admin network isolation",
+        "prerequisites": [
+          {
+            "name": "Admin and underlay networks",
+            "definition": "The NICo-controlled networks used for provisioning and management, separate from tenant networks.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Isolation places the machine on the admin network, so you need to know what that network is."
+          },
+          {
+            "name": "VPC (FNN VPC)",
+            "definition": "A tenant's isolated virtual network built on the fabric.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The setting overrides the tenant's network configuration."
+          },
+          {
+            "name": "Managed Host Lifecycle",
+            "definition": "The sequence of states a managed host moves through.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "It is applied during the provisioning and termination phases."
+          }
+        ]
+      },
+      {
+        "concept": "Machine capabilities and instance types",
+        "prerequisites": [
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "How NICo finds new machines and records their hardware.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Capabilities are computed from discovery results."
+          },
+          {
+            "name": "Instance and instance type",
+            "definition": "A tenant allocation of a machine and the template that describes it.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "This concept refines what instance types are."
+          }
+        ]
+      },
+      {
+        "concept": "Force delete of managed host",
+        "prerequisites": [
+          {
+            "name": "Managed Host Lifecycle",
+            "definition": "The sequence of states a managed host moves through.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Force delete skips the normal deprovisioning states."
+          },
+          {
+            "name": "InfiniBand partition",
+            "definition": "An isolated group of InfiniBand ports.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Detaching the host from fabric partitions is the extra work required."
+          }
+        ]
+      },
+      {
+        "concept": "HealthReport",
+        "prerequisites": [
+          {
+            "name": "Health probe ID",
+            "definition": "A stable identifier for a single health check.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Reports list probes by their ID."
+          },
+          {
+            "name": "Managed Host",
+            "definition": "A bare-metal machine that NICo manages.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Reports describe the health of hosts."
+          }
+        ]
+      },
+      {
+        "concept": "Aggregated host health",
+        "prerequisites": [
+          {
+            "name": "HealthReport",
+            "definition": "NICo's data structure for health information, built to be merged.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Aggregation merges many health reports."
+          },
+          {
+            "name": "Health alert classifications",
+            "definition": "Tags on alerts that control how NICo reacts.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Allocation decisions use the classifications in the merged health."
+          }
+        ]
+      },
+      {
+        "concept": "Health alert classifications",
+        "prerequisites": [
+          {
+            "name": "HealthReport",
+            "definition": "NICo's data structure for health information.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Classifications are attached to alerts inside health reports."
+          },
+          {
+            "name": "Instance and instance type",
+            "definition": "A tenant allocation of a machine.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Classifications such as PreventAllocations control instance allocation."
+          }
+        ]
+      },
+      {
+        "concept": "Health report overrides (Merge/Replace)",
+        "prerequisites": [
+          {
+            "name": "Aggregated host health",
+            "definition": "The single merged health of a host.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Overrides change how the merged health is produced."
+          }
+        ]
+      },
+      {
+        "concept": "Machine validation tests",
+        "prerequisites": [
+          {
+            "name": "Scout",
+            "definition": "The NICo agent that runs on a host to discover hardware and run tasks.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Scout runs the tests."
+          },
+          {
+            "name": "Health alert classifications",
+            "definition": "Tags on alerts that control how NICo reacts.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "A failure raises an alert that blocks allocation."
+          }
+        ]
+      },
+      {
+        "concept": "SKU validation",
+        "prerequisites": [
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "How NICo finds new machines and records their hardware.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The discovered hardware is compared with the expected SKU."
+          },
+          {
+            "name": "HealthReport",
+            "definition": "NICo's data structure for health information.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "A failure produces a SkuValidation alert."
+          }
+        ]
+      },
+      {
+        "concept": "Health probe ID",
+        "prerequisites": []
+      },
+      {
+        "concept": "SuppressExternalAlerting",
+        "prerequisites": [
+          {
+            "name": "Health alert classifications",
+            "definition": "Tags on alerts that control how NICo reacts.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "It is one of the classifications."
+          }
+        ]
+      },
+      {
+        "concept": "Alert debouncing",
+        "prerequisites": [
+          {
+            "name": "HealthReport",
+            "definition": "NICo's data structure for health information.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Debouncing decides when an alert appears in a report."
+          }
+        ]
+      },
+      {
+        "concept": "Targeted instance creation",
+        "prerequisites": [
+          {
+            "name": "Instance and instance type",
+            "definition": "A tenant allocation of a machine.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "It is a way of creating an instance."
+          },
+          {
+            "name": "Machine ID",
+            "definition": "The unique identifier NICo gives a machine.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The target is chosen by its Machine ID."
+          },
+          {
+            "name": "Health alert classifications",
+            "definition": "Tags on alerts that control how NICo reacts.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "It can bypass allocation blocks that come from classifications."
+          }
+        ]
+      },
+      {
+        "concept": "BMC sensor thresholds",
+        "prerequisites": [
+          {
+            "name": "BMC sensors and event logs",
+            "definition": "Hardware readings and logs that the BMC exposes.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The thresholds belong to BMC sensors."
+          },
+          {
+            "name": "Hardware Health service",
+            "definition": "The NICo service that polls hardware health.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "nico-hardware-health maps the thresholds to classifications."
+          },
+          {
+            "name": "Health alert classifications",
+            "definition": "Tags on alerts that control how NICo reacts.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The thresholds map to the Sensor* classifications."
+          }
+        ]
+      },
+      {
+        "concept": "Repair workflow",
+        "prerequisites": [
+          {
+            "name": "Tenant instance",
+            "definition": "A machine allocated to a tenant.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Tenants flag their instances for repair."
+          },
+          {
+            "name": "Aggregated host health",
+            "definition": "The single merged health of a host.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Repair is marked through the host's health state."
+          }
+        ]
+      },
+      {
+        "concept": "Maintenance mode",
+        "prerequisites": [
+          {
+            "name": "Health alert classifications",
+            "definition": "Tags on alerts that control how NICo reacts.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Maintenance mode applies a set of classifications."
+          },
+          {
+            "name": "Service-level agreement (SLA) for states",
+            "definition": "Time limits on how long a host may stay in each state.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "It excludes the host from state machine SLAs."
+          }
+        ]
+      },
+      {
+        "concept": "Leak detection",
+        "prerequisites": [
+          {
+            "name": "BMC sensors and event logs",
+            "definition": "Hardware readings and logs that the BMC exposes.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Leak detectors report through the BMC."
+          },
+          {
+            "name": "Building Management System (BMS)",
+            "definition": "Datacenter facility systems.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Rack leak events come from the BMS."
+          },
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "A liquid-cooled rack-scale system made of trays.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The derived alerts are at tray and rack level."
+          },
+          {
+            "name": "HealthReport",
+            "definition": "NICo's data structure for health information.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The outputs are health alerts."
+          }
+        ]
+      },
+      {
+        "concept": "Building Management System (BMS)",
+        "prerequisites": []
+      },
+      {
+        "concept": "NMX-T",
+        "prerequisites": [
+          {
+            "name": "Primary Switch",
+            "definition": "The NVLink switch that hosts the rack's fabric management services.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "NMX-T runs on primary switches."
+          },
+          {
+            "name": "NVLink scale-up fabric",
+            "definition": "The NVLink network that connects GPUs across a rack.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It collects NVLink telemetry."
+          }
+        ]
+      },
+      {
+        "concept": "NVLink partition monitor",
+        "prerequisites": [
+          {
+            "name": "NVLink partitioning with NMX-C",
+            "definition": "Grouping GPUs into isolated NVLink partitions through NMX-C.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "It reconciles partitions with NMX-C."
+          },
+          {
+            "name": "Desired vs actual state reconciliation",
+            "definition": "Repeatedly comparing the intended state with the real state and fixing differences.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "It is a reconciliation loop."
+          },
+          {
+            "name": "HealthReport",
+            "definition": "NICo's data structure for health information.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "It raises health alerts."
+          }
+        ]
+      },
+      {
+        "concept": "NVLink isolation",
+        "prerequisites": [
+          {
+            "name": "NVLink partitioning with NMX-C",
+            "definition": "Grouping GPUs into isolated NVLink partitions through NMX-C.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Isolation removes GPUs from partitions."
+          },
+          {
+            "name": "Health alert classifications",
+            "definition": "Tags on alerts that control how NICo reacts.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "It is triggered by a classification."
+          }
+        ]
+      },
+      {
+        "concept": "NVOS / NVUE",
+        "prerequisites": [
+          {
+            "name": "NVLink switch tray",
+            "definition": "A tray of NVLink switches in the rack.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "NVOS runs on these switches."
+          }
+        ]
+      },
+      {
+        "concept": "Switch reachability monitor",
+        "prerequisites": [
+          {
+            "name": "NVOS / NVUE",
+            "definition": "NVIDIA's switch operating system and its API.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It probes the NVOS ports."
+          },
+          {
+            "name": "NMX-T",
+            "definition": "The NVLink telemetry listener on primary switches.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "It probes the NMX-T ports."
+          },
+          {
+            "name": "Alert debouncing",
+            "definition": "Raising an alert only after several consecutive failures.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Its alerts are debounced."
+          }
+        ]
+      },
+      {
+        "concept": "Top-of-rack (ToR) uplink",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit that sits between the host and the network.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "These are the DPU's uplink ports."
+          },
+          {
+            "name": "PXE / iPXE boot",
+            "definition": "Booting a machine over the network.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "PXE boot depends on p0."
+          }
+        ]
+      },
+      {
+        "concept": "DPU restricted mode",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit that sits between the host and the network.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "It is a mode of the DPU."
+          },
+          {
+            "name": "Zero-trust host model",
+            "definition": "Treating the host OS as untrusted.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "It explains why the host must not be able to reconfigure the DPU."
+          }
+        ]
+      },
+      {
+        "concept": "InfiniBand fabric",
+        "prerequisites": [
+          {
+            "name": "Network planes (Ethernet, InfiniBand, NVLink)",
+            "definition": "The separate networks a host connects to.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "InfiniBand is one of the network planes."
+          }
+        ]
+      },
+      {
+        "concept": "InfiniBand device (NIC port as device)",
+        "prerequisites": [
+          {
+            "name": "PCI device and slot address",
+            "definition": "An address that identifies a PCI device.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "A device is a PCI function."
+          },
+          {
+            "name": "InfiniBand fabric",
+            "definition": "A separate InfiniBand network.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Devices send traffic on a fabric."
+          }
+        ]
+      },
+      {
+        "concept": "PCI device and slot address",
+        "prerequisites": [
+          {
+            "name": "PCIe device",
+            "definition": "Hardware attached to the PCIe bus.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The address identifies a PCIe device."
+          }
+        ]
+      },
+      {
+        "concept": "InfiniBand GUID and LID",
+        "prerequisites": [
+          {
+            "name": "InfiniBand fabric",
+            "definition": "A separate InfiniBand network.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "GUIDs and LIDs identify ports on the fabric."
+          },
+          {
+            "name": "PF and VF (SR-IOV)",
+            "definition": "Physical functions and virtual functions of a NIC.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "VFs also have GUIDs."
+          }
+        ]
+      },
+      {
+        "concept": "Mellanox firmware tools (mlxconfig, mst)",
+        "prerequisites": [
+          {
+            "name": "PF and VF (SR-IOV)",
+            "definition": "Physical functions and virtual functions of a NIC.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The tools set the number of VFs."
+          },
+          {
+            "name": "PCIe device",
+            "definition": "Hardware attached to the PCIe bus.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The tools address cards on the PCIe bus."
+          }
+        ]
+      },
+      {
+        "concept": "Discovery data",
+        "prerequisites": [
+          {
+            "name": "Scout",
+            "definition": "The NICo agent that runs on a host to discover hardware and run tasks.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Scout reports the discovery data."
+          },
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "How NICo finds new machines and records their hardware.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Discovery data is the output of this process."
+          }
+        ]
+      },
+      {
+        "concept": "Protocol Buffers",
+        "prerequisites": []
+      },
+      {
+        "concept": "InstanceInfinibandConfig",
+        "prerequisites": [
+          {
+            "name": "Instance and instance type",
+            "definition": "A tenant allocation of a machine.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "It is part of an instance's configuration."
+          },
+          {
+            "name": "InfiniBand device (NIC port as device)",
+            "definition": "A NIC port that can send InfiniBand traffic.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Each interface selects a device."
+          },
+          {
+            "name": "InfiniBand partition",
+            "definition": "An isolated group of InfiniBand ports.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Each interface names a partition."
+          },
+          {
+            "name": "PF and VF (SR-IOV)",
+            "definition": "Physical functions and virtual functions of a NIC.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Each interface chooses a PF or a VF."
+          }
+        ]
+      },
+      {
+        "concept": "Device-instance to hardware mapping",
+        "prerequisites": [
+          {
+            "name": "InstanceInfinibandConfig",
+            "definition": "The tenant's InfiniBand configuration for an instance.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "It maps the selections made in this config."
+          },
+          {
+            "name": "PCI device and slot address",
+            "definition": "An address that identifies a PCI device.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Matching devices are sorted by PCI slot."
+          },
+          {
+            "name": "Discovery data",
+            "definition": "The hardware details that Scout reports.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The list of devices comes from discovery data."
+          }
+        ]
+      },
+      {
+        "concept": "NUMA node",
+        "prerequisites": []
+      },
+      {
+        "concept": "Key group",
+        "prerequisites": [
+          {
+            "name": "SSH public keys",
+            "definition": "Public keys that authorize SSH logins.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "A key group is a set of SSH keys."
+          },
+          {
+            "name": "Serial-over-LAN and SSH Console Service",
+            "definition": "Access to the host console over SSH.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Key groups grant access to the console."
+          },
+          {
+            "name": "Multi-tenancy",
+            "definition": "Many tenants sharing the infrastructure in isolation.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Key groups are stored per tenant."
+          }
+        ]
+      },
+      {
+        "concept": "Key group synchronization",
+        "prerequisites": [
+          {
+            "name": "Key group",
+            "definition": "A named set of SSH public keys stored per tenant.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "This is what gets synchronized."
+          },
+          {
+            "name": "NICo REST (JSON API)",
+            "definition": "NICo's cloud REST API.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The REST API pushes the key groups."
+          },
+          {
+            "name": "Site Agent",
+            "definition": "The agent that connects a site to the cloud.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Key groups are delivered to sites through it."
+          }
+        ]
+      },
+      {
+        "concept": "SSH public keys",
+        "prerequisites": []
+      },
+      {
+        "concept": "Managed Host Lifecycle",
+        "prerequisites": [
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "Modeling a resource as moving through defined states.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The lifecycle is a state machine."
+          },
+          {
+            "name": "Managed Host",
+            "definition": "A bare-metal machine that NICo manages.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "It is the lifecycle of a managed host."
+          },
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's data processing unit that sits between the host and the network.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The first states are DPU discovery and DPU initialization."
+          }
+        ]
+      },
+      {
+        "concept": "Network Configuration Version Acknowledgement",
+        "prerequisites": [
+          {
+            "name": "DPU Agent",
+            "definition": "The NICo agent that runs on the DPU and applies configuration.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "DPU agents report the versions."
+          },
+          {
+            "name": "Desired vs actual state reconciliation",
+            "definition": "Repeatedly comparing the intended state with the real state and fixing differences.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The check compares desired versions with applied versions."
+          }
+        ]
+      }
+    ]
+  }
+}

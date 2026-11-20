@@ -44,6 +44,7 @@ export class CachedProvider implements LlmProvider {
   readonly name: string;
   calls = 0;
   hits = 0;
+  private used = new Set<string>();
 
   constructor(
     private inner: LlmProvider,
@@ -56,6 +57,7 @@ export class CachedProvider implements LlmProvider {
   async complete<T>(task: LlmTask<T>): Promise<T> {
     const id = taskId(task);
     const file = path.join(this.dir, `${task.kind}-${id}.json`);
+    this.used.add(path.basename(file));
     if (fs.existsSync(file)) {
       const cached = JSON.parse(fs.readFileSync(file, "utf8")) as { output: unknown };
       const parsed = task.schema.safeParse(cached.output);
@@ -79,6 +81,19 @@ export class CachedProvider implements LlmProvider {
     );
     this.log(`${task.kind} ${id} answered in ${((Date.now() - started) / 1000).toFixed(0)}s`);
     return output;
+  }
+
+  /** Delete cached answers this run didn't use (stale prompts or inputs). Returns how many. */
+  pruneUnused(): number {
+    if (!fs.existsSync(this.dir)) return 0;
+    let n = 0;
+    for (const f of fs.readdirSync(this.dir)) {
+      if (f.endsWith(".json") && !this.used.has(f)) {
+        fs.rmSync(path.join(this.dir, f));
+        n++;
+      }
+    }
+    return n;
   }
 }
 

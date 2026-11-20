@@ -50,7 +50,8 @@ program
     fs.writeFileSync(path.join(paths.out, "mindmap.md"), renderMindmapFile(cur, shortName));
     fs.writeFileSync(path.join(paths.out, "report.md"), renderReport(cur));
     log(`done: ${cur.chapters.length} chapters, ${cur.concepts.length} concepts → ${path.relative(root, paths.out)}/`);
-    log(`AI calls: ${provider.calls} new, ${provider.hits} from cache`);
+    const pruned = provider.pruneUnused();
+    log(`AI calls: ${provider.calls} new, ${provider.hits} from cache${pruned ? `; removed ${pruned} stale cache entries` : ""}`);
     for (const w of cur.warnings) log(`warning: ${w}`);
   });
 

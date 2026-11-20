@@ -1,0 +1,45 @@
+{
+  "kind": "dedupe",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "groups": [
+      {
+        "keep": "kubernetes-custom-resource",
+        "merge": [
+          "kubernetes-operator-crds"
+        ]
+      },
+      {
+        "keep": "containers-and-container-images",
+        "merge": [
+          "containers"
+        ]
+      },
+      {
+        "keep": "ip-networking-fundamentals",
+        "merge": [
+          "computer-networking-basics"
+        ]
+      },
+      {
+        "keep": "http-and-web-apis",
+        "merge": [
+          "rest-apis-and-https"
+        ]
+      },
+      {
+        "keep": "managed-host-lifecycle",
+        "merge": [
+          "managed-host-state"
+        ]
+      },
+      {
+        "keep": "infiniband-partitioning-with-ufm",
+        "merge": [
+          "infiniband-partition"
+        ]
+      }
+    ]
+  }
+}

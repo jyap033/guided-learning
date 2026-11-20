@@ -1,0 +1,860 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "BGP Peering with Top-of-Rack Switch",
+        "prerequisites": [
+          {
+            "name": "BGP",
+            "definition": "The routing protocol that routers use to exchange reachability information with each other.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "The peering session is a BGP session."
+          },
+          {
+            "name": "BlueField DPU",
+            "definition": "An NVIDIA data processing unit that sits in a host and runs NICo networking agents.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The DPU is the device that peers with the switch."
+          },
+          {
+            "name": "Top-of-rack (ToR) uplink",
+            "definition": "The link from a device in a rack to the rack's top-of-rack switch.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The session runs over the p0 uplink to the ToR switch."
+          }
+        ]
+      },
+      {
+        "concept": "Live Network Update",
+        "prerequisites": [
+          {
+            "name": "Tenant instance",
+            "definition": "A host assigned to a tenant along with its configuration.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Updates are applied to an assigned instance."
+          },
+          {
+            "name": "Network Configuration Version Acknowledgement",
+            "definition": "The DPU reports which network configuration version it has applied.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Old resources are released only after every DPU acknowledges the new configuration."
+          },
+          {
+            "name": "Database transaction",
+            "definition": "A group of database changes that succeed or fail together.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Old resources are released in a single transaction."
+          },
+          {
+            "name": "Aggregated host health",
+            "definition": "The combined health status of a host, built from all of its health reports.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Release waits until health is clear."
+          }
+        ]
+      },
+      {
+        "concept": "Host Reprovision",
+        "prerequisites": [
+          {
+            "name": "Firmware inventory and update",
+            "definition": "Reading and updating component firmware versions through the BMC.",
+            "kind": "procedural",
+            "confidence": 0.85,
+            "why": "Reprovisioning means updating firmware through the BMC."
+          },
+          {
+            "name": "Managed Host Lifecycle",
+            "definition": "The sequence of states a managed host moves through in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Reprovisioning runs from the Ready or Assigned states."
+          },
+          {
+            "name": "Power control reset types",
+            "definition": "The kinds of power and reset operations a BMC can perform.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "A reset follows the update."
+          }
+        ]
+      },
+      {
+        "concept": "BOSS Controller",
+        "prerequisites": [
+          {
+            "name": "Secure Erase",
+            "definition": "Wiping storage so that earlier data cannot be recovered.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "NICo securely erases the BOSS controller."
+          },
+          {
+            "name": "Tenant sanitization",
+            "definition": "Cleaning a host between tenants.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The erase and rebuild happen during cleanup."
+          }
+        ]
+      },
+      {
+        "concept": "Out-of-Band (OOB) Interface",
+        "prerequisites": [
+          {
+            "name": "Out-of-band (OOB) management",
+            "definition": "Managing hardware through a channel that is separate from the main data network.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The OOB interface is how out-of-band management connects to a machine."
+          }
+        ]
+      },
+      {
+        "concept": "Decommissioning",
+        "prerequisites": [
+          {
+            "name": "Managed Host Lifecycle",
+            "definition": "The sequence of states a managed host moves through in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Decommissioning is the terminal path out of the Ready state."
+          },
+          {
+            "name": "DHCP",
+            "definition": "The protocol that assigns IP addresses to devices on a network.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "DHCP is suppressed for the host's MACs."
+          },
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "An embedded controller that manages server hardware out of band.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The BMCs are factory reset."
+          },
+          {
+            "name": "Credential store (Vault vs Postgres)",
+            "definition": "Where NICo stores device credentials.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "Per-device credentials are deleted."
+          }
+        ]
+      },
+      {
+        "concept": "Failed State and Failure Causes",
+        "prerequisites": [
+          {
+            "name": "Managed Host Lifecycle",
+            "definition": "The sequence of states a managed host moves through in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Failed is one of the host lifecycle states."
+          },
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "A model in which a resource moves between defined states.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Failure handling and recovery are state transitions."
+          }
+        ]
+      },
+      {
+        "concept": "Managed-Host Reset",
+        "prerequisites": [
+          {
+            "name": "Managed Host Lifecycle",
+            "definition": "The sequence of states a managed host moves through in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "A reset re-ingests the host into the lifecycle."
+          },
+          {
+            "name": "Tenant instance",
+            "definition": "A host assigned to a tenant along with its configuration.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The reset deletes the instance."
+          },
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "The process of finding new hardware and bringing it under NICo management.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "After the reset the host is ingested again."
+          }
+        ]
+      },
+      {
+        "concept": "Disable Onboard NICs (Vera Rubin)",
+        "prerequisites": [
+          {
+            "name": "Managed host state (Ready/HostInit)",
+            "definition": "The host's states, including HostInit initialization.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "This is a HostInit step."
+          },
+          {
+            "name": "Redfish API",
+            "definition": "The standard HTTP API for BMC management.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The NIC writes are made through the BMC."
+          },
+          {
+            "name": "Controller State Persistence",
+            "definition": "Controller state is saved in the database so it survives restarts.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The 10-second waits are persisted."
+          }
+        ]
+      },
+      {
+        "concept": "NIC Firmware Recovery Engine",
+        "prerequisites": [
+          {
+            "name": "Managed Host Lifecycle",
+            "definition": "The sequence of states a managed host moves through in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The engine runs inside the host state machine."
+          },
+          {
+            "name": "NIC Firmware Baseline Policy",
+            "definition": "The target firmware chosen per card, machine or site.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The engine checks cards against the baseline."
+          },
+          {
+            "name": "Firmware inventory and update",
+            "definition": "Reading and updating component firmware versions.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Firmware checking and updating is the engine's core job."
+          }
+        ]
+      },
+      {
+        "concept": "NIC Firmware Baseline Policy",
+        "prerequisites": [
+          {
+            "name": "PN/PSID",
+            "definition": "The identifiers for an NVIDIA NIC model and its configuration.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Cards are matched to the allow-list by PN/PSID."
+          },
+          {
+            "name": "DMI Platform Identity",
+            "definition": "The system vendor and product name that the host firmware reports.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The platform is matched by sys_vendor and product_name."
+          },
+          {
+            "name": "Firmware baseline enforcement",
+            "definition": "Making sure devices run approved firmware versions.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The baseline policy is a form of baseline enforcement."
+          }
+        ]
+      },
+      {
+        "concept": "NIC Firmware Execution Phases",
+        "prerequisites": [
+          {
+            "name": "NIC Firmware Recovery Engine",
+            "definition": "The state-machine component that manages NIC firmware changes.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The phases describe the operations this engine admits."
+          },
+          {
+            "name": "Firmware Supervisor and Receipt",
+            "definition": "The local daemon that does firmware work, plus the receipt recording its results.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The first phase observes the supervisor."
+          },
+          {
+            "name": "Mellanox firmware tools (mlxconfig, mst)",
+            "definition": "NVIDIA/Mellanox command-line tools for configuring and flashing NICs.",
+            "kind": "procedural",
+            "confidence": 0.6,
+            "why": "Unlocking, flashing and resetting the card rely on these tools."
+          },
+          {
+            "name": "SuperNIC Lockdown",
+            "definition": "A policy that locks NIC configuration against changes.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Lockdown is lifted before the flash and restored afterward."
+          }
+        ]
+      },
+      {
+        "concept": "Firmware Supervisor and Receipt",
+        "prerequisites": [
+          {
+            "name": "API Service (NICo Core)",
+            "definition": "NICo's central service, which holds state and drives the controllers.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Core persists the receipts."
+          },
+          {
+            "name": "Idempotency",
+            "definition": "Doing an operation more than once has the same effect as doing it once.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Receipts let Core resume without repeating writes."
+          }
+        ]
+      },
+      {
+        "concept": "NIC Readiness Qualification and Restoration Obligations",
+        "prerequisites": [
+          {
+            "name": "NIC Firmware Baseline Policy",
+            "definition": "The target firmware chosen per card, machine or site.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Cards are restored to the baseline."
+          },
+          {
+            "name": "Managed Host Lifecycle",
+            "definition": "The sequence of states a managed host moves through in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "Cards are re-qualified through host preparation before allocation."
+          }
+        ]
+      },
+      {
+        "concept": "Tracked Dispatch",
+        "prerequisites": [
+          {
+            "name": "Idempotency",
+            "definition": "Doing an operation more than once has the same effect as doing it once.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Tracking exists because power, DPA and MLX commands are not safe to repeat."
+          },
+          {
+            "name": "Recovery point and crash-window reconciliation",
+            "definition": "Recording progress so a crash between steps can be reconciled.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "A dispatch record covers the window between sending a command and seeing its effects."
+          },
+          {
+            "name": "NIC Firmware Execution Phases",
+            "definition": "The per-card steps of an admitted firmware operation.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The tracked commands are sent during these phases."
+          }
+        ]
+      },
+      {
+        "concept": "Operator Reconciliation",
+        "prerequisites": [
+          {
+            "name": "Tracked Dispatch",
+            "definition": "A token recorded before sending a command that has side effects.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The operator records settlement for an exact dispatch token."
+          },
+          {
+            "name": "WorkLock lease and fencing",
+            "definition": "Leases and fencing tokens that stop stale workers from acting.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The procedure requires fencing the original senders."
+          }
+        ]
+      },
+      {
+        "concept": "Managed-Machine Update Scheduling Budget",
+        "prerequisites": [
+          {
+            "name": "Machine Update Manager",
+            "definition": "The component that schedules machine updates.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The budget limits how many updates the manager runs at once."
+          },
+          {
+            "name": "NIC Firmware Recovery Engine",
+            "definition": "The state-machine component that manages NIC firmware changes.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "NIC work stays pending when the budget is zero."
+          }
+        ]
+      },
+      {
+        "concept": "Managed Artifact Cache",
+        "prerequisites": [
+          {
+            "name": "Firmware inventory and update",
+            "definition": "Reading and updating component firmware versions.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The cache stores firmware images."
+          }
+        ]
+      },
+      {
+        "concept": "PN/PSID",
+        "prerequisites": [
+          {
+            "name": "PCIe device",
+            "definition": "A hardware device attached to the PCI Express bus.",
+            "kind": "conceptual",
+            "confidence": 0.5,
+            "why": "The NIC is a PCIe card that reports these identifiers."
+          }
+        ]
+      },
+      {
+        "concept": "DMI Platform Identity",
+        "prerequisites": [
+          {
+            "name": "UEFI firmware and Secure Boot",
+            "definition": "The host firmware that boots the system and reports platform data.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The host firmware is what reports the DMI values."
+          }
+        ]
+      },
+      {
+        "concept": "DPA (Data Path Accelerator)",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "An NVIDIA data processing unit.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "DPA is a subsystem of NVIDIA NICs and DPUs."
+          }
+        ]
+      },
+      {
+        "concept": "State History and Manual Intervention Alerts",
+        "prerequisites": [
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "A model in which a resource moves between defined states.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "State history records past state transitions."
+          },
+          {
+            "name": "Service-level agreement (SLA) for states",
+            "definition": "A time limit on how long a resource should stay in a state.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "A host that stays in a state too long is stuck and can trigger alerts."
+          }
+        ]
+      },
+      {
+        "concept": "Switch State Machine",
+        "prerequisites": [
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "A model in which a resource moves between defined states.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The switch lifecycle is a state machine."
+          },
+          {
+            "name": "NVLink switch tray",
+            "definition": "A rack tray that holds NVLink switches.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "This is the device the state machine manages."
+          }
+        ]
+      },
+      {
+        "concept": "Power Shelf State Machine",
+        "prerequisites": [
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "A model in which a resource moves between defined states.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The power shelf lifecycle is a state machine."
+          },
+          {
+            "name": "Power shelf",
+            "definition": "A rack unit that supplies power to the rack.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "This is the device the state machine manages."
+          }
+        ]
+      },
+      {
+        "concept": "Rack State Machine",
+        "prerequisites": [
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "A rack-scale system made of compute trays, switches and power shelves.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The rack is the resource this state machine manages."
+          },
+          {
+            "name": "Switch State Machine",
+            "definition": "The lifecycle of an NVLink switch in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The rack drives its child switches' state machines."
+          },
+          {
+            "name": "Power Shelf State Machine",
+            "definition": "The lifecycle of a power shelf in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The rack drives its child power shelves' state machines."
+          }
+        ]
+      },
+      {
+        "concept": "Rack Maintenance",
+        "prerequisites": [
+          {
+            "name": "Rack State Machine",
+            "definition": "The lifecycle of a rack in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Maintenance is one of the rack states."
+          },
+          {
+            "name": "Maintenance Activities",
+            "definition": "The individual steps that run during rack maintenance.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Maintenance runs these activities in order."
+          },
+          {
+            "name": "Maintenance Scope",
+            "definition": "The selection of which activities and devices a maintenance run covers.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The scope decides which activities are skipped."
+          }
+        ]
+      },
+      {
+        "concept": "Rack Ingestion",
+        "prerequisites": [
+          {
+            "name": "Rack Maintenance",
+            "definition": "The rack state that runs maintenance activities.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "Ingestion is the rack's first maintenance cycle."
+          },
+          {
+            "name": "NVOS / NVUE",
+            "definition": "The NVLink switch operating system and its configuration interface.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "An NVOS update during ingestion triggers a compute reboot."
+          }
+        ]
+      },
+      {
+        "concept": "Switch ReProvisioning",
+        "prerequisites": [
+          {
+            "name": "Switch State Machine",
+            "definition": "The lifecycle of an NVLink switch in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "ReProvisioning is a switch state."
+          },
+          {
+            "name": "Rack Maintenance",
+            "definition": "The rack state that runs maintenance activities.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The switch waits on steps that rack maintenance drives."
+          }
+        ]
+      },
+      {
+        "concept": "On-Demand Maintenance",
+        "prerequisites": [
+          {
+            "name": "State Controller Tick",
+            "definition": "One processing pass of the state controller.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The controller picks up the stored request during its processing."
+          },
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "A model in which a resource moves between defined states.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The maintenance runs through device state transitions."
+          }
+        ]
+      },
+      {
+        "concept": "Switch Certificate Configuration",
+        "prerequisites": [
+          {
+            "name": "Switch mTLS Services",
+            "definition": "The switch services that get certificate bindings.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "These services are the targets of the certificate bindings."
+          },
+          {
+            "name": "Rack Management Service (RMS)",
+            "definition": "The service that runs rack-level device jobs.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Both steps run as RMS jobs."
+          },
+          {
+            "name": "Asynchronous job polling",
+            "definition": "Submitting a job and then repeatedly checking whether it has finished.",
+            "kind": "procedural",
+            "confidence": 0.65,
+            "why": "The RMS jobs are asynchronous."
+          },
+          {
+            "name": "Switch State Machine",
+            "definition": "The lifecycle of an NVLink switch in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "This is a sub-flow of the Configuring state."
+          }
+        ]
+      },
+      {
+        "concept": "Switch mTLS Services",
+        "prerequisites": [
+          {
+            "name": "mTLS / gRPC",
+            "definition": "Mutual TLS authentication over gRPC connections.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The services are bound to certificates for mTLS."
+          },
+          {
+            "name": "Primary Switch",
+            "definition": "The switch selected to host the fabric applications.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Fabric services apply only to the primary switch."
+          },
+          {
+            "name": "NVOS / NVUE",
+            "definition": "The NVLink switch operating system and its configuration interface.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "nvue_api is one of the listed services."
+          }
+        ]
+      },
+      {
+        "concept": "Primary Switch",
+        "prerequisites": [
+          {
+            "name": "NMX-C / Fabric Manager",
+            "definition": "The NVLink fabric management cluster application.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The primary switch is chosen to host this application."
+          },
+          {
+            "name": "Rack Management Service (RMS)",
+            "definition": "The service that runs rack-level device jobs.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "RMS selects the primary switch."
+          }
+        ]
+      },
+      {
+        "concept": "Submission Outcome Semantics",
+        "prerequisites": [
+          {
+            "name": "Rack Management Service (RMS)",
+            "definition": "The service that runs rack-level device jobs.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The error categories describe requests submitted to RMS."
+          },
+          {
+            "name": "Idempotency",
+            "definition": "Doing an operation more than once has the same effect as doing it once.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Whether a retry is safe depends on idempotency."
+          }
+        ]
+      },
+      {
+        "concept": "Controller State Persistence",
+        "prerequisites": [
+          {
+            "name": "PostgreSQL (Zalando operator)",
+            "definition": "The PostgreSQL database NICo uses, run by the Zalando operator.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Controller state is stored in PostgreSQL."
+          },
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "A model in which a resource moves between defined states.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The stored data is the state machine's state."
+          }
+        ]
+      },
+      {
+        "concept": "NMX-C / Fabric Manager",
+        "prerequisites": [
+          {
+            "name": "NVLink scale-up fabric",
+            "definition": "The NVLink network that joins GPUs across trays into one domain.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "NMX-C manages this fabric."
+          },
+          {
+            "name": "NVLink switch tray",
+            "definition": "A rack tray that holds NVLink switches.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "NMX-C runs on a switch."
+          }
+        ]
+      },
+      {
+        "concept": "NVLink scale-up fabric",
+        "prerequisites": [
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "A rack-scale GPU system.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The fabric links the GPUs in this rack."
+          },
+          {
+            "name": "Network planes (Ethernet, InfiniBand, NVLink)",
+            "definition": "The separate networks that GPU clusters use.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "NVLink is one of the network planes."
+          }
+        ]
+      },
+      {
+        "concept": "PowerSequence Reboot Barrier",
+        "prerequisites": [
+          {
+            "name": "Rack Maintenance",
+            "definition": "The rack state that runs maintenance activities.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "This is a rack maintenance step."
+          },
+          {
+            "name": "Power control reset types",
+            "definition": "The kinds of power and reset operations a BMC can perform.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The step queues graceful reboots."
+          }
+        ]
+      },
+      {
+        "concept": "Rack Validation (RVS)",
+        "prerequisites": [
+          {
+            "name": "Rack State Machine",
+            "definition": "The lifecycle of a rack in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "Validation results drive the rack's Validating sub-states."
+          },
+          {
+            "name": "Machine validation tests",
+            "definition": "Tests run on machines to confirm they work correctly.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "RVS runs validation on the rack's machines."
+          }
+        ]
+      },
+      {
+        "concept": "BOM Validation",
+        "prerequisites": [
+          {
+            "name": "Switch State Machine",
+            "definition": "The lifecycle of an NVLink switch in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "BomValidating is a switch state."
+          },
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "Finding new hardware and recording its components.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "The components found during discovery are compared with the expected BOM."
+          }
+        ]
+      },
+      {
+        "concept": "Tray Replacement / Topology Change",
+        "prerequisites": [
+          {
+            "name": "Rack State Machine",
+            "definition": "The lifecycle of a rack in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The event moves the rack from Ready back to Discovering."
+          },
+          {
+            "name": "Hardware discovery and ingestion",
+            "definition": "Finding new hardware and bringing it under management.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The replacement tray is discovered as a new machine."
+          }
+        ]
+      }
+    ]
+  }
+}

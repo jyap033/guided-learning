@@ -1,0 +1,496 @@
+{
+  "kind": "expand",
+  "promptVersion": "1",
+  "provider": "claude-code",
+  "output": {
+    "results": [
+      {
+        "concept": "Host DPU Policy",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's programmable network card that runs its own operating system and offloads networking and security functions.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "The policy decides how DPU hardware on a host gets treated."
+          },
+          {
+            "name": "DPU mode vs NIC mode",
+            "definition": "A BlueField card can run as a full DPU with its own Arm OS or as a plain network interface card.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The Manage and Nic options correspond to these two operating modes."
+          },
+          {
+            "name": "Managed Host",
+            "definition": "A bare-metal server under NICo's control, together with its DPUs.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The policy is set for each managed host."
+          }
+        ]
+      },
+      {
+        "concept": "Mellanox Device Kind",
+        "prerequisites": [
+          {
+            "name": "PN/PSID",
+            "definition": "A card's part number and its Parameter-Set ID, which identify the exact hardware SKU and its firmware flavour.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The device kind is derived from the part number."
+          },
+          {
+            "name": "DPU mode vs NIC mode",
+            "definition": "A BlueField card can run as a full DPU with its own Arm OS or as a plain network interface card.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The device kind is defined as something that stays the same when the operating mode changes."
+          }
+        ]
+      },
+      {
+        "concept": "BMC Discovery",
+        "prerequisites": [
+          {
+            "name": "Baseboard Management Controller (BMC)",
+            "definition": "A small embedded computer on a server's motherboard that allows remote management independent of the host OS.",
+            "kind": "conceptual",
+            "confidence": 0.95,
+            "why": "BMCs are the thing being discovered."
+          },
+          {
+            "name": "DHCP",
+            "definition": "A protocol that automatically assigns IP addresses to devices on a network.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Discovery is triggered when the BMC sends a DHCP request."
+          },
+          {
+            "name": "MAC address",
+            "definition": "A hardware identifier assigned to a network interface.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The BMC is matched against the table by its MAC address."
+          },
+          {
+            "name": "Expected Machines Manifest",
+            "definition": "A list the operator provides of the machines expected at a site, with their BMC MAC addresses and credentials.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Initial credentials are looked up in this table."
+          }
+        ]
+      },
+      {
+        "concept": "State Controller Tick",
+        "prerequisites": [
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "A model in which each resource is always in one defined state and moves between states through defined transitions.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Each tick is where state-machine transitions get executed."
+          },
+          {
+            "name": "Desired vs actual state reconciliation",
+            "definition": "Repeatedly comparing the intended state with the observed state and acting to close the gap.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "A tick is one pass of the reconciliation loop."
+          },
+          {
+            "name": "mTLS / gRPC",
+            "definition": "gRPC is an RPC framework; mTLS is TLS in which both sides authenticate each other with certificates.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The definition contrasts a gRPC call that only sets a flag with the transition that happens on a tick."
+          }
+        ]
+      },
+      {
+        "concept": "On-Demand Rack Maintenance",
+        "prerequisites": [
+          {
+            "name": "Rack State Machine",
+            "definition": "The lifecycle states NICo moves a rack through, such as Ready, Error, Maintenance and Validating.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "The rack state machine picks up and runs the maintenance request."
+          },
+          {
+            "name": "State Controller Tick",
+            "definition": "The periodic loop in which a state handler reloads an object and performs transitions.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The gRPC call only sets a request flag, and a later tick acts on it."
+          },
+          {
+            "name": "Maintenance Activities",
+            "definition": "The ordered steps a maintenance run can include.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The request selects which activities to run."
+          },
+          {
+            "name": "Maintenance Scope",
+            "definition": "The optional lists of device IDs to maintain.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The request specifies which devices to target."
+          }
+        ]
+      },
+      {
+        "concept": "Maintenance Scope",
+        "prerequisites": [
+          {
+            "name": "GB200 NVL72 rack",
+            "definition": "NVIDIA's rack-scale system made up of compute trays, NVLink switch trays and power shelves.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "The scope lists machines, switches and power shelves within a rack."
+          }
+        ]
+      },
+      {
+        "concept": "Maintenance Activities",
+        "prerequisites": [
+          {
+            "name": "Firmware inventory and update",
+            "definition": "Listing the firmware versions installed on components and applying new firmware.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Firmware upgrade is one of the activities."
+          },
+          {
+            "name": "NVOS / NVUE",
+            "definition": "The NVIDIA switch operating system and its configuration interface.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "NVOS update is one of the activities."
+          },
+          {
+            "name": "NMX-C / Fabric Manager",
+            "definition": "The controller that manages the NVLink fabric across switch trays.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "NMX cluster configuration is one of the activities."
+          },
+          {
+            "name": "PowerSequence Reboot Barrier",
+            "definition": "A coordinated rack power-cycle sequence that waits until all components come back.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "Power sequence is one of the activities."
+          }
+        ]
+      },
+      {
+        "concept": "SOT JSON",
+        "prerequisites": [
+          {
+            "name": "Rack Management Service (RMS)",
+            "definition": "The service that carries out rack-level firmware and power operations.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "SOT JSON is passed to RMS."
+          },
+          {
+            "name": "Rack profile",
+            "definition": "A definition of a rack's expected components and their target configuration.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The SOT JSON can come from the rack profile's firmware object."
+          },
+          {
+            "name": "Firmware baseline enforcement",
+            "definition": "Ensuring components run approved target firmware versions.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "SOT JSON defines the target firmware configuration."
+          }
+        ]
+      },
+      {
+        "concept": "Role-Based Access Control (RBAC)",
+        "prerequisites": [
+          {
+            "name": "Client identity",
+            "definition": "The authenticated identity of the caller making an API request.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Roles are assigned to authenticated identities."
+          }
+        ]
+      },
+      {
+        "concept": "SuperNIC Lockdown",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's programmable network card that runs its own operating system and offloads networking and security functions.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "SuperNICs are BlueField-family cards."
+          },
+          {
+            "name": "Zero-trust host model",
+            "definition": "The principle that the tenant's host OS is untrusted and must not be able to tamper with the infrastructure.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Lockdown exists to stop host tenants from tampering with the card."
+          },
+          {
+            "name": "Mellanox firmware tools (mlxconfig, mst)",
+            "definition": "Tools for querying and changing NIC firmware configuration.",
+            "kind": "procedural",
+            "confidence": 0.55,
+            "why": "Lockdown blocks the configuration changes these tools make."
+          }
+        ]
+      },
+      {
+        "concept": "S-VPC",
+        "prerequisites": [
+          {
+            "name": "SuperNIC Lockdown",
+            "definition": "A card mode that blocks firmware and configuration changes unless the card is unlocked with a key.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "S-VPC is defined by NICo having to manage lockdown keys."
+          },
+          {
+            "name": "VPC (FNN VPC)",
+            "definition": "A tenant's isolated virtual network in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "S-VPC is a VPC deployment flavour."
+          }
+        ]
+      },
+      {
+        "concept": "Key Derivation Function (KDF)",
+        "prerequisites": []
+      },
+      {
+        "concept": "HKDF-SHA256",
+        "prerequisites": [
+          {
+            "name": "Key Derivation Function (KDF)",
+            "definition": "A function that deterministically produces keys from secret input material plus context.",
+            "kind": "conceptual",
+            "confidence": 0.95,
+            "why": "HKDF is a specific KDF."
+          },
+          {
+            "name": "Input Key Material (IKM)",
+            "definition": "The secret site-wide value from which keys are derived.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "HKDF takes the IKM as its secret input."
+          },
+          {
+            "name": "KDF Context",
+            "definition": "The non-secret inputs that tie a derived key to one card.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The info string is built from the context."
+          }
+        ]
+      },
+      {
+        "concept": "Input Key Material (IKM)",
+        "prerequisites": [
+          {
+            "name": "Key Derivation Function (KDF)",
+            "definition": "A function that deterministically produces keys from secret input material plus context.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The IKM is the secret input to the KDF."
+          },
+          {
+            "name": "Credential store (Vault vs Postgres)",
+            "definition": "Where NICo keeps secrets: in Vault or in encrypted form in Postgres.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "The IKM is stored and versioned in the credential store."
+          }
+        ]
+      },
+      {
+        "concept": "KDF Context",
+        "prerequisites": [
+          {
+            "name": "Key Derivation Function (KDF)",
+            "definition": "A function that deterministically produces keys from secret input material plus context.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "The context is one of the KDF's inputs."
+          },
+          {
+            "name": "MAC address",
+            "definition": "A hardware identifier assigned to a network interface.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The context includes the card's MAC address."
+          },
+          {
+            "name": "Machine ID",
+            "definition": "NICo's stable identifier for a managed machine.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The context includes the host's MachineId."
+          }
+        ]
+      },
+      {
+        "concept": "Entropy and Offline Guessing",
+        "prerequisites": [
+          {
+            "name": "Key Derivation Function (KDF)",
+            "definition": "A function that deterministically produces keys from secret input material plus context.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "The point is that a KDF adds no entropy to its input."
+          }
+        ]
+      },
+      {
+        "concept": "Lockdown IKM Rotation",
+        "prerequisites": [
+          {
+            "name": "Input Key Material (IKM)",
+            "definition": "The secret site-wide value from which keys are derived.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "Rotation creates new IKM versions."
+          },
+          {
+            "name": "DPA Interface",
+            "definition": "NICo's record and lifecycle for a SuperNIC attached to a host.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "Cards move to the new version through the unlock/re-lock lifecycle."
+          },
+          {
+            "name": "SuperNIC Lockdown",
+            "definition": "A card mode that blocks changes unless the card is unlocked with a key.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "Moving to a new version means re-locking the card with a new key."
+          }
+        ]
+      },
+      {
+        "concept": "DPA Interface",
+        "prerequisites": [
+          {
+            "name": "SuperNIC Lockdown",
+            "definition": "A card mode that blocks changes unless the card is unlocked with a key.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "The lifecycle includes the Unlocking and Locking states."
+          },
+          {
+            "name": "State machine (resource lifecycle)",
+            "definition": "A model in which each resource is always in one defined state and moves between states through defined transitions.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "The DPA interface moves through lifecycle states."
+          },
+          {
+            "name": "DPA (Data Path Accelerator)",
+            "definition": "The programmable data-path processor on NVIDIA SuperNICs.",
+            "kind": "conceptual",
+            "confidence": 0.6,
+            "why": "The record is named after the DPA-based SuperNIC."
+          }
+        ]
+      },
+      {
+        "concept": "EVPN",
+        "prerequisites": [
+          {
+            "name": "BGP",
+            "definition": "The routing protocol that exchanges reachability information between routers.",
+            "kind": "conceptual",
+            "confidence": 0.9,
+            "why": "EVPN is carried over BGP."
+          },
+          {
+            "name": "Underlay and overlay networks",
+            "definition": "The physical routed network versus the virtual tenant networks built on top of it.",
+            "kind": "conceptual",
+            "confidence": 0.75,
+            "why": "EVPN is the control plane for an overlay."
+          },
+          {
+            "name": "VXLAN and VNI",
+            "definition": "An encapsulation that carries L2 frames over an IP network, with each virtual network identified by a VNI.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "EVPN tells VTEPs where addresses sit in a VXLAN overlay."
+          }
+        ]
+      },
+      {
+        "concept": "HostInband Network Segment",
+        "prerequisites": [
+          {
+            "name": "Underlay and HostInband network segments",
+            "definition": "The kinds of network segments NICo manages on the physical fabric.",
+            "kind": "conceptual",
+            "confidence": 0.7,
+            "why": "HostInband is one of these segment types."
+          },
+          {
+            "name": "Underlay and overlay networks",
+            "definition": "The physical routed network versus the virtual tenant networks built on top of it.",
+            "kind": "conceptual",
+            "confidence": 0.65,
+            "why": "It is defined as an underlay segment."
+          }
+        ]
+      },
+      {
+        "concept": "Flat VPC",
+        "prerequisites": [
+          {
+            "name": "VPC (FNN VPC)",
+            "definition": "A tenant's isolated virtual network in NICo.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "A Flat VPC is a type of VPC."
+          },
+          {
+            "name": "HostInband Network Segment",
+            "definition": "An underlay segment that a zero-DPU host's NIC attaches to directly.",
+            "kind": "conceptual",
+            "confidence": 0.8,
+            "why": "It is the only segment type a Flat VPC accepts."
+          },
+          {
+            "name": "IP address pools",
+            "definition": "Ranges of addresses NICo allocates from.",
+            "kind": "conceptual",
+            "confidence": 0.55,
+            "why": "NICo allocates addresses for the VPC."
+          }
+        ]
+      },
+      {
+        "concept": "DOCA",
+        "prerequisites": [
+          {
+            "name": "BlueField DPU",
+            "definition": "NVIDIA's programmable network card that runs its own operating system and offloads networking and security functions.",
+            "kind": "conceptual",
+            "confidence": 0.85,
+            "why": "DOCA is the software framework for BlueField DPUs."
+          }
+        ]
+      }
+    ]
+  }
+}

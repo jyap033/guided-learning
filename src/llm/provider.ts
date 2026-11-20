@@ -83,12 +83,16 @@ export class CachedProvider implements LlmProvider {
     return output;
   }
 
-  /** Delete cached answers this run didn't use (stale prompts or inputs). Returns how many. */
-  pruneUnused(): number {
+  /**
+   * Delete cached answers of the given task kinds that this run didn't use
+   * (stale prompts or inputs). Returns how many were removed.
+   */
+  pruneUnused(kinds: string[]): number {
     if (!fs.existsSync(this.dir)) return 0;
     let n = 0;
     for (const f of fs.readdirSync(this.dir)) {
-      if (f.endsWith(".json") && !this.used.has(f)) {
+      const kind = f.slice(0, f.lastIndexOf("-"));
+      if (f.endsWith(".json") && kinds.includes(kind) && !this.used.has(f)) {
         fs.rmSync(path.join(this.dir, f));
         n++;
       }

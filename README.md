@@ -11,6 +11,7 @@ Pilot topic: **NVIDIA NICo** (NVIDIA Infra Controller).
 
 - [Design document](docs/DESIGN.md)
 - [Decisions log](docs/DECISIONS.md)
+- [Research: learning methods](docs/RESEARCH-LEARNING-METHODS.md)
 
 ## Status
 

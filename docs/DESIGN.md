@@ -5,7 +5,7 @@
 | **Status** | Draft v0.1 |
 | **Last updated** | 2026-11-20 |
 | **Pilot topic** | NVIDIA NICo (NVIDIA Infra Controller) |
-| **Related** | [DECISIONS.md](./DECISIONS.md) |
+| **Related** | [DECISIONS.md](./DECISIONS.md), [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEARNING-METHODS.md) |
 
 ---
 
@@ -134,6 +134,9 @@ LearnerProfile: known concepts, self-rating, check results, pace
 - Stop conditions: depth limit, floor reached, or concept is marked known.
 
 ### 6.4 Order and chapterise
+- Plan the **project spine** (D-014): a sequence of build tasks from a toy
+  version of the capstone to the real thing. Each concept is attached to the
+  first build task that needs it and taught just before it.
 - Topological sort of the DAG (deterministic code, not an LLM).
 - Cluster adjacent concepts into chapters by theme and depth (LLM proposes,
   code validates that no chapter depends on a later one).
@@ -149,11 +152,18 @@ LearnerProfile: known concepts, self-rating, check results, pace
   the learner's progress.
 
 ### 6.6 Learn loop
-- Learner reads a lesson, answers checks, completes the exercise.
-- Results update the LearnerProfile. Weak areas get remedial mini-lessons;
-  strong results can skip ahead.
-- An "Ask" tutor is available in every lesson, scoped to the current concept
-  and its sources.
+Grounded in [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEARNING-METHODS.md).
+- **Lesson shape** (D-015): prequestion → worked example with subgoal labels
+  → partly completed example → independent problem → self-explanation prompt.
+  Guidance fades as mastery rises.
+- **Retrieval and spacing** (D-016): checks are built into lessons; finished
+  concepts go into a spaced, mixed review queue.
+- **Mastery** (D-017): per-concept mastery estimate; a chapter's build task is
+  recommended at about 80% mastery, with remediation for weak concepts.
+- **Tutor** (D-018): Socratic, hints given in stages, never just hands over the
+  answer. Scoped to the current concept and its sources.
+- **Map** (D-019): every chapter opens with its place on the map and why the
+  end goal needs it.
 
 ## 7. Pilot: NVIDIA NICo
 

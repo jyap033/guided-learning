@@ -41,6 +41,16 @@ reversed, mark it `Superseded by D-xxx` and add a new entry.
 | D-011 | How to capture the learner's starting knowledge | Open (before M4) |
 | D-012 | Lazy, per-chapter content generation | Proposed |
 | D-013 | Lessons must cite sources | Accepted |
+| D-014 | Project spine: concepts delivered just in time for build tasks | Proposed |
+| D-015 | Fixed lesson shape with fading guidance | Proposed |
+| D-016 | Retrieval practice plus a spaced review queue | Proposed |
+| D-017 | Soft mastery gating per chapter | Proposed |
+| D-018 | Guardrailed Socratic tutor with staged hints | Proposed |
+| D-019 | Curriculum map as an advance organiser | Proposed |
+| D-020 | Graph extraction: few-shot, doc-order signal, edge confidence | Proposed |
+| D-021 | Features we deliberately won't build | Proposed |
+
+Evidence for D-014 – D-021 is in [RESEARCH-LEARNING-METHODS.md](./RESEARCH-LEARNING-METHODS.md).
 
 ---
 
@@ -184,6 +194,11 @@ reversed, mark it `Superseded by D-xxx` and add a new entry.
 - **Options:** self-report checklist; adaptive placement quiz walking the DAG
   from the floor upward; both (self-report to prune, quiz to confirm).
 - **Leaning:** Both. MVP starts with self-report only.
+- **Update (2026-11-20):** Research supports an adaptive quiz that walks the
+  DAG (knowledge space theory, as used in ALEKS): knowing a concept implies
+  knowing its prerequisites, so a few questions can rule whole subtrees in or
+  out. Chapter prequestions feed the same model. See
+  RESEARCH-LEARNING-METHODS.md §1.6.
 
 ## D-012 — Lazy, per-chapter content generation
 - **Status:** Proposed
@@ -207,3 +222,117 @@ reversed, mark it `Superseded by D-xxx` and add a new entry.
   checks lessons against their sources.
 - **Consequences:** Requires ingestion of good sources for prerequisite topics
   too (not just NICo docs), e.g. Kubernetes docs, Redfish spec, RFCs.
+
+## D-014 — Project spine: concepts delivered just in time for build tasks
+- **Status:** Proposed
+- **Date:** 2026-11-20
+- **Context:** The original design taught concepts strictly bottom-up, with
+  the build at the end. Research on complex skills (4C/ID, Merrill's first
+  principles, cognitive apprenticeship) finds that learning every part in
+  isolation before any whole task leads to poor transfer and weak motivation.
+- **Decision:** Break the capstone into a sequence of "build tasks" from a
+  toy version to the real thing, e.g. (1) script that talks to a fake server
+  API → (2) PXE-boot a VM → (3) control a VM through a Redfish emulator →
+  … → (n) provision a machine through NICo. The DAG still decides the order of
+  concepts; each concept is attached to the first build task that needs it
+  and taught just before it.
+- **Alternatives considered:** Pure bottom-up (original §6.4); pure
+  project-first with no structured concepts (fails novices, per Kirschner et
+  al. 2006).
+- **Consequences:** The chapteriser must plan build tasks as well as group
+  concepts. The learner builds something from chapter 1.
+
+## D-015 — Fixed lesson shape with fading guidance
+- **Status:** Proposed
+- **Date:** 2026-11-20
+- **Context:** Worked examples help novices (Sweller), but the same guidance
+  hurts once the learner is competent (expertise reversal). Pretesting and
+  self-explanation add learning cheaply.
+- **Decision:** Each concept follows: prequestion → explanation with a
+  worked example labelled with subgoals → partly completed example →
+  independent problem → self-explanation prompt. Steps are skipped or
+  shortened as the concept's mastery estimate rises. Concepts get a `kind`
+  (`procedural` | `conceptual`); conceptual ones may start with a short
+  attempt before instruction (productive failure).
+- **Consequences:** The authoring prompt produces structured lesson parts,
+  not free-form prose. Adds `kind` to `concepts`.
+
+## D-016 — Retrieval practice plus a spaced review queue
+- **Status:** Proposed
+- **Date:** 2026-11-20
+- **Context:** Practice testing and spacing are the two highest-rated
+  techniques (Dunlosky et al. 2013).
+- **Decision:** Quick checks are built into lessons. Completed concepts enter
+  a spaced-review queue (start with a simple expanding schedule, e.g.
+  1–3–7–21 days, adjusted by correctness). Review sessions mix concepts from
+  different chapters together.
+- **Consequences:** New `review_items` table and a daily "review" view. Needs
+  a good supply of varied questions per concept.
+
+## D-017 — Soft mastery gating per chapter
+- **Status:** Proposed
+- **Date:** 2026-11-20
+- **Context:** Mastery learning (Bloom; Kulik et al. 1990) and step-based
+  tutoring (VanLehn 2011) are among the most effective approaches. Hard locks
+  may frustrate a self-directed adult.
+- **Decision:** Track mastery per concept (MVP: a rolling score; later:
+  Bayesian knowledge tracing). A chapter's build task is recommended at about
+  80% mastery. The learner can skip, but is shown which concepts are weak,
+  and remediation is offered.
+- **Alternatives considered:** Hard gate; no gate.
+- **Consequences:** How strict the gate should be is to be tuned with the
+  pilot user.
+
+## D-018 — Guardrailed Socratic tutor with staged hints
+- **Status:** Proposed
+- **Date:** 2026-11-20
+- **Context:** Bastani et al. (PNAS 2025): an unrestricted AI assistant
+  raised practice scores but cut exam scores by 17%; a guardrailed tutor
+  avoided the harm. Kestin et al. (2025): a research-based AI tutor beat
+  in-class active learning.
+- **Decision:** The tutor asks the learner to attempt first, gives hints in
+  stages (nudge → hint → partial step → full worked solution only after a
+  real attempt), gives feedback on each step, and refers back to the lesson
+  and its sources. Guardrails are in the system prompt *and* checked in code
+  (e.g. the number of hints used is tracked and the full solution is only
+  released after enough attempts). Using the full solution lowers the mastery
+  credit for that exercise.
+- **Consequences:** The tutor is less convenient than plain chat on purpose.
+  The UI should explain why.
+
+## D-019 — Curriculum map as an advance organiser
+- **Status:** Proposed
+- **Date:** 2026-11-20
+- **Context:** Advance organisers (Ausubel 1960) and concept maps (Nesbit &
+  Adesope 2006) improve retention and transfer.
+- **Decision:** The map view is central. Each chapter opens with its place on
+  the map and a short "why NICo needs this" note linking it to the end goal.
+- **Consequences:** The authoring step generates a "why it matters for the
+  target" note per chapter.
+
+## D-020 — Graph extraction: few-shot, doc-order signal, edge confidence
+- **Status:** Proposed
+- **Date:** 2026-11-20
+- **Context:** Recent papers support LLM-built prerequisite graphs and
+  recursive tracing down to the learner's knowledge edge (RPKT, arXiv
+  2508.11892). They also show plain extraction is noisy (InstructKG, arXiv
+  2602.17111), that few-shot beats zero-shot (arXiv 2605.25419), and that
+  dropping ambiguous edges helps (arXiv 2606.10736).
+- **Decision:** Extraction prompts include few-shot examples. The order in
+  which source docs introduce concepts is used as a signal. Each edge gets a
+  confidence score, and edges that are low-confidence, bidirectional or
+  contradictory are dropped or flagged for review. Edge types are
+  `depends_on` and `part_of`.
+- **Consequences:** Adds `confidence` and `type` to `edges`. The hand-written
+  NICo reference list (DESIGN §11) is used to tune the confidence threshold.
+
+## D-021 — Features we deliberately won't build
+- **Status:** Proposed
+- **Date:** 2026-11-20
+- **Context:** Some popular features have weak or no evidence.
+- **Decision:** No "learning style" personalisation (Pashler et al. 2008). No
+  highlighting or reread-focused features, and no summary-only lessons
+  (Dunlosky et al. 2013). Explain "desirable difficulty" (Bjork 1994) in the
+  product so that effortful features (quizzes, spacing, staged hints) don't
+  feel like bad UX.
+- **Consequences:** Keeps scope focused on what works.

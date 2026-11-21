@@ -51,3 +51,30 @@ chapters:
       /31 links works: traceroute hops 10.0.0.0 then 10.0.0.3, server sees
       10.0.0.1, forward-chain firewall lets the first client through and times
       out a second client.
+  4:
+    - >-
+      Tested 2026-11-21: the mini state controller build task works as written
+      (GCRA mock BMC, leases with 3 s TTL, crash then replay, race with fence
+      failed; final checks 12 effects and [('Ready', 2, 12)]). Keep it.
+      Wording: after the crash the second worker does m1-m11 first and picks
+      up m0 on a later pass once the stale lease expires; say that rather than
+      "waits ~3 s for m0".
+    - >-
+      Completion problems must give the signature of any function the learner
+      fills in a call to (e.g. call_bmc(machine_id, op_id)).
+  5:
+    - >-
+      Tested 2026-11-21: the mini Site Explorer build task works as written
+      (READY / NOT READY with exit codes, PCI-order sort, OOB MAC, boot order
+      check, `kill %1` restarts). Keep it.
+    - >-
+      This chapter comes before the BMC and Redfish chapter (6) and the
+      networking chapters. Don't say an earlier chapter covered the BMC. When
+      the lifecycle overview mentions later topics (BMC, HBN, LLDP, VXLAN/EVPN,
+      VRF, P_Key, NVLink partitions, PXE/iPXE), give each a one-line plain
+      definition and say which part of the course teaches it.
+  6:
+    - >-
+      Tested 2026-11-21: the mock BMC and Redfish client build task works as
+      written (401 except the service root, ForceOff/409/On/not offered
+      sequence, vendor-specific BIOS paths for Lenovo, HPE and Dell). Keep it.

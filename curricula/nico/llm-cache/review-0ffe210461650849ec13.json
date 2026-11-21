@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "bluefield-dpu",
+        "severity": "minor",
+        "problem": "The chapter says NICo trims whitespace on the host PCIe device SerialNumber before pairing (in the explanation, worked example step 4 and whyItMatters). The reference only documents trimming for Chassis SerialNumber (the DPU's Card1 serial) and NetworkAdapters SerialNumber. The PCIe device SerialNumber entry says only 'matched against DPU system serial numbers'.",
+        "fix": "Attribute the trimming to the documented fields, e.g. 'The reference notes that serial fields such as Chassis and NetworkAdapters SerialNumber are whitespace-trimmed'. Or say the lab's trim on the PCIe serial is a reasonable normalisation, not a documented NICo behaviour for that field."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The last step and the verify use a data-net container that reaches the BMC by name (dpu-bmc). That fails at DNS, because Docker's name resolution is scoped to each user-defined network. It shows names don't resolve across networks, not that packets can't travel from the data network to the management plane, yet the text presents it as proof of no path.",
+        "fix": "Also probe by IP: get the address with `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' dpu-bmc` and run urlopen against http://<ip>:8000 from data-net with a timeout. Expect a timeout or connection error. Alternatively, rephrase the claim as 'cannot even resolve the BMC's name'."
+      }
+    ]
+  }
+}

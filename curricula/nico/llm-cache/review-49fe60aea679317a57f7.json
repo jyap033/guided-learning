@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "bgp",
+        "severity": "minor",
+        "problem": "The explanation says \"Data-center designs, including NICo's, use eBGP on every link.\" The docs only require eBGP unnumbered on leaf switches facing DPUs (plus multi-hop eBGP to route servers) and say to follow RFC 7938. They make no claim about the leaf–spine links, which the network team owns.",
+        "fix": "Reword to: \"RFC 7938-style data-center designs use eBGP on every link, and NICo requires eBGP unnumbered on every leaf port facing a DPU.\""
+      }
+    ]
+  }
+}

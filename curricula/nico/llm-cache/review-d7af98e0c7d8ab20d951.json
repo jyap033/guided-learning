@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "autonomous-system-number",
+        "severity": "major",
+        "problem": "Worked example 'Check it with Python': the comment says print(divmod(first, 65536)) outputs (64088, 26528) -> asdot 64088.26528. For first = 4200100000 the real output is (64088, 28832), because 64088*65536 = 4200071168 and 4200100000 - 4200071168 = 28832. A learner running the code will see output that differs from the text.",
+        "fix": "Change the comment to `# (64088, 28832) -> asdot 64088.28832`."
+      },
+      {
+        "where": "underlay-and-overlay-networks",
+        "severity": "minor",
+        "problem": "Independent problem hint 3 asks 'Do any loopback routes change?' and implies no. The lifecycle doc says that on tenant release NICo returns 'tenant IP, VNI, and DPU-loopback allocations to their pools', so the claim that loopback routing never changes on release isn't supported. Only the absence of switch configuration changes is supported.",
+        "fix": "Reword the hint to ask about switch configuration, e.g. 'Does any leaf or spine switch configuration need to change?', or note that loopback allocations may be reclaimed while switch configuration stays the same."
+      }
+    ]
+  }
+}

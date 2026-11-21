@@ -1,0 +1,40 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "Step 'Pre-ingestion checks' says the SNTP output should show `stratum=9` (one more than chrony's `local stratum 8`). In chrony, `local stratum N` is the stratum the server reports to clients, so sntp.py prints `stratum=8`. The command output differs from what the text says.",
+        "fix": "Change the expected output to `stratum=8`. Explain that chrony's `local stratum` value is what clients see; unlike ntpd's local clock driver, chrony doesn't add one."
+      },
+      {
+        "where": "uefi-bios-settings",
+        "severity": "major",
+        "problem": "The explanation says 'NICo uses BIOS settings for things like this' (SR-IOV), and check 3 asks 'Name one firmware feature NICo turns on through BIOS settings' with SR-IOV as the answer, citing 'the course definition'. None of the provided docs mention SR-IOV or any specific BIOS attribute NICo sets. They only mention UEFI firmware baselines, lockdown, the Secure Boot toggle and boot order.",
+        "fix": "Remove the claim that NICo enables SR-IOV, or present SR-IOV only as a generic example. Rewrite check 3 to ask about something the docs support, e.g. 'Which Redfish BIOS-related capability does NICo require?' (UEFI Secure Boot toggle), or 'What does Site Explorer record?' (boot order and lockdown mode)."
+      },
+      {
+        "where": "cloud-init",
+        "severity": "minor",
+        "problem": "In the optional QEMU steps, the user `ops` has only an SSH key (no password), and QEMU runs with -nographic and no port forward. The learner can't log in at the console or over SSH to run `cloud-init status --wait` as the 'Check the result' step says.",
+        "fix": "Add `-nic user,hostfwd=tcp::2222-:22` and tell the learner to `ssh -p 2222 ops@127.0.0.1` with their own key. Or add `chpasswd`/`lock_passwd: false` with a lab password for console login."
+      },
+      {
+        "where": "cloud-init",
+        "severity": "minor",
+        "problem": "`python3 -m http.server 8000` will fail with 'address already in use' if the Lesson 1-3 mock BMC is still running on port 8000.",
+        "fix": "Tell the learner to stop mockbmc.py first, or use a different port (e.g. 8080) and update the QEMU SMBIOS URL to match."
+      },
+      {
+        "where": "dhcp",
+        "severity": "minor",
+        "problem": "The statement that nico-dhcp 'is built on Kea' is the chapter's own inference. The docs only show `nico-dhcp.config.kea.hookParameters` and describe nico-dhcp as a stateless DHCP-to-gRPC proxy.",
+        "fix": "Label it as an inference ('the config keys suggest it uses Kea') or remove it."
+      }
+    ]
+  }
+}

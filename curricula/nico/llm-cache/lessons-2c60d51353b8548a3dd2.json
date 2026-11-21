@@ -1,0 +1,623 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Chapters 3 and 8 covered how packets find their way across a subnet and how a host gets an address and boots. This chapter goes one layer down, to the physical fabric that every NICo-managed DPU plugs into. It covers how big a packet can be on that fabric, how the fabric is split into a physical **underlay** and virtual **overlays**, and how routes reach DPUs through **BGP**.\n\nThe order is deliberate. MTU comes first because it is a property of every link. Then the underlay/overlay split explains why the routing matters. Then BGP and its Autonomous System Numbers explain how routes move. Last, you'll see where all of this touches a real DPU: its two top-of-rack uplink ports, p0 and p1, and the BGP session on each one. That last piece is NICo-specific. A broken p0 session raises a health alert that stops a host from being allocated and blocks its normal PXE restart.\n\nNICo doesn't configure your switches. The network team builds the underlay, and NICo makes each DPU a well-behaved BGP speaker on it. When a host gets stuck, though, the cause is often a cable, a switch port or a BGP session. So you need to understand both sides well enough to tell which side is broken.\n\nThe chapter ends with a laptop lab: two FRRouting containers playing a leaf switch and a DPU on a jumbo-frame Docker network. They form an eBGP session, exchange loopback routes, filter a leaked prefix, and show what happens when the DPU's uplink goes down.",
+    "objectives": [
+      "Calculate MTU and payload sizes for jumbo-frame and VXLAN-encapsulated links, and test a path's MTU with a don't-fragment ping",
+      "Tell underlay from overlay for any address or network in a NICo site, and explain why tenant addresses never appear in the underlay",
+      "Describe how an eBGP session advertises and withdraws routes, including what BGP unnumbered means and why leaves filter DPU announcements to /32 loopbacks",
+      "Size and sanity-check a 32-bit ASN pool for a site in which every DPU gets its own ASN",
+      "Explain the roles of a DPU's p0 and p1 uplinks and predict how NICo's BgpPeeringTor health alert affects allocation and PXE restarts when either session fails",
+      "Build and break a two-node eBGP lab with FRRouting in Docker"
+    ],
+    "lessons": [
+      {
+        "concept": "jumbo-frames-mtu",
+        "prequestions": [
+          {
+            "question": "A link has an MTU of 1500. What is the largest ICMP payload you can send with `ping -s` without the packet needing fragmentation?",
+            "answer": "1472 bytes. The 1500-byte limit covers the whole IP packet: a 20-byte IPv4 header, an 8-byte ICMP header and the payload. 1500 − 28 = 1472."
+          },
+          {
+            "question": "Why would anyone want packets bigger than 1500 bytes?",
+            "answer": "Every packet costs header bytes plus per-packet processing at each NIC and switch. Larger packets (jumbo frames, usually 9000 bytes) move the same data in about a sixth as many packets, which matters on 100–400 Gb/s fabrics."
+          }
+        ],
+        "explanation": "The **MTU (Maximum Transmission Unit)** is the largest IP packet a link will carry in one piece. On Linux the number you see in `ip link` is the IP packet size and doesn't include the 14-byte Ethernet header. The classic Ethernet MTU is **1500**. Any frame with an MTU larger than that is a **jumbo frame**. On high-speed data-center fabrics the usual value is **9000**, and switches often allow a bit more (commonly 9216) so they have headroom.\n\nThree rules explain most MTU problems:\n\n1. **Every hop must agree.** A path's usable MTU is the smallest MTU of any link on it. If one switch port is still at 1500, the whole path is effectively 1500.\n2. **Too-big packets get dropped or fragmented, not delivered as-is.** When the sender sets the IP \"don't fragment\" (DF) bit, which most TCP traffic does, a router that can't forward the packet should send back an ICMP \"fragmentation needed\" message. A receiving interface with a smaller MTU usually just drops the frame. Firewalls often block that ICMP message too. The result is an **MTU black hole**: small packets such as pings, DNS queries and SSH keystrokes work, but large transfers hang.\n3. **Tunnels eat bytes.** An overlay (next lesson) wraps each packet in extra headers. VXLAN over IPv4 adds **50 bytes** to the IP packet: outer IPv4 (20) + UDP (8) + VXLAN (8) + the inner Ethernet header (14). Over IPv6 it adds 70. If you want a 1500-byte packet inside the tunnel, the underlay must carry at least 1550.\n\nNICo's network prerequisites say it directly: use **MTU 1500 for overlays (VXLAN/Geneve), and 9000 only if the underlay supports it end-to-end**. That means the default works everywhere, and you enable jumbo frames only after confirming every link on the path supports them. When you configure NICo, the admin network definition in `siteConfig` (`[networks.admin]`) includes an `mtu` field, so this is a number you choose and set yourself.\n\nTo test a path, send a ping with the DF bit set and a payload of MTU − 28. On Linux that is `ping -M do -s 8972 <ip>` for a 9000 path. On macOS it is `ping -D -s 8972 <ip>`.",
+        "analogy": "MTU is like the height limit on a road's bridges. A truck's route is limited by the lowest bridge, not the average one. A tunnel is a trailer around your cargo: it adds height, so cargo that fit before may now hit the bridge. The analogy breaks down because a truck driver sees the low bridge coming. A network packet usually gets no warning: it's silently dropped, and the only sign is that big transfers stall.",
+        "workedExample": {
+          "title": "Watch an MTU mismatch become a black hole",
+          "steps": [
+            {
+              "subgoal": "Start a lab container",
+              "detail": "Network namespaces give you two isolated \"hosts\" inside one privileged container:\n```bash\ndocker run --rm -it --privileged debian:stable-slim bash\napt-get update -qq && apt-get install -y -qq iproute2 iputils-ping\n```"
+            },
+            {
+              "subgoal": "Build a point-to-point link",
+              "detail": "Create two namespaces joined by a veth pair (a virtual cable) and give it a /31:\n```bash\nip netns add a; ip netns add b\nip link add va type veth peer name vb\nip link set va netns a; ip link set vb netns b\nip -n a addr add 10.0.0.0/31 dev va\nip -n b addr add 10.0.0.1/31 dev vb\nip -n a link set va up; ip -n b link set vb up\n```"
+            },
+            {
+              "subgoal": "Set jumbo frames on both ends and test",
+              "detail": "```bash\nip -n a link set va mtu 9000\nip -n b link set vb mtu 9000\nip netns exec a ping -c2 -M do -s 8972 10.0.0.1   # 8972 + 28 = 9000: works\nip netns exec a ping -c2 -M do -s 8973 10.0.0.1   # 9001: fails locally\n```\nThe second ping fails right away with a \"message too long\" error. The sender knows its own MTU and refuses."
+            },
+            {
+              "subgoal": "Create the mismatch",
+              "detail": "Lower only the far end:\n```bash\nip -n b link set vb mtu 1500\nip netns exec a ping -c2 -W1 -M do -s 1472 10.0.0.1   # works\nip netns exec a ping -c2 -W1 -M do -s 8972 10.0.0.1   # 100% packet loss, no error\n```\nThe sender still thinks 9000 is fine. The receiver drops the frame, and nothing reports back. That silence is what makes a black hole."
+            },
+            {
+              "subgoal": "Draw the conclusion",
+              "detail": "Small packets succeed and large ones vanish. To find the problem, test with DF-set pings of increasing size, then compare `ip link show` on every hop. Type `exit` to remove the container."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "An underlay link runs at MTU 9000 and carries VXLAN over IPv4. Fill in the ping payload that tests the full 9000 bytes, and the largest MTU you can give the overlay interfaces.",
+          "partialSolution": "# Test the underlay at its full MTU (IPv4 header 20 + ICMP header 8)\nping -M do -s ___ 10.255.0.12\n\n# VXLAN over IPv4 adds 50 bytes to every packet\n# Largest overlay MTU that fits: ___",
+          "answer": "8972 (9000 − 28) and 8950 (9000 − 50)."
+        },
+        "independentProblem": {
+          "prompt": "A team sets the underlay to MTU 9000 on every link. Then they also set the tenant overlay interfaces to MTU 9000 \"to match\". Pings and SSH work, but large file copies between tenant hosts hang. Explain why, and give two ways to fix it.",
+          "hints": [
+            "What gets added to each tenant packet before it crosses the underlay?",
+            "A full 9000-byte tenant packet plus VXLAN headers is how many bytes on the underlay?",
+            "9000 + 50 = 9050 is more than 9000. Either shrink the inner packet or grow the outer link."
+          ],
+          "answer": "VXLAN encapsulation adds 50 bytes (IPv4 outer), so a full-size 9000-byte tenant packet becomes 9050 bytes on the underlay. That exceeds the 9000 MTU, so it gets dropped (or fragmented, where that's allowed). Small packets fit, so pings and SSH work, but bulk TCP transfers send full-size segments and stall. Fix 1: lower the overlay MTU to 8950 or less. Fix 2: raise the underlay MTU everywhere on the path to at least 9050 (switches commonly support 9216). Or follow NICo's conservative guidance and keep overlays at 1500."
+        },
+        "selfExplanation": "Why does an MTU mismatch usually break large transfers while small pings keep working, and why does that make it so hard to diagnose?",
+        "checks": [
+          {
+            "question": "On a link with MTU 1500, what happens with `ping -M do -s 1500 <peer>`?",
+            "options": [
+              "It succeeds, because 1500 equals the MTU",
+              "It fails, because the IP packet would be 1528 bytes",
+              "It succeeds after the kernel fragments the packet",
+              "It succeeds only if the peer also has MTU 1500"
+            ],
+            "answer": "It fails, because the IP packet would be 1528 bytes",
+            "explanation": "`-s` sets only the ICMP payload. Add 8 bytes of ICMP header and 20 of IPv4 header and you get 1528, which is over 1500. `-M do` forbids fragmentation, so the kernel refuses to send it. The \"fragments\" option is exactly what `-M do` prevents."
+          },
+          {
+            "question": "What MTU does NICo's network guidance recommend for overlays?",
+            "options": [
+              "9000 always, because the fabric is high-speed",
+              "1500 for overlays; 9000 only if the underlay supports it end-to-end",
+              "Whatever the DPU auto-detects",
+              "1450, to leave room for VXLAN"
+            ],
+            "answer": "1500 for overlays; 9000 only if the underlay supports it end-to-end",
+            "explanation": "The prerequisites table says exactly this. Jumbo frames are an option you enable after confirming every hop supports them, not a default. 1450 is a common rule of thumb when the underlay is stuck at 1500, but it isn't NICo's stated guidance."
+          },
+          {
+            "question": "Which 50 bytes does VXLAN over IPv4 add to an inner IP packet?",
+            "options": [
+              "Outer Ethernet 14 + outer IPv4 20 + UDP 8 + VXLAN 8",
+              "Outer IPv4 20 + UDP 8 + VXLAN 8 + inner Ethernet 14",
+              "Outer IPv4 20 + TCP 20 + VXLAN 10",
+              "Two Ethernet headers of 25 bytes each"
+            ],
+            "answer": "Outer IPv4 20 + UDP 8 + VXLAN 8 + inner Ethernet 14",
+            "explanation": "The underlay's IP MTU limits the outer IP packet. Inside it are UDP, VXLAN and the whole inner Ethernet frame, including its 14-byte header. The outer Ethernet header also exists, but like any Ethernet header it isn't counted against the IP MTU. VXLAN runs over UDP, not TCP."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "underlay-and-overlay-networks",
+        "prequestions": [
+          {
+            "question": "Two tenants both use 10.0.0.0/24 inside their private networks on the same physical switches. How can the switches avoid confusing them?",
+            "answer": "The switches never see the tenant addresses. Each tenant packet is wrapped in an outer packet addressed between two infrastructure endpoints, and an identifier in the wrapper says which tenant network it belongs to."
+          },
+          {
+            "question": "Guess: when NICo moves a host from one tenant to another, does it reconfigure the leaf switches?",
+            "answer": "No. NICo enforces Ethernet isolation on the DPU (HBN with VXLAN/EVPN and per-tenant VRFs), and its docs say this needs no leaf switch configuration changes. The physical network is expected to be stable and pre-configured."
+          }
+        ],
+        "explanation": "A NICo site has two kinds of network stacked on top of each other.\n\nThe **underlay** is the real, physical, routed network: leaf (top-of-rack) and spine switches, the cables between them, and the DPU uplinks cabled to the leaves. It has one job, which is to move IP packets between infrastructure addresses. The most important of those are the **DPU loopbacks**. A loopback is an address bound to a virtual interface that never goes down, so it stays reachable while any uplink works. Each DPU gets one IP from NICo's DPU loopback pool, and DPUs advertise these as `/32` routes. The underlay is designed, cabled and configured by your network team. NICo's scope page draws that line explicitly.\n\nAn **overlay** is a virtual network built *on top of* the underlay by **tunneling**. The source DPU wraps each packet in a new outer packet addressed from its own loopback to the destination DPU's loopback. The underlay routes that outer packet like any other. The destination DPU removes the wrapper and delivers the original. A device that wraps and unwraps like this is a **tunnel endpoint (VTEP)**, and in NICo the DPUs are the VTEPs. Chapter 11 covers the wrapper format (VXLAN) and how endpoints learn about each other (EVPN). For now, remember that each overlay has its own identifier, so overlays can reuse the same addresses without clashing.\n\nNICo uses several overlays:\n\n- **Tenant VPCs**: a tenant's private network. Each VPC gets its own L3VNI, which identifies its VRF (a separate routing table).\n- **The admin network**: where a host sits when no tenant owns it. It uses one site-wide L2VNI.\n\nThis split is what makes NICo practical. Tenant changes (joining a VPC, moving to the admin network on release) happen entirely in the overlay, on the DPU. The underlay stays the same. It only ever needs to know how to reach each DPU's loopback. That's why, during tenant cleanup, NICo returns a host's interfaces to the admin overlay and withdraws its tenant routes without touching a switch.",
+        "analogy": "The underlay is the postal service: trucks, sorting centers and street addresses. An overlay is a company's internal mail. You put an envelope addressed to \"Desk 4B\" inside a postal envelope addressed to the other office's street address. The post office never reads \"Desk 4B\", and two companies can both have a Desk 4B. The analogy breaks down on speed and automation: DPUs wrap and unwrap millions of packets per second, and the inner and outer addresses are both IP.",
+        "workedExample": {
+          "title": "Follow one tenant packet across the fabric",
+          "steps": [
+            {
+              "subgoal": "Set up the scene",
+              "detail": "Host A (DPU loopback 10.255.0.11) and Host B (DPU loopback 10.255.0.12) are in the same tenant VPC. Tenant instance A is 10.100.0.4, and instance B is 10.100.0.6. A sends a packet to B."
+            },
+            {
+              "subgoal": "Overlay lookup on DPU A",
+              "detail": "DPU A looks up 10.100.0.6 in the VPC's routing table (its VRF). The answer isn't a switch port. It's \"behind the VTEP at 10.255.0.12\"."
+            },
+            {
+              "subgoal": "Encapsulate",
+              "detail": "DPU A wraps the original packet:\n```text\n[outer IP 10.255.0.11 -> 10.255.0.12][UDP][VXLAN: VPC id][inner: 10.100.0.4 -> 10.100.0.6 ...]\n```\nThe outer header uses underlay addresses only."
+            },
+            {
+              "subgoal": "Underlay forwarding",
+              "detail": "Leaf and spine switches route on the **outer** destination, 10.255.0.12. They know it because DPU B advertised 10.255.0.12/32 with BGP (next lessons). They never look at 10.100.x.x."
+            },
+            {
+              "subgoal": "Decapsulate",
+              "detail": "DPU B removes the outer headers, sees from the VXLAN ID which VPC the packet belongs to, and delivers the inner packet to instance B."
+            },
+            {
+              "subgoal": "Note who owns what",
+              "detail": "Network team: the switches, plus routes between loopbacks. NICo (via the DPU agent and HBN): the VPC routing tables, encapsulation, and the DPU's BGP advertisements. Changing which VPC a host belongs to touches only the second group."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Classify each item as underlay or overlay.",
+          "partialSolution": "leaf1 <-> spine1 link, 172.16.0.0/31     -> underlay\nDPU loopback 10.255.0.11/32              -> ___\nTenant VPC prefix 10.100.0.0/16          -> overlay\nAdmin network (host IP when no tenant)   -> ___",
+          "answer": "DPU loopback -> underlay (it's the tunnel endpoint address the switches route to). Admin network -> overlay (it's a virtual network with its own L2VNI, carried over the underlay)."
+        },
+        "independentProblem": {
+          "prompt": "A network engineer asks: \"For tenant isolation to work, which prefixes must the leaf switches have routes for? Do they need the tenant VPC prefixes?\" Answer them, and explain what happens to the underlay when a tenant releases a host.",
+          "hints": [
+            "Which addresses appear in the outer header that switches actually route on?",
+            "NICo's prerequisites list what DPUs need to receive: other DPUs' /32 routes, an aggregate covering them, or a default route.",
+            "On release, NICo moves the host to the admin overlay and withdraws tenant EVPN routes. Do any loopback routes change?"
+          ],
+          "answer": "The underlay switches need reachability only between DPU loopbacks: each DPU's /32, or an aggregate or default route that covers them. They don't need tenant VPC prefixes, because those appear only inside the tunnel. When a tenant releases a host, NICo removes the tenant configuration on the DPU, moves its interfaces to the admin overlay, and the DPU stops advertising that tenant's EVPN routes. That change is in the overlay. The underlay switch configuration stays the same."
+        },
+        "selfExplanation": "Why does separating the underlay from overlays let NICo change tenant isolation without asking the network team to reconfigure switches?",
+        "checks": [
+          {
+            "question": "In a NICo site, which device acts as the tunnel endpoint (VTEP) for tenant traffic?",
+            "options": [
+              "The leaf switch",
+              "The spine switch",
+              "The DPU",
+              "The site controller"
+            ],
+            "answer": "The DPU",
+            "explanation": "NICo's docs state that DPUs are the VTEPs and advertise /32 loopbacks for them. Many traditional designs put VTEPs on the leaf switches, which is why the leaf option is tempting. NICo deliberately moves that role to the DPU so switches don't need per-tenant configuration."
+          },
+          {
+            "question": "Which of these does NICo's scope page assign to your network team rather than to NICo?",
+            "options": [
+              "Tenant isolation at the DPU layer",
+              "BGP route advertisement from DPUs",
+              "Leaf and spine switch configuration and the physical underlay design",
+              "Returning hosts to the admin overlay on release"
+            ],
+            "answer": "Leaf and spine switch configuration and the physical underlay design",
+            "explanation": "NICo handles DPU-side isolation and BGP advertisement from DPUs. It expects the underlay to be stable and pre-configured, and it doesn't manage switches."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "overview/scope-and-boundaries.md",
+          "overview/lifecycle.md",
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "concept": "bgp",
+        "prequestions": [
+          {
+            "question": "Static routes work for a home router. Why would a data center with thousands of DPUs need a routing *protocol* instead?",
+            "answer": "Routes have to appear and disappear automatically as devices come, go and fail. Hand-maintaining thousands of static routes on every switch is impossible, and static routes don't react to a dead link."
+          },
+          {
+            "question": "Guess: what does \"BGP unnumbered\" mean?",
+            "answer": "The two ends of a BGP session don't need IPv4 addresses configured on the link. They find each other with automatic IPv6 link-local addresses and still exchange IPv4 routes (RFC 5549)."
+          }
+        ],
+        "explanation": "**BGP (Border Gateway Protocol)** is the protocol routers use to tell each other which prefixes they can reach. It runs the internet, and modern data centers use it inside the fabric too.\n\nThe core ideas:\n\n- **Sessions.** Two BGP speakers (**peers** or **neighbors**) open a TCP connection on **port 179** and keep it alive with keepalive messages. If no keepalive arrives within the **hold time**, the session is declared dead. A healthy session is in the **Established** state. Other states such as Idle, Connect and Active mean it isn't up.\n- **Advertisements and withdrawals.** Over the session, each side sends **UPDATE** messages: \"I can reach 10.255.0.11/32\" (advertise), or \"I no longer can\" (withdraw). When a session dies, everything learned over it is withdrawn.\n- **AS_PATH.** Each route carries the list of routing domains (Autonomous Systems, next lesson) it has passed through. Shorter paths are generally preferred. If a router sees its own AS number in a path, it drops the route, which prevents loops.\n- **eBGP vs iBGP.** A session between different AS numbers is **external BGP (eBGP)**. One within the same AS is iBGP. Data-center designs, including NICo's, use eBGP on every link.\n\n**BGP unnumbered** removes per-link IP planning. Instead of putting a /31 on every switch-to-DPU cable, each end uses its automatic IPv6 link-local address to find the peer and set up the session. IPv4 routes are then carried with an IPv6 next hop (RFC 5549). NICo's prerequisites require **eBGP unnumbered on all leaf switches facing DPUs**.\n\nIn NICo, each DPU is a BGP speaker. It runs eBGP with its leaf switches (or route servers) and advertises its **/32 loopback** into the underlay. It also advertises tenant routes, such as each instance's connected /31, into that VPC's overlay (EVPN, chapter 11). The prerequisites also ask the network team to protect the fabric: **filter DPU announcements to loopbacks only**, aggregate at the leaf or pod level, and set **max-prefix limits** on DPU-facing ports. If a peer sends more prefixes than its max-prefix limit, the session is normally shut down.",
+        "analogy": "BGP is like neighbors passing along \"I know how to get to X\" notes, where each note lists everyone who has already forwarded it. If you see your own name on a note, you throw it away. The analogy breaks down because BGP notes are also *retracted*: when the session to a neighbor drops, everything that neighbor told you is forgotten at once.",
+        "workedExample": {
+          "title": "Trace a DPU loopback across a leaf-spine fabric",
+          "steps": [
+            {
+              "subgoal": "Lay out the fabric",
+              "detail": "```text\nDPU-1 (AS 4200000101) -- leaf1 (AS 4200000001) -- spine (AS 4200000900) -- leaf2 (AS 4200000002) -- DPU-2 (AS 4200000102)\n```\nEvery link is an eBGP session, and every device has a different AS."
+            },
+            {
+              "subgoal": "Originate the route",
+              "detail": "DPU-1 advertises `10.255.0.11/32` to leaf1 with AS_PATH `4200000101`."
+            },
+            {
+              "subgoal": "Watch the path grow",
+              "detail": "Each eBGP hop adds its own AS to the front of the path:\n- leaf1 → spine: `4200000001 4200000101`\n- spine → leaf2: `4200000900 4200000001 4200000101`\n- leaf2 → DPU-2: `4200000002 4200000900 4200000001 4200000101`\n\nDPU-2 now has a route to DPU-1's VTEP, so overlay tunnels between them can work."
+            },
+            {
+              "subgoal": "See loop prevention",
+              "detail": "If leaf2 advertised the route back toward the spine, the spine would see `4200000900` already in the path and drop it."
+            },
+            {
+              "subgoal": "See filtering protect the fabric",
+              "detail": "Suppose a bug makes DPU-1 also announce `10.100.0.0/16` (a tenant prefix) on its underlay session. leaf1's inbound filter accepts only /32s from the loopback range, so the bad route is discarded. If DPU-1 floods hundreds of prefixes, the max-prefix limit shuts the session down instead of polluting every switch."
+            },
+            {
+              "subgoal": "See a failure",
+              "detail": "If DPU-1's cable is pulled, leaf1 stops getting keepalives. When the hold time expires, the session drops, and leaf1 withdraws `10.255.0.11/32` from the spine, which withdraws it from leaf2, and so on. Routing converges without anyone editing a config."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Here is FRRouting-style config for a DPU that peers unnumbered on both uplinks and advertises its loopback. FRR is the routing suite Cumulus-based HBN uses. NICo's DPU agent generates the real configuration, so you'd never hand-write this on a managed DPU. Fill in the blanks.",
+          "partialSolution": "router bgp 4200000101\n bgp router-id 10.255.0.11\n neighbor p0 interface remote-as external\n neighbor ___ interface remote-as external\n address-family ipv4 unicast\n  network ___\n exit-address-family",
+          "answer": "`p1` (the second uplink) and `10.255.0.11/32` (the DPU's loopback as a /32). `neighbor <ifname> interface` is FRR's unnumbered syntax, and `remote-as external` means \"any AS different from mine\", which is eBGP."
+        },
+        "independentProblem": {
+          "prompt": "A leaf's DPU-facing port has an inbound filter that accepts only /32s from 10.255.0.0/24, plus a max-prefix limit of 10. A misconfigured DPU starts announcing its loopback and 200 other prefixes. What does the leaf end up with, and why is this better than having no limits?",
+          "hints": [
+            "Consider the filter and the limit separately.",
+            "The filter discards anything that isn't a /32 in the loopback range. What counts toward max-prefix in your router depends on the implementation, but the general idea is that it caps how much one peer can send.",
+            "When a max-prefix limit is exceeded, the usual behavior is to tear down the session."
+          ],
+          "answer": "The filter means only valid loopback /32s can be installed, so the 200 bogus prefixes never reach the routing table. If the volume trips the max-prefix limit, the leaf shuts down that one session. That DPU loses connectivity, but the bad routes don't spread through the fabric. Without these guards, one broken DPU could inject routes that hijack or black-hole traffic for the whole site. This is why NICo's prerequisites ask for loopback-only filtering and max-prefix limits on DPU-facing ports."
+        },
+        "selfExplanation": "Why does BGP's ability to withdraw routes when a session drops matter so much in a fabric where links and DPUs fail regularly?",
+        "checks": [
+          {
+            "question": "What does it mean that NICo's leaf switches use eBGP unnumbered toward DPUs?",
+            "options": [
+              "The session carries no routes, only keepalives",
+              "Peers find each other with IPv6 link-local addresses, so no per-link IPv4 subnet is needed, and IPv4 routes still flow (RFC 5549)",
+              "The DPU doesn't need an AS number",
+              "BGP runs over UDP instead of TCP"
+            ],
+            "answer": "Peers find each other with IPv6 link-local addresses, so no per-link IPv4 subnet is needed, and IPv4 routes still flow (RFC 5549)",
+            "explanation": "\"Unnumbered\" refers to the link addressing, not to routes or AS numbers. Each DPU still has its own ASN, and BGP still runs over TCP port 179."
+          },
+          {
+            "question": "Which routes should a leaf accept from a DPU on the underlay session, according to NICo's prerequisites?",
+            "options": [
+              "Anything the DPU sends",
+              "Only the DPU's loopback announcements, with max-prefix limits on the port",
+              "Only a default route",
+              "Tenant VPC prefixes, so the leaf can route tenant traffic"
+            ],
+            "answer": "Only the DPU's loopback announcements, with max-prefix limits on the port",
+            "explanation": "The prerequisites say to filter DPU announcements to loopbacks only and to set max-prefix limits. Tenant prefixes belong in the overlay, and a default route is something the DPU *receives*, not something it sends."
+          },
+          {
+            "question": "A router receives a route whose AS_PATH already contains its own AS number. What does it do?",
+            "options": [
+              "Prefers it because it is familiar",
+              "Discards it to prevent a loop",
+              "Forwards it without changes",
+              "Shortens the path by removing its AS"
+            ],
+            "answer": "Discards it to prevent a loop",
+            "explanation": "AS_PATH loop detection is BGP's basic loop-prevention mechanism. The next lesson shows how data-center ASN design builds on it."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "overview/what-is-nico.md",
+          "overview/scope-and-boundaries.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "concept": "autonomous-system-number",
+        "prequestions": [
+          {
+            "question": "An ASN can be 16-bit or 32-bit. Roughly how many private 16-bit ASNs exist?",
+            "answer": "1023 (64512–65534). That is too few for a site with thousands of DPUs, each needing its own ASN."
+          },
+          {
+            "question": "Guess: a host has two DPUs. Do they share an ASN?",
+            "answer": "No. NICo gives every DPU its own unique ASN, including multiple DPUs in the same host."
+          }
+        ],
+        "explanation": "An **Autonomous System (AS)** is a routing domain under one administrative policy, and its **Autonomous System Number (ASN)** is the identifier BGP uses for it. ASNs are what go into the AS_PATH from the last lesson, and they decide whether a session is eBGP or iBGP.\n\nTwo sizes exist:\n\n- **16-bit ASNs** (0–65535). The private range, for internal use and never shown on the internet, is **64512–65534**, which is only 1023 numbers.\n- **32-bit (4-byte) ASNs** (up to 4294967295). The private range is **4200000000–4294967294**, about 95 million numbers (RFC 6996). You'll sometimes see them in \"asdot\" notation, `high.low`, where `high = asn // 65536` and `low = asn % 65536`.\n\n**RFC 7938** describes how to run BGP as the only routing protocol in a large data center. Its core advice is to use eBGP everywhere and plan ASNs so that BGP's AS_PATH loop detection does useful work. For example, all spines can share one ASN, so a route can never take a spine → leaf → spine detour. This avoids **path hunting**: when a prefix disappears, BGP speakers would otherwise try ever-longer alternate paths before finally giving up.\n\nNICo's rules come straight from its network prerequisites:\n\n- **Every DPU gets a unique ASN** from a pool you give NICo. In multi-DPU hosts, **each DPU has its own**.\n- **32-bit ASNs are required**, so there are enough unique numbers.\n- Follow **RFC 7938** to prevent path hunting and loops.\n- If you use route servers, they need their own ASN, typically **shared across the redundant route-server set**.\n\nSo the pool size is driven by the expected number of DPUs, not hosts. You'll see ASNs in other places too. The MetalLB config for the site controller has a `myASN` (the cluster-side ASN, the same for all nodes) and a `peerASN` for each node's ToR. The quick-start example uses values such as `4244766850`, from the private 32-bit range.",
+        "analogy": "An ASN is like an area code. Calls route between area codes, and seeing your own area code show up in the middle of a call's routing history means something looped. Giving every DPU its own ASN is like giving every building its own area code, which is only possible because the 32-bit range is huge. The analogy breaks down because area codes are geographic and permanent, while NICo hands ASNs out of a pool and gets them back.",
+        "workedExample": {
+          "title": "Size and check an ASN pool",
+          "steps": [
+            {
+              "subgoal": "Count DPUs, not hosts",
+              "detail": "The site has 300 hosts with 1 DPU each and 50 hosts with 2 DPUs each. DPUs = 300 + 100 = **400** ASNs needed for DPUs."
+            },
+            {
+              "subgoal": "Add headroom and other speakers",
+              "detail": "Plan for growth (say 2×, so 800), and keep separate ASNs for leaves, spines, the site controller's MetalLB side and any route-server set. Those are outside NICo's DPU pool."
+            },
+            {
+              "subgoal": "Pick a range in private 32-bit space",
+              "detail": "For example, DPU pool `4200100000–4200100799`, leaves `4200000001…`, spines one shared `4200000900`, in the spirit of RFC 7938."
+            },
+            {
+              "subgoal": "Check it with Python",
+              "detail": "```python\nfirst, last = 4200100000, 4200100799\nprint(last - first + 1)                       # 800\nprint(4200000000 <= first and last <= 4294967294)  # True: private 32-bit\nprint(divmod(first, 65536))                   # (64088, 26528) -> asdot 64088.26528\n```"
+            },
+            {
+              "subgoal": "Confirm 16-bit wouldn't work",
+              "detail": "64512–65534 holds 1023 numbers, which is already tight at 800 DPUs before switches or growth. NICo requires 32-bit anyway."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this helper so it prints `64086.60005 True`.",
+          "partialSolution": "PRIVATE_32BIT_FIRST = 4200000000\nPRIVATE_32BIT_LAST = ___\n\ndef asdot(asn):\n    high, low = divmod(asn, ___)\n    return f\"{high}.{low}\"\n\ndef is_private_32bit(asn):\n    return PRIVATE_32BIT_FIRST <= asn <= PRIVATE_32BIT_LAST\n\nprint(asdot(4200000101), is_private_32bit(4200000101))",
+          "answer": "`PRIVATE_32BIT_LAST = 4294967294` and `divmod(asn, 65536)`. 4200000101 = 64086 × 65536 + 60005."
+        },
+        "independentProblem": {
+          "prompt": "A site plans 600 hosts, each with 2 DPUs, plus a redundant pair of BGP route servers. How many ASNs does NICo's DPU pool need at minimum, how many ASNs does the route-server set typically use, and why can't the 16-bit private range work?",
+          "hints": [
+            "NICo assigns ASNs per DPU, not per host.",
+            "The prerequisites say the route-server set typically shares one ASN.",
+            "Compare your DPU count to 65534 − 64512 + 1."
+          ],
+          "answer": "600 × 2 = 1200 DPU ASNs at minimum (plan more for growth). The route-server set typically uses one shared ASN. The 16-bit private range has only 1023 numbers, which is fewer than 1200 before you even count switches, so it can't give every DPU a unique ASN. That's why NICo requires 32-bit ASNs, whose private range has about 95 million."
+        },
+        "selfExplanation": "Why does giving every DPU its own ASN, and following RFC 7938's ASN layout, make the fabric's routing more predictable when something fails?",
+        "checks": [
+          {
+            "question": "A host has two BlueField DPUs. How does NICo assign ASNs?",
+            "options": [
+              "One ASN per host, shared by both DPUs",
+              "Each DPU gets its own unique ASN from the pool",
+              "Both DPUs reuse the leaf switch's ASN",
+              "Only the first DPU gets an ASN"
+            ],
+            "answer": "Each DPU gets its own unique ASN from the pool",
+            "explanation": "The prerequisites say this explicitly: in multi-DPU hosts, each DPU has its own ASN. Sharing an ASN would make AS_PATH loop detection treat the two DPUs as the same domain."
+          },
+          {
+            "question": "What problem does RFC 7938's ASN planning (for example, spines sharing one ASN) help prevent?",
+            "options": [
+              "IP address exhaustion",
+              "Path hunting and routing loops",
+              "MTU black holes",
+              "DHCP relay failures"
+            ],
+            "answer": "Path hunting and routing loops",
+            "explanation": "NICo cites RFC 7938 specifically to prevent path hunting and loops. Shared spine ASNs make AS_PATH loop detection reject detour paths. The other options are real problems, but ASNs don't solve them."
+          },
+          {
+            "question": "In the MetalLB config for the site controller, which ASN is the same for every node?",
+            "options": [
+              "peerASN",
+              "myASN",
+              "Neither, both differ per node",
+              "Both are the same for every node"
+            ],
+            "answer": "myASN",
+            "explanation": "The quick-start table says `myASN` is the cluster-side ASN, the same for all nodes, while `peerASN` is the ToR ASN for each node."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "top-of-rack-uplink",
+        "prequestions": [
+          {
+            "question": "A BlueField DPU has two network ports facing the fabric. Why might they be cabled to two *different* switches?",
+            "answer": "For redundancy. If one switch or cable fails, the DPU still has a working uplink through the other."
+          },
+          {
+            "question": "Guess: are both uplink ports equal in NICo's eyes, or does one matter more?",
+            "answer": "One matters more. p0 is the primary: NICo's docs state that normal PXE boot requires p0, so losing p0 has bigger consequences than losing p1."
+          }
+        ],
+        "explanation": "A **top-of-rack (ToR) switch** is the leaf switch in a rack that the servers plug into. In an **end-of-row (EoR)** design the switch sits at the end of a row instead. The DPU's links to these switches are its **ToR uplinks**.\n\nA BlueField DPU (chapter 7) has two physical uplink ports, named **p0** and **p1** on the DPU's Arm OS. Each one is a separate link into the underlay, and each runs its own BGP session to the switch at the other end. That's where the DPU advertises its loopback and learns the routes it needs.\n\nNICo's physical cabling guidance:\n\n- **Connect DPUs to ToR/EoR switches, dual-homed recommended for redundancy.** p0 goes to one switch and p1 to another. If one switch reboots for an upgrade, the DPU stays reachable through the other.\n- **Keep separate out-of-band connectivity for DPU BMCs.** The BMC's management traffic doesn't travel over p0 or p1. It uses the OOB network from chapter 7.\n\nThe site controller's reference design works the same way: one DPU or NIC with two uplinks, each cabled to a different ToR switch running BGP unnumbered.\n\nThe two ports are **not interchangeable in NICo's policy**. NICo's health documentation states that **normal PXE boot requires p0**. p1 adds redundancy for traffic, but NICo treats p0 as the primary uplink for provisioning. In practice:\n\n- p0 cabled wrong, switch port misconfigured, or link down: the host can't make normal PXE progress, even if p1 works perfectly.\n- p1 down while p0 is fine: the host loses redundancy. Whether NICo flags it as a problem depends on a site setting covered in the next lesson.\n\nThere's also a division of labor. The network team owns the switch ports: making them BGP unnumbered, assigning the ToR's ASN, and applying the loopback filter and max-prefix limit. NICo owns the DPU side. When an uplink misbehaves, the first question is which end is wrong.",
+        "analogy": "p0 and p1 are like a building's main entrance and its side door. Both get you inside, and having two keeps the building usable if one is blocked. But deliveries for move-in day (PXE provisioning) only come through the main entrance. The analogy breaks down because a side door doesn't carry equal traffic, while both uplinks can carry routed traffic at the same time.",
+        "workedExample": {
+          "title": "Plan and sanity-check a rack's uplink cabling",
+          "steps": [
+            {
+              "subgoal": "List the endpoints",
+              "detail": "Rack R12 has two ToR switches, `tor-a` and `tor-b`, and eight hosts with one DPU each."
+            },
+            {
+              "subgoal": "Dual-home each DPU",
+              "detail": "```text\nhost  DPU port  ->  switch:port\nh01   p0        ->  tor-a:swp1\nh01   p1        ->  tor-b:swp1\nh02   p0        ->  tor-a:swp2\nh02   p1        ->  tor-b:swp2\n...\n```\nWith p0 always on tor-a and p1 always on tor-b, a pattern like \"tor-b down\" is easy to recognize."
+            },
+            {
+              "subgoal": "Keep the BMC separate",
+              "detail": "Each DPU BMC (and host BMC) gets its own cable to the OOB switch, not to tor-a or tor-b."
+            },
+            {
+              "subgoal": "Predict the failure modes",
+              "detail": "- tor-b reboots: every DPU loses p1 but keeps p0. Traffic continues and provisioning isn't blocked by p0.\n- tor-a reboots: every DPU loses p0. Traffic can flow over p1, but normal PXE for these hosts is blocked until p0 returns.\n- One cable on h05 p0 is bad: only h05 is affected."
+            },
+            {
+              "subgoal": "Hand the switch side to the network team",
+              "detail": "Ask for: BGP unnumbered on tor-a:swp1–8 and tor-b:swp1–8, loopback-only inbound filters, and max-prefix limits on those ports."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the cabling plan for host h09 in a dual-homed rack where p0 always goes to tor-a.",
+          "partialSolution": "host  DPU port  ->  switch:port\nh09   p0        ->  ___:swp9\nh09   p1        ->  ___:swp9\nh09   DPU BMC   ->  ___",
+          "answer": "p0 -> tor-a:swp9, p1 -> tor-b:swp9, DPU BMC -> the OOB management switch (not a ToR data port)."
+        },
+        "independentProblem": {
+          "prompt": "During racking, a technician swaps h03's cables: p0 now lands on tor-b:swp3 and p1 on tor-a:swp3. Both switch ports are configured identically for BGP unnumbered. Will h03 work? Now suppose p0 is instead plugged into an unconfigured spare port on tor-b. What happens?",
+          "hints": [
+            "With unnumbered BGP and identical port config, does the switch care which DPU port is attached?",
+            "What does NICo require from p0 specifically?",
+            "An unconfigured port means no BGP session on that uplink."
+          ],
+          "answer": "In the first case h03 should work. Both ports run BGP unnumbered with the same policy, so sessions come up on both uplinks. It only breaks the rack's neat \"p0 = tor-a\" pattern, which makes failures harder to read. In the second case, p0 has no working BGP session. Normal PXE boot requires p0, so h03 can't complete normal provisioning even though p1 is healthy. The fix is to cable p0 to a configured port, or have the network team configure the spare port."
+        },
+        "selfExplanation": "Why does dual-homing a DPU to two switches improve availability, yet still leave a single point of failure for provisioning?",
+        "checks": [
+          {
+            "question": "Which statement about the DPU's uplinks matches NICo's documentation?",
+            "options": [
+              "p0 and p1 are fully interchangeable",
+              "Normal PXE boot requires p0",
+              "Normal PXE boot requires p1",
+              "PXE uses the DPU BMC's OOB port, so uplinks don't matter"
+            ],
+            "answer": "Normal PXE boot requires p0",
+            "explanation": "The BgpPeeringTor probe docs state this explicitly, and it's why p0 failures carry heavier consequences. The BMC's OOB port handles management traffic, not the host's PXE path through the DPU."
+          },
+          {
+            "question": "What cabling does NICo recommend for DPUs?",
+            "options": [
+              "Both ports to the same ToR, bonded",
+              "Dual-homed to ToR/EoR switches for redundancy, with separate OOB connectivity for DPU BMCs",
+              "Only p0 connected; p1 left empty",
+              "DPU BMC traffic carried over p1"
+            ],
+            "answer": "Dual-homed to ToR/EoR switches for redundancy, with separate OOB connectivity for DPU BMCs",
+            "explanation": "This is the physical cabling guidance in the network prerequisites. Using the same switch for both ports leaves that switch as a single point of failure, and BMC traffic belongs on the OOB network."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "concept": "bgp-peering-with-top-of-rack-switch",
+        "prequestions": [
+          {
+            "question": "A DPU's p0 BGP session is down but p1 is up, and traffic still flows. Should NICo let a tenant be allocated this host?",
+            "answer": "No. A p0 transport failure raises a BgpPeeringTor alert with PreventAllocations, and it blocks the normal PXE restart, because normal PXE boot requires p0."
+          },
+          {
+            "question": "Guess: if only p1's session is down, is the host blocked?",
+            "answer": "Not by that alone. A lone p1 transport failure is either unclassified or suppressed, depending on the site's `min_dpu_functioning_links` setting, so it doesn't carry PreventAllocations."
+          }
+        ],
+        "explanation": "Each uplink runs a BGP session between the DPU and the ToR switch at the other end, configured by the DPU agent through HBN on the DPU side. NICo watches these sessions and reports problems through the health system you met in earlier chapters, using the probe ID **`BgpPeeringTor`**.\n\nHow `BgpPeeringTor` behaves, per NICo's health probe docs:\n\n- When a problem involves one expected uplink, the alert's **`target` is p0 or p1**, and the message names the failed condition.\n- It's raised by both the NVUE and FRR code paths when a **BGP transport session is unavailable**, meaning the session isn't up.\n- **A p0 transport alert includes `PreventAllocations`**, because normal PXE boot requires p0. The host can't be given to a tenant.\n- **A lone p1 transport failure is unclassified or suppressed**, depending on `min_dpu_functioning_links`, so it doesn't block anything on its own.\n- **With a positive minimum**, when both sessions are unavailable, the alerts carry **`PreventAllocations` and `PreventHostStateChanges`**, which freezes the host's state machine too.\n- A minimum greater than the two expected uplinks is a misconfiguration and produces a critical alert (untargeted `BgpPeeringTor` on NVUE, `BgpStats` on FRR).\n\n**The p0 PXE gate.** The host state machine checks p0 before rebooting a host into a tenant boot. During initial provisioning, `WaitingForNetworkConfig` waits for current DPU observations, matching config versions, health alerts that block state changes, **and the primary p0 PXE gate**. Right before a normal PXE restart, `WaitingForRebootToReady` repeats the aggregate health and p0 checks. So a broken p0 transport stops the PXE restart. Two exceptions skip these checks: **instance deletion** and **explicit custom iPXE requests**. A live `UpdateInstanceConfig` doesn't restart the host and doesn't apply the p0 PXE gate.\n\nRelated probes: `BgpPeeringRouteServer` (a session to a route server is down), `UnexpectedBgpPeer` (a session with a peer that isn't configured, which blocks allocations and state changes) and `BgpDaemonEnabled` (FRR isn't running at all).",
+        "analogy": "The p0 session is like a pre-flight check on the main engine. A plane with one engine dead can't take off with passengers (PreventAllocations), and the crew won't start the departure (the PXE restart) until it passes. A problem with the backup engine alone may only be logged, depending on airline policy (`min_dpu_functioning_links`). The analogy breaks down because a plane checks once, while NICo re-checks p0 just before each normal PXE restart.",
+        "workedExample": {
+          "title": "Triage a host stuck before its PXE restart",
+          "steps": [
+            {
+              "subgoal": "Read the alert",
+              "detail": "A host isn't progressing to tenant boot. Its health report contains `BgpPeeringTor` with target **p0**, saying the transport session is unavailable."
+            },
+            {
+              "subgoal": "Work out what's blocked",
+              "detail": "The p0 transport alert carries `PreventAllocations`, and the p0 PXE gate in `WaitingForNetworkConfig` / `WaitingForRebootToReady` stops the normal PXE restart. So the host stays where it is, as designed."
+            },
+            {
+              "subgoal": "Decide which side owns the fault",
+              "detail": "A BGP session needs both ends. On the DPU side, is FRR running? (A `BgpDaemonEnabled` alert would say so.) Is there an `UnexpectedBgpPeer` alert pointing at the wrong neighbor? On the switch side, is the link up, is the port configured for BGP unnumbered, and has a max-prefix limit tripped? Switch config belongs to the network team."
+            },
+            {
+              "subgoal": "Check for a pattern",
+              "detail": "Are many hosts in the rack showing p0 alerts at once? If p0 always lands on tor-a, that points at tor-a itself (a reboot, upgrade or config push), not at individual cables."
+            },
+            {
+              "subgoal": "Confirm recovery",
+              "detail": "Once the session is Established again, the DPU agent's next health reports no longer contain the p0 transport alert, and the state machine can pass the gate on a later check."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the decision table using NICo's documented BgpPeeringTor policy.",
+          "partialSolution": "Situation                                  | BgpPeeringTor result                                 | Blocks normal PXE restart?\np0 transport down, p1 up                   | alert, target p0, PreventAllocations                 | ___\np1 transport down, p0 up                   | ___                                                  | no\nboth down, min_dpu_functioning_links > 0   | alerts with PreventAllocations + PreventHostStateChanges | yes",
+          "answer": "Row 1: yes. The primary p0 PXE gate blocks it, because normal PXE boot requires p0. Row 2: unclassified or suppressed, depending on `min_dpu_functioning_links`. It doesn't carry PreventAllocations on its own."
+        },
+        "independentProblem": {
+          "prompt": "An operator sees that a host with a p0 `BgpPeeringTor` transport alert was still deleted successfully, and another host with the same alert booted an explicit custom iPXE script. A colleague says the p0 gate must be broken. Are they right? What would you check if a third host with this alert is stuck before its normal PXE restart?",
+          "hints": [
+            "Which operations does the documentation say bypass the aggregate health and p0 checks?",
+            "Deletion and custom iPXE are both listed.",
+            "For the stuck host, think about both ends of the session and about whether its rack-mates show the same alert."
+          ],
+          "answer": "The colleague is wrong. NICo's docs say instance deletion and explicit custom iPXE requests bypass the `WaitingForRebootToReady` health and p0 checks, so both observations are expected. The gate applies to the normal PXE restart, which is why the third host is stuck. For that host: confirm the alert targets p0 and is a transport failure. Check the physical link and the ToR port's BGP unnumbered configuration with the network team. Check whether a max-prefix limit tripped. Look for `BgpDaemonEnabled` or `UnexpectedBgpPeer` alerts on the DPU side. See whether other hosts whose p0 goes to the same switch are also alerting, which would point at the switch."
+        },
+        "selfExplanation": "Why does NICo block allocation and the PXE restart when p0's BGP session is down, even though p1 could still carry traffic?",
+        "checks": [
+          {
+            "question": "Which classification does a p0 BgpPeeringTor transport alert include?",
+            "options": [
+              "None; it's informational",
+              "PreventAllocations",
+              "Only SuppressExternalAlerting",
+              "It depends on the tenant"
+            ],
+            "answer": "PreventAllocations",
+            "explanation": "The probe docs state that a p0 transport alert includes PreventAllocations because normal PXE boot requires p0. Informational behavior applies only to a lone p1 failure, and even then it depends on `min_dpu_functioning_links`."
+          },
+          {
+            "question": "Which operation is NOT subject to the p0 PXE gate before restarting?",
+            "options": [
+              "A normal PXE restart into the tenant OS",
+              "Initial provisioning in WaitingForNetworkConfig",
+              "Instance deletion",
+              "The check in WaitingForRebootToReady"
+            ],
+            "answer": "Instance deletion",
+            "explanation": "Instance deletion and explicit custom iPXE requests bypass these checks. The other three are exactly where the gate is applied."
+          },
+          {
+            "question": "A DPU agent finds a BGP session with a peer that isn't among its configured host routes or route servers. Which probe fires?",
+            "options": [
+              "BgpPeeringTor",
+              "BgpPeeringRouteServer",
+              "UnexpectedBgpPeer",
+              "BgpStats"
+            ],
+            "answer": "UnexpectedBgpPeer",
+            "explanation": "UnexpectedBgpPeer targets the unexpected peer and prevents allocations and host state changes. BgpPeeringTor and BgpPeeringRouteServer are about expected sessions being down, and BgpStats is about failing to collect or validate FRR statistics."
+          }
+        ],
+        "sources": [
+          "architecture/health/health_probe_ids.md",
+          "architecture/networking_integrations.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Leaf and DPU: a two-container eBGP lab on a jumbo-frame fabric",
+      "goal": "Run two FRRouting containers, `leaf1` and `dpu1`, on a Docker network with MTU 9000. They form an eBGP session with private 32-bit ASNs. dpu1 advertises its /32 loopback plus a leaked prefix, and leaf1 accepts only the loopback. You'll prove the jumbo path works, and then break dpu1's uplink (playing p0) to watch the session drop and the route get withdrawn.",
+      "whyItMatters": "This is a small, working copy of what every NICo-managed DPU does on its p0 uplink: eBGP to a ToR with a unique 32-bit ASN, advertising a /32 loopback for its tunnel endpoint, over a jumbo-capable underlay, behind loopback-only filtering and max-prefix limits on the switch. When a real host gets stuck on a `BgpPeeringTor` p0 alert, you'll know what an unhealthy session looks like from both ends and which commands show it.",
+      "setup": [
+        "Docker Engine or Docker Desktop (Linux or macOS); Podman with docker-compatible CLI also works",
+        "Internet access to pull `quay.io/frrouting/frr:9.1.0` and `debian:stable-slim`",
+        "About 300 MB of disk space",
+        "A working directory, e.g. `mkdir -p ~/bgp-lab && cd ~/bgp-lab`"
+      ],
+      "steps": [
+        {
+          "subgoal": "Create the jumbo-frame fabric",
+          "detail": "Create a user-defined network with a fixed subnet and MTU 9000:\n```bash\ndocker network create --subnet 172.30.9.0/24 \\\n  -o com.docker.network.driver.mtu=9000 fabric\n```\nDocker takes 172.30.9.1 as the gateway. A real DPU uplink would be unnumbered or use a /31, but a Docker bridge needs a gateway, so this lab uses a /24 and numbered peers."
+        },
+        {
+          "subgoal": "Write the FRR config files",
+          "detail": "The `daemons` file tells FRR which daemons to start:\n```bash\ncat > daemons <<'EOF'\nzebra=yes\nbgpd=yes\nvtysh_enable=yes\nzebra_options=\"  -A 127.0.0.1 -s 90000000\"\nbgpd_options=\"   -A 127.0.0.1\"\nEOF\n```\nleaf1 accepts only /32s from the loopback range and caps how many prefixes the DPU can send:\n```bash\ncat > leaf1.conf <<'EOF'\nfrr defaults datacenter\nhostname leaf1\n!\ninterface lo\n ip address 10.255.0.1/32\n!\nip prefix-list DPU-LOOPBACKS seq 10 permit 10.255.0.0/24 ge 32\n!\nrouter bgp 4200000001\n bgp router-id 10.255.0.1\n neighbor 172.30.9.3 remote-as 4200000101\n address-family ipv4 unicast\n  network 10.255.0.1/32\n  neighbor 172.30.9.3 activate\n  neighbor 172.30.9.3 prefix-list DPU-LOOPBACKS in\n  neighbor 172.30.9.3 maximum-prefix 10\n exit-address-family\n!\nEOF\n```\ndpu1 advertises its loopback **and**, standing in for a bug, a tenant-looking /24:\n```bash\ncat > dpu1.conf <<'EOF'\nfrr defaults datacenter\nhostname dpu1\n!\ninterface lo\n ip address 10.255.0.11/32\n ip address 192.0.2.1/24\n!\nrouter bgp 4200000101\n bgp router-id 10.255.0.11\n neighbor 172.30.9.2 remote-as 4200000001\n address-family ipv4 unicast\n  network 10.255.0.11/32\n  network 192.0.2.0/24\n  neighbor 172.30.9.2 activate\n exit-address-family\n!\nEOF\n```\n`frr defaults datacenter` gives fast timers (3 s keepalive, 9 s hold), as used in data centers."
+        },
+        {
+          "subgoal": "Start the leaf and the DPU",
+          "detail": "```bash\nfor n in leaf1:172.30.9.2 dpu1:172.30.9.3; do\n  name=${n%%:*}; ip=${n##*:}\n  docker run -d --name $name --hostname $name --privileged \\\n    --network fabric --ip $ip \\\n    -v \"$PWD/daemons:/etc/frr/daemons\" \\\n    -v \"$PWD/$name.conf:/etc/frr/frr.conf\" \\\n    quay.io/frrouting/frr:9.1.0\ndone\nsleep 15\ndocker exec dpu1 ip link show eth0     # expect: mtu 9000\n```"
+        },
+        {
+          "subgoal": "Inspect the session and the routes",
+          "detail": "```bash\ndocker exec leaf1 vtysh -c 'show bgp ipv4 unicast summary'\ndocker exec leaf1 vtysh -c 'show ip route bgp'\ndocker exec dpu1  vtysh -c 'show ip route bgp'\n```\nOn leaf1 the neighbor 172.30.9.3 should show an uptime and a received-prefix count of **1** in the State/PfxRcd column. A word like `Active` or `Connect` there means the session isn't up. The leaf's route table should contain `10.255.0.11/32 via 172.30.9.3` and **not** `192.0.2.0/24`, because the prefix list discarded the leak. dpu1 should have learned `10.255.0.1/32`.\n\nThen prove the loopbacks reach each other over BGP-learned routes:\n```bash\ndocker exec leaf1 ping -c 3 -I 10.255.0.1 10.255.0.11\n```"
+        },
+        {
+          "subgoal": "Test the jumbo path",
+          "detail": "Use a throwaway Debian container on the same fabric, which has the full `ping` with `-M do`:\n```bash\ndocker run --rm --network fabric debian:stable-slim sh -c '\n  apt-get update -qq && apt-get install -y -qq iputils-ping >/dev/null\n  ping -c 2 -M do -s 8972 172.30.9.3\n  ping -c 2 -M do -s 8973 172.30.9.3 || echo \"8973 refused: path MTU is 9000\"'\n```\nThe 8972-byte payload makes exactly 9000-byte packets and should succeed. 8973 should fail with \"message too long\"."
+        },
+        {
+          "subgoal": "Break p0 and watch the withdrawal",
+          "detail": "Here eth0 plays the DPU's p0. Take it down, then watch the leaf:\n```bash\ndocker exec dpu1 ip link set eth0 down\nsleep 12\ndocker exec leaf1 vtysh -c 'show bgp ipv4 unicast summary'   # neighbor no longer Established\ndocker exec leaf1 vtysh -c 'show ip route bgp'               # 10.255.0.11/32 is gone\n```\nThe leaf noticed only when its 9-second hold timer expired, and then it withdrew the route. In NICo this is the moment the DPU agent would report a `BgpPeeringTor` p0 transport alert. Restore the link:\n```bash\ndocker exec dpu1 ip link set eth0 up\nsleep 30\ndocker exec leaf1 vtysh -c 'show ip route bgp'               # 10.255.0.11/32 is back\n```\n(dpu1's default route via the Docker gateway doesn't come back after the link flap. The lab doesn't need it.)"
+        },
+        {
+          "subgoal": "Clean up",
+          "detail": "```bash\ndocker rm -f leaf1 dpu1\ndocker network rm fabric\n```"
+        }
+      ],
+      "verify": "With both containers running and eth0 up, `docker exec leaf1 vtysh -c 'show ip route bgp'` lists `10.255.0.11/32 via 172.30.9.3` and no `192.0.2.0/24`. `docker exec leaf1 ping -c 3 -I 10.255.0.1 10.255.0.11` gets 3 replies. The Debian container's `ping -M do -s 8972 172.30.9.3` succeeds. After `docker exec dpu1 ip link set eth0 down` and about 12 seconds, the 10.255.0.11/32 route is gone from leaf1. After bringing eth0 back up, it returns.",
+      "hints": [
+        "If `docker run` can't find `quay.io/frrouting/frr:9.1.0`, choose another 9.x or 10.x tag from quay.io/repository/frrouting/frr. The config uses only long-standing FRR syntax.",
+        "If `show bgp ... summary` prints nothing or says BGP isn't running, check that `bgpd=yes` is in the mounted `daemons` file and look at `docker logs leaf1 2>&1 | tail -30` (FRR logs to stderr).",
+        "If the session is stuck in `Active` or `Connect`, the two peer addresses or ASNs don't match. leaf1 must point at 172.30.9.3 with remote-as 4200000101, and dpu1 at 172.30.9.2 with remote-as 4200000001. Try `docker exec leaf1 ping -c1 172.30.9.3`.",
+        "If 192.0.2.0/24 does show up on leaf1, the prefix list isn't applied. Check the spelling of `DPU-LOOPBACKS` in both the `ip prefix-list` line and the `neighbor ... prefix-list ... in` line.",
+        "If the 8972-byte ping fails but small pings work, the network was created without the MTU option. Remove the containers and the network, then recreate the network with `-o com.docker.network.driver.mtu=9000`.",
+        "`ip link show eth0` inside a container shows `eth0@ifNN`. That's normal for a veth interface."
+      ],
+      "stretch": "Make dpu1 dual-homed. Create a second network, `fabric-p1` (172.30.10.0/24, MTU 9000), start a `leaf2` container on it with its own ASN (e.g. 4200000002) and the same loopback-only filter, attach dpu1 with `docker network connect --ip 172.30.10.3 fabric-p1 dpu1`, and add a second neighbor to dpu1's config (then `docker restart dpu1`). Take down dpu1's p0 interface (eth0) and confirm that the p1 session to leaf2 stays Established and leaf2 still has 10.255.0.11/32. Then write down which NICo health outcome each failure would produce: p0 down gives a `BgpPeeringTor` alert on p0 with PreventAllocations, and a lone p1 failure depends on `min_dpu_functioning_links`. For extra difficulty, convert the p1 session to BGP unnumbered (`neighbor eth1 interface remote-as external`). You may need to start the containers with `--sysctl net.ipv6.conf.all.disable_ipv6=0` so the link has an IPv6 link-local address."
+    }
+  }
+}

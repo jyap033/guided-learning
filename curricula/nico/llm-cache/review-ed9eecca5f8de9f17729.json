@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "bluefield-dpu",
+        "severity": "minor",
+        "problem": "The explanation says the Chassis Card1 `Model` (BF2 vs BF3) confirms which device it is. The reference gives 'DPU model detection (BF2 vs BF3)' to the Systems/{id} `Model` field; for Chassis `Model` it only says 'Model identification'.",
+        "fix": "Attribute the BF2/BF3 generation hint to the Systems `Model` field, or say Card1's PartNumber/Model help identify the device without tying BF2/BF3 detection to the Chassis Model."
+      },
+      {
+        "where": "rshim",
+        "severity": "minor",
+        "problem": "The worked-example curl commands use `$USER` as a 'placeholder in caps'. The shell already sets USER to the local login name, so a learner who forgets to set it will silently send their local username to the BMC.",
+        "fix": "Rename the placeholders to `$BMC_USER`/`$BMC_PASS` (or similar) and show them being set."
+      }
+    ]
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "dmi-platform-identity",
+        "severity": "major",
+        "problem": "The lesson says \"NICo's NIC firmware policy uses them [vendor/product] to identify the platform (covered in a later chapter)\". None of the provided docs pages support this. The Redfish reference only ties Manufacturer to machine ID generation and Model to BF2/BF3 DPU detection.",
+        "fix": "Remove the claim or cite the docs page that describes the NIC firmware policy. Otherwise, limit the stated NICo uses to what the reference supports: SerialNumber is Critical for machine ID (DMI hash) and pairing, Manufacturer is Recommended for machine ID with a default fallback, and Model is used for DPU model detection."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The expected output includes `Secure Boot: enabled=True current=Enabled`, an `Interfaces (PCI order):` header, indented and column-padded interface lines (`0.2.0.0.0   ...` vs `0.16.0.0.0  ...`), and an `OOB boot MAC: ...` line. The steps never tell the learner to print any of these or which format to use. A learner who follows the steps exactly won't match the expected output.",
+        "fix": "Add explicit print instructions in the step that produces each line. For example: print `Secure Boot: enabled=<SecureBootEnable> current=<SecureBootCurrentBoot>`; print the header, then each interface as `f\"  {key:<11} {mac}\"`; print `OOB boot MAC: <mac>`. Alternatively, say the formatting doesn't need to match exactly."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "In \"Break it on purpose\", `kill %1` is followed immediately by starting the mock again and then running the explorer. The old process may not have released port 8000 yet (Address already in use), and the explorer can run before the new server is listening (ConnectionRefusedError, a traceback, exit=1 for the wrong reason). Either way the output differs from what the text says.",
+        "fix": "Add short waits, e.g. `kill %1; sleep 1` and `python3 mock_bmc.py bmc.json & sleep 1` before running the explorer. Also mention the connection-refused case in the hints."
+      },
+      {
+        "where": "uefi-firmware-and-secure-boot",
+        "severity": "minor",
+        "problem": "The lesson says NICo sets the boot order \"via the Redfish `Boot.BootOrder` and boot override\". The reference lists `Boot.BootOrder` for \"Boot order reporting and verification\", and boot changes go through PATCH /Systems/{id} (boot source override boot_once/boot_first).",
+        "fix": "Say NICo sets boot through the boot override (PATCH /Systems/{id}) and reads `Boot.BootOrder` to report and verify the order."
+      },
+      {
+        "where": "dmi-platform-identity",
+        "severity": "minor",
+        "problem": "\"NICo's reference notes that serial numbers are whitespace-trimmed\" overgeneralizes. The reference notes trimming only for Chassis and NetworkAdapter SerialNumber, not System SerialNumber.",
+        "fix": "Say the reference notes whitespace trimming for chassis and network adapter serial numbers, which is a good reason to normalize every serial."
+      },
+      {
+        "where": "uefi-firmware-and-secure-boot",
+        "severity": "minor",
+        "problem": "The lesson calls UEFI + Secure Boot a \"required\" BIOS/UEFI setting. hardware.md says these settings \"should be enabled\". What the docs do require is that the BMC supports the Secure Boot toggle.",
+        "fix": "Reword to \"NICo's hardware prerequisites say UEFI + Secure Boot should be enabled\", and keep the separate statement that the BMC must support the Redfish Secure Boot toggle."
+      }
+    ]
+  }
+}

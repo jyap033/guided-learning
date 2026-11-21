@@ -1,0 +1,694 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "NICo has to drive real hardware through long, failure-prone lifecycles: discover a BMC, pair DPUs, flash firmware, reboot, hand a host to a tenant, sanitise it, then do it all again. Any process can crash halfway, any network call can time out, and two workers can end up looking at the same machine. This chapter covers the ideas NICo's state machine framework relies on to stay correct anyway.\n\nWe start at the top. NICo is a set of **microservices**, and multi-step operations in NICo REST run on the **Temporal** workflow engine. Next comes a small but concrete mechanism, **GCRA rate limiting**, which the DPU agent uses to protect identity signing. The rest of the chapter is about the database side of the state controllers: **transactions**, **idempotency**, **optimistic concurrency** (stale-write protection) and **WorkLock leases with fencing**.\n\nYou already know SQL, HTTP APIs, async programming and containers from earlier chapters. Here you'll see why NICo's docs make points like \"the framework does not guarantee exactly-once execution\" and \"keep database transactions short\". The chapter ends with a laptop build: a tiny state controller in Python and SQLite that survives crashes, races and rate limits without rebooting a fake BMC twice.",
+    "objectives": [
+      "Trace a request through NICo's microservices and explain why only the API Service touches PostgreSQL",
+      "Describe what Temporal makes durable, list the namespaces NICo needs, and say why Temporal activities still have to be idempotent",
+      "Compute GCRA rate-limit decisions for the DPU agent's IMDS identity settings (3 requests/s, burst 8)",
+      "Design short database transactions that never stay open across an external call, and choose a recoverable write order",
+      "Write a version-guarded UPDATE that rejects stale writes, and explain what NICo does when one is rejected",
+      "Use a lease plus a fence check so a worker that has lost ownership cannot commit protected writes"
+    ],
+    "lessons": [
+      {
+        "concept": "microservices-architecture",
+        "prequestions": [
+          {
+            "question": "NICo's DHCP server answers BMCs on the physical network. Do you think it keeps its own database of IP leases? Guess why or why not.",
+            "answer": "No. The NICo DHCP server is stateless. It forwards requests to the API Service, which handles IP address management and is the only service that reads and writes PostgreSQL."
+          },
+          {
+            "question": "If one small service in a system crashes, what do you expect to happen to the others?",
+            "answer": "Ideally they keep running. Independent deployment and failure isolation are a big reason to split a system into services. Callers of the crashed service still need timeouts and retries, though."
+          }
+        ],
+        "explanation": "A **microservices architecture** builds a system out of many small programs (**services**). Each one is deployed, restarted and scaled on its own, and they talk to each other over the network instead of through function calls inside one process. The opposite is a **monolith**: one large program that does everything.\n\nNICo's control plane, the **Site Controller**, is a suite of microservices running on a Kubernetes cluster inside the datacenter it manages. The cluster needs at least three nodes for high availability. All control plane services talk to each other over **mTLS/gRPC**. gRPC is an RPC framework that uses Protocol Buffers, which you covered earlier. mTLS means both sides present certificates, so each service proves who it is.\n\nThe central service is the **API Service (NICo Core)**, which is the single source of truth. It is the **only** service that reads from and writes to PostgreSQL, and it runs the state machines for hosts, network segments and InfiniBand/NVLink partitions. The other services do one job each and report to it:\n\n- **DHCP Server**: stateless. It forwards requests to the API Service for IP management.\n- **PXE Service**: serves boot artifacts and fetches the correct one for each host from the API Service.\n- **Hardware Health**: scrapes BMCs over Redfish and reports health alerts to the API Service.\n- **Site Agent**: connects the site to **NICo REST** (the JSON API) through Temporal. This lets NICo REST run centrally in the cloud while the site controller stays on-premises.\n\nThere are agents on the managed hosts too, such as Scout and the DPU Agent, which polls the API Service every 30 seconds for desired network configuration.\n\nThe benefits are independent deployment, focused code and failure isolation. The costs:\n\n1. Every call crosses a network, so it can be slow, time out, or succeed without you hearing back.\n2. No single database transaction can span services.\n3. You must decide which service owns each piece of data.\n\nNICo solves point 3 by having one owner for all state. Points 1 and 2 are why the rest of this chapter exists.",
+        "analogy": "A restaurant kitchen with stations: grill, salad, pastry, plus one head chef holding the master order book. Stations do their own work, but only the head chef updates the book. A station that is told \"table 4 wants fries\" passes the request on instead of writing it down itself. Where the analogy breaks: kitchen stations can shout across the room and get an instant, reliable answer. Services talk over a network where messages get lost or delayed, and a reply that never arrives tells you nothing about whether the work was done.",
+        "workedExample": {
+          "title": "Trace a new BMC's first DHCP request through NICo",
+          "steps": [
+            {
+              "subgoal": "Identify the entry point",
+              "detail": "A host BMC powers on and broadcasts a DHCP request on the underlay network. The **NICo DHCP server** (a Kea hook plugin) receives it."
+            },
+            {
+              "subgoal": "See the stateless hand-off",
+              "detail": "The hook pulls out the MAC address, vendor class, relay address, circuit ID and remote ID. It then sends a gRPC `discover_dhcp()` request to **NICo Core** (the API Service). It does not decide the IP address itself."
+            },
+            {
+              "subgoal": "Locate where state lives",
+              "detail": "NICo Core tracks DHCP entries in PostgreSQL by MAC address and returns a `Machine` response with the network configuration (IP, gateway and so on). The DHCP server passes that back to the BMC."
+            },
+            {
+              "subgoal": "Follow the knock-on work",
+              "detail": "Now that NICo knows the BMC's IP, **Site Explorer** probes it over Redfish (`GET /redfish/v1`), authenticates and collects inventory. Results go into Core's state, never into a second database."
+            },
+            {
+              "subgoal": "Draw the lesson",
+              "detail": "Because all state flows through one owner, you could restart or scale the DHCP service without losing anything. The price is that every hop is a network call that can fail, so Core has to tolerate repeated or missing requests."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks in this map of which NICo component talks to which, according to the NICo overview.",
+          "partialSolution": "| Component | Talks to | Protocol |\n|---|---|---|\n| DHCP Server | API Service | mTLS/gRPC |\n| PXE Service | API Service | mTLS/gRPC |\n| Hardware Health | Host and DPU BMCs | ___ |\n| API Service | ___ (the only service that does) | SQL |\n| Site Agent | NICo REST | via ___ |",
+          "answer": "Hardware Health → BMCs over **Redfish HTTPS**. API Service → **PostgreSQL** (the `nico_system_nico` database). Site Agent → NICo REST **via Temporal**."
+        },
+        "independentProblem": {
+          "prompt": "Hardware Health notices a fan reporting 0 RPM on a host BMC. Describe where that information goes inside NICo, and give two reasons the design doesn't let Hardware Health write the alert straight into PostgreSQL.",
+          "hints": [
+            "Check which service the overview says Hardware Health reports alerts to.",
+            "Think about what goes wrong when two services each write the same tables with their own rules.",
+            "Consider who runs the state machines that react to health changes."
+          ],
+          "answer": "Hardware Health reports the alert to the API Service over mTLS/gRPC (`InsertMachineHealthReport`). The API Service stores it and its state machines react. Reasons to route it through Core: (1) one owner of the database means one set of validation and concurrency rules, with no second writer racing the state machines; (2) Hardware Health stays simple and replaceable, and Core can change its schema without breaking other services. Core also needs a single place to aggregate health and react to it."
+        },
+        "selfExplanation": "Why does NICo let only the API Service touch PostgreSQL, when letting every service read and write the database directly would save network hops?",
+        "checks": [
+          {
+            "question": "Which NICo service is the only one that reads from and writes to PostgreSQL?",
+            "options": [
+              "The API Service (NICo Core)",
+              "Every Site Controller service, each with its own schema",
+              "NICo REST",
+              "The DHCP Server, because it stores IP leases"
+            ],
+            "answer": "The API Service (NICo Core)",
+            "explanation": "The overview says the API Service is the single source of truth and the only service with database access. The DHCP server is stateless and forwards to Core. NICo REST reaches the site through the Site Agent; it doesn't write Core's database."
+          },
+          {
+            "question": "What is a real cost of splitting a system into microservices?",
+            "options": [
+              "Calls between services cross a network and can time out or lose their reply",
+              "Services can no longer be restarted independently",
+              "You can no longer use more than one programming language",
+              "Every service has to share one process"
+            ],
+            "answer": "Calls between services cross a network and can time out or lose their reply",
+            "explanation": "Independent restarts and the freedom to mix languages are benefits, not costs. Sharing one process is what a monolith does. The real cost is network unreliability, which drives the idempotency and reconciliation rules later in this chapter."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "concept": "temporal-workflow-engine",
+        "prequestions": [
+          {
+            "question": "A program that provisions a server runs 6 steps over 20 minutes. It crashes after step 4. Without special tooling, what usually happens when you restart it?",
+            "answer": "It starts again from step 1, or you have to work out by hand what already happened. A durable workflow engine records progress so the run can resume after step 4."
+          },
+          {
+            "question": "Which three Temporal namespaces does NICo need?",
+            "answer": "`cloud`, `site`, and one named after each site's UUID, registered once you know the UUID."
+          }
+        ],
+        "explanation": "**Temporal** is a durable workflow orchestration engine. You write a **workflow**, which is ordinary code describing a multi-step process, and **activities**, which are the individual steps that touch the outside world (call an API, power-cycle a machine). The Temporal server stores every event in the workflow's **history**: \"activity A scheduled\", \"activity A completed with result X\", \"timer fired\". If a worker process dies, another worker picks the workflow up and **replays** the history to rebuild where it was, then carries on. A finished step's recorded result is reused instead of being run again. For replay to work, workflow code must be deterministic: same inputs and history, same decisions. Side effects belong in activities.\n\nTemporal retries failed activities according to a retry policy. Look closely at what that implies. If a worker crashes *during* an activity, Temporal can't know whether the external effect happened, so it runs the activity again. Temporal makes the orchestration durable, but each activity still needs to be safe to repeat. That's the idempotency lesson coming up.\n\nHow NICo uses it:\n\n- **NICo REST** runs multi-step operations on Temporal: instance provisioning, reboot (for example the `RebootInstance` workflow) and release.\n- The **Site Agent** connects to NICo REST through Temporal. That's how a centrally hosted REST API delegates work to an on-premises site.\n- **NICo Flow** stores rack tasks in PostgreSQL and runs them through Temporal. Rule stages run in order and the steps inside a stage run in parallel. A failed stage stops the task **without rolling back** earlier hardware actions.\n- Required **namespaces** (isolated tenancy units inside one Temporal server): `cloud`, `site`, and a per-site UUID. The validated server version is v1.22.6, with the frontend at `temporal-frontend.temporal.svc:7233`.\n\nThe NICo Core state controllers you'll study next are a separate mechanism. They resume work from database state rather than from Temporal history.",
+        "analogy": "A flight's black box combined with a checklist. Every completed checklist item is written down the moment it finishes, so a replacement pilot can read the log and carry on from the right line. Where it breaks down: if the first pilot was halfway through \"lower landing gear\" when they collapsed, the log only says the item started. The new pilot has to check the gear before pulling the lever again. Temporal is in the same position with an activity that was interrupted.",
+        "workedExample": {
+          "title": "Run Temporal locally and register NICo's namespaces",
+          "steps": [
+            {
+              "subgoal": "Install the Temporal CLI",
+              "detail": "On macOS: `brew install temporal`. On Linux: `curl -sSf https://temporal.download/cli.sh | sh`, then add `~/.temporalio/bin` to your `PATH`. Check it with `temporal --version`."
+            },
+            {
+              "subgoal": "Start a dev server",
+              "detail": "```bash\ntemporal server start-dev\n```\nThis starts a single-process server with its frontend on `localhost:7233` (the same port NICo's cluster uses) and a web UI on `http://localhost:8233`. Leave it running."
+            },
+            {
+              "subgoal": "Register the namespaces NICo expects",
+              "detail": "In a second terminal:\n```bash\nSITE_UUID=$(python3 -c 'import uuid; print(uuid.uuid4())')\nfor ns in cloud site \"$SITE_UUID\"; do\n  temporal operator namespace create --namespace \"$ns\"\ndone\ntemporal operator namespace list | grep -E 'Name'\n```\nNICo's docs show the same thing with the older `tctl` tool: `tctl --ns cloud namespace register`, and the same for `site` and the site UUID."
+            },
+            {
+              "subgoal": "Connect it to NICo's install order",
+              "detail": "In the NICo prerequisites, Temporal is the last foundation service (ESO → cert-manager → PostgreSQL → Vault → Temporal). You register `cloud` and `site` while deploying NICo REST. The per-site UUID namespace can only be registered after the site has been created, because that's when its UUID exists."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "You've just created a site and the REST API reports its UUID as `3f2a9c1e-7b44-4d0e-9a51-0c2d8e6f1b77`. Complete the registration commands from the NICo docs.",
+          "partialSolution": "tctl --ns cloud namespace register\ntctl --ns site namespace register\ntctl --ns ___ namespace register",
+          "answer": "`tctl --ns 3f2a9c1e-7b44-4d0e-9a51-0c2d8e6f1b77 namespace register`. The third namespace is named after the site UUID itself."
+        },
+        "independentProblem": {
+          "prompt": "A NICo REST provisioning workflow has three activities: (1) allocate an IP, (2) power-cycle the host via the Site Agent, (3) mark the instance ready. The worker process is killed (a) just after activity 1's completion was recorded, and separately (b) while activity 2 is in flight. What does Temporal do in each case, and what does that demand from activity 2?",
+          "hints": [
+            "What does the history contain at the moment of each crash?",
+            "In case (b), is there a recorded result for activity 2?",
+            "Think about whether Temporal can see inside the BMC."
+          ],
+          "answer": "(a) The history records activity 1 as completed. A new worker replays the history, reuses activity 1's stored result without running it again, and schedules activity 2. (b) The history shows activity 2 scheduled or started but not completed. When it times out, Temporal retries it, so the power-cycle may be requested twice. Activity 2 must therefore be idempotent or reconcile first: check whether the reboot already happened, or use a stable operation ID, before issuing another reset."
+        },
+        "selfExplanation": "Temporal records every completed step durably. Why is that still not enough to guarantee a host is power-cycled exactly once?",
+        "checks": [
+          {
+            "question": "Which NICo component connects to NICo REST through Temporal?",
+            "options": [
+              "The Site Agent",
+              "The DHCP Server",
+              "The DPU Agent",
+              "PostgreSQL"
+            ],
+            "answer": "The Site Agent",
+            "explanation": "The overview says the Site Agent maintains a Temporal connection to NICo REST. The DPU Agent polls the API Service over gRPC, and DHCP forwards to Core over gRPC."
+          },
+          {
+            "question": "In NICo Flow, a stage fails after earlier stages have flashed firmware. What happens to the earlier firmware changes?",
+            "options": [
+              "They stay in place; the task stops without rolling back earlier hardware actions",
+              "Temporal automatically rolls them back",
+              "PostgreSQL rolls them back with the task row",
+              "Flow retries the whole task from the beginning forever"
+            ],
+            "answer": "They stay in place; the task stops without rolling back earlier hardware actions",
+            "explanation": "The Flow page says this explicitly. Neither Temporal nor a database rollback can undo a completed hardware change. Undoing it would need a separate compensating operation."
+          },
+          {
+            "question": "Why must Temporal workflow code be deterministic?",
+            "options": [
+              "Workers rebuild a workflow's position by replaying its history, which only works if the code makes the same decisions each time",
+              "Because Temporal runs workflows on GPUs",
+              "So the workflow can run without a server",
+              "Determinism makes activities exactly-once"
+            ],
+            "answer": "Workers rebuild a workflow's position by replaying its history, which only works if the code makes the same decisions each time",
+            "explanation": "Replay is how recovery works. Determinism doesn't make activities exactly-once; they can still be retried."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md",
+          "architecture/flow.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "concept": "rate-limiting",
+        "prequestions": [
+          {
+            "question": "A limiter allows 3 requests per second with a burst of 8. A tenant workload fires 20 requests at the same instant. Roughly how many get through immediately?",
+            "answer": "About 8, the burst. After that, roughly one new permit appears every 1/3 second."
+          },
+          {
+            "question": "Why might the DPU agent want to limit how often workloads can ask for identity tokens?",
+            "answer": "Each request triggers a signing call to NICo Core (or a sign-proxy). A misbehaving workload could flood the signer, so the agent caps the sustained rate while still allowing short spikes."
+          }
+        ],
+        "explanation": "**Rate limiting** caps how many requests a service accepts over time. A **token bucket** is the classic mental model. A bucket holds up to *burst* tokens and refills at *rate* tokens per second. Each request takes one token; if the bucket is empty, the request waits or is rejected. You get a sustained cap (the refill rate) and short spikes up to the bucket size.\n\n**GCRA** (Generic Cell Rate Algorithm) gives the same behaviour while storing just one number instead of a token count and a timestamp. That number is the **TAT**, the *theoretical arrival time*: when the next request would be \"on schedule\" if traffic arrived at exactly the sustained rate.\n\n- Emission interval `T = 1 / rate` (for 3/s, T = 1/3 s).\n- Burst tolerance `tau = (burst - 1) * T`, meaning how far ahead of schedule you may run.\n- On each request at time `now`: `tat = max(TAT, now)`. If `tat - now > tau`, reject (or wait). Otherwise allow and set `TAT = tat + T`.\n\nIt's cheap, has no background refill timer, and is easy to keep in one shared variable or a single database or Redis key.\n\n**In NICo:** the DPU agent serves IMDS (instance metadata) identity requests (`GET …/meta-data/identity`) and applies a GCRA limit configured in its optional `[machine-identity]` section, not in the API site config:\n\n| Setting | Default | Meaning |\n|---|---|---|\n| `requests-per-second` | 3 | Sustained admission rate (GCRA refill rate) |\n| `burst` | 8 | Maximum burst above the sustained rate |\n| `wait-timeout-secs` | 2 | How long a request may block waiting for a permit before failing |\n| `sign-timeout-secs` | 5 | Timeout for the signing step itself |\n\nThe wait timeout matters. Instead of queueing forever, a request that can't get capacity within 2 seconds fails. After changing these settings, restart or redeploy the DPU agents. (Exact off-by-one behaviour at the burst boundary depends on the implementation. The model here is the standard textbook form.)",
+        "analogy": "A bouncer with a clicker who lets people in at a steady 3 per second, but tolerates a group of up to 8 arriving together because the room has slack. Where it breaks down: a real bouncer can see the queue and the room. GCRA only remembers one timestamp and never inspects who is already inside.",
+        "workedExample": {
+          "title": "Simulate the DPU agent's default limiter in Python",
+          "steps": [
+            {
+              "subgoal": "Write the GCRA core with exact arithmetic",
+              "detail": "Floating-point rounding can flip a decision right at the boundary, so use `Fraction`.\n```python\n# gcra.py\nfrom fractions import Fraction\n\nclass GCRA:\n    def __init__(self, rate, burst):\n        self.T = Fraction(1, rate)\n        self.tau = (burst - 1) * self.T\n        self.tat = Fraction(0)\n\n    def allow(self, now):\n        tat = max(self.tat, now)\n        if tat - now > self.tau:\n            return False\n        self.tat = tat + self.T\n        return True\n\nif __name__ == \"__main__\":\n    g = GCRA(rate=3, burst=8)\n    print([g.allow(Fraction(0)) for _ in range(10)])\n    print(g.allow(Fraction(1, 3)), g.allow(Fraction(1, 3)))\n    print(g.allow(Fraction(1)))\n```"
+            },
+            {
+              "subgoal": "Run it and read the burst",
+              "detail": "`python3 gcra.py` prints eight `True` followed by two `False` on the first line: the burst of 8 is used up at t=0."
+            },
+            {
+              "subgoal": "Watch the refill",
+              "detail": "At t = 1/3 s, TAT is 8/3 and `tat - now = 7/3`, which equals `tau`, so one request is allowed. The second at the same instant is rejected. That's exactly one permit per T."
+            },
+            {
+              "subgoal": "Check the sustained rate",
+              "detail": "At t = 1 s, TAT is 3 and `tat - now = 2 ≤ 7/3`, so the request is allowed. Over long periods, admissions converge to 3 per second no matter how hard clients push."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this GCRA `allow` method so that it rejects when the request is too far ahead of schedule, and otherwise moves the TAT forward by one interval.",
+          "partialSolution": "    def allow(self, now):\n        tat = max(self.tat, now)\n        if ___:\n            return False\n        self.tat = ___\n        return True",
+          "answer": "First blank: `tat - now > self.tau`. Second blank: `tat + self.T`. Using `self.tat + self.T` instead would be a bug after an idle period, because it would let the TAT lag behind `now` and allow an oversized burst."
+        },
+        "independentProblem": {
+          "prompt": "With the defaults (rate 3, burst 8, wait-timeout 2 s), a workload sends 20 identity requests at t=0. Each request waits for a permit for up to 2 s, then fails. About how many succeed, and when does the last success happen?",
+          "hints": [
+            "The first 8 pass at t=0. When is the next permit?",
+            "After the burst, one permit arrives every T = 1/3 s. How many intervals fit in 2 seconds?",
+            "2 s / (1/3 s) = 6. Add those to the burst."
+          ],
+          "answer": "About 8 succeed immediately. After that, waiting requests get a permit about every 1/3 s, at 1/3, 2/3, … up to 2 s, which is about 6 more. So roughly 14 succeed, the last near t = 2 s, and about 6 fail with a timeout. Whether the one landing exactly on 2.0 s counts depends on the implementation's boundary check."
+        },
+        "selfExplanation": "Why does a rate limiter need both a sustained rate and a burst, rather than just a maximum number of requests per second?",
+        "checks": [
+          {
+            "question": "Where are the IMDS identity rate limits configured?",
+            "options": [
+              "In the DPU agent's optional `[machine-identity]` section",
+              "In `[machine_identity]` in the API site config",
+              "In the Temporal `site` namespace",
+              "In PostgreSQL's `nico_system_nico` database"
+            ],
+            "answer": "In the DPU agent's optional `[machine-identity]` section",
+            "explanation": "The Day 0 page says the limits are set on the agent and not stored in site config. The site's `[machine_identity]` section (note the underscore) holds the enable switch, algorithm and encryption key ID."
+          },
+          {
+            "question": "With `wait-timeout-secs = 2`, what happens to a request when no permit becomes available within 2 seconds?",
+            "options": [
+              "The agent fails the request instead of queueing it indefinitely",
+              "It is queued until a permit eventually arrives",
+              "It is forwarded to NICo Core without signing",
+              "The burst is temporarily raised"
+            ],
+            "answer": "The agent fails the request instead of queueing it indefinitely",
+            "explanation": "The docs say the timeout exists to avoid indefinite queueing. Raising the burst or bypassing signing would defeat the point of the limiter."
+          },
+          {
+            "question": "In GCRA, what single piece of state does the limiter keep?",
+            "options": [
+              "The theoretical arrival time (TAT)",
+              "A list of timestamps of every recent request",
+              "A background thread that adds tokens every T",
+              "The number of currently connected clients"
+            ],
+            "answer": "The theoretical arrival time (TAT)",
+            "explanation": "That's GCRA's appeal: one number, updated on each request, and no refill timer. A sliding log of timestamps is a different and costlier algorithm."
+          }
+        ],
+        "sources": [
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "concept": "database-transaction",
+        "prequestions": [
+          {
+            "question": "You record \"IP 10.0.0.5 is allocated\" and \"machine m1 has IP 10.0.0.5\" as two separate writes. The process crashes between them. What's wrong with the data now?",
+            "answer": "The IP is marked allocated but no machine has it, so the address leaks. A transaction makes both writes commit together or neither."
+          },
+          {
+            "question": "Is it a good idea to open a transaction, power-cycle a server over Redfish (around 30 s), then commit?",
+            "answer": "No. The transaction holds locks the whole time, and if it rolls back, the reboot still happened. NICo never keeps a transaction open across external calls."
+          }
+        ],
+        "explanation": "A **database transaction** is a group of reads and writes that the database treats as one unit. It either **commits** (every change becomes durable and visible together) or **rolls back** (none of them happened). You start with `BEGIN` and finish with `COMMIT` or `ROLLBACK`. Transactions also isolate concurrent work, so other sessions don't see your half-finished changes, and they usually hold row locks until they end.\n\nA transaction protects **database facts only**. That boundary shapes NICo's state handling. A rollback cannot undo a completed Redfish call to a BMC, a switch or a DPU. NICo's docs say plainly that the framework \"does not make database changes and external I/O atomic.\"\n\nNICo's transaction rules for state controllers:\n\n- **State load:** read the object snapshot and controller state in a short transaction and **commit before** the handler does any external work.\n- **Related database changes:** keep them in one transaction when they have to agree. The processor applies all handler-queued writes in one transaction, and an operational write failure rolls the whole lot back.\n- **Database first:** commit a *recovery point* (for example \"pending reboot, operation ID X\") **before** the external call. If that commit fails, skip the call.\n- **External I/O first:** make the call with **no open transaction**, then start a *new* transaction for the follow-up write.\n\nWhy short? Long transactions hold locks that block other workers. They can be killed by timeouts and roll back work you thought was done. And they tempt you to believe the external call is \"inside\" the transaction, which it never is. NICo also notes that a handler timeout can roll back an uncommitted transition, so the next run sees the previous durable state and has to recover from it.",
+        "analogy": "A shopping cart at checkout. Everything in the cart is paid for together or you walk away with nothing. Where it breaks down: if you've already eaten a sample at the deli counter, abandoning the cart doesn't un-eat it. External effects are those samples.",
+        "workedExample": {
+          "title": "See commit and rollback with Python's sqlite3",
+          "steps": [
+            {
+              "subgoal": "Create a tiny IP pool",
+              "detail": "```python\n# txn_demo.py\nimport sqlite3\n\nconn = sqlite3.connect(\"txn.db\")\nconn.executescript(\"\"\"\nDROP TABLE IF EXISTS ips; DROP TABLE IF EXISTS ifaces;\nCREATE TABLE ips(addr TEXT PRIMARY KEY, allocated INTEGER NOT NULL);\nCREATE TABLE ifaces(machine TEXT PRIMARY KEY, addr TEXT NOT NULL);\nINSERT INTO ips VALUES ('10.0.0.5', 0);\n\"\"\")\n```"
+            },
+            {
+              "subgoal": "Group the two writes",
+              "detail": "`with conn:` commits if the block finishes and rolls back if it raises.\n```python\ntry:\n    with conn:\n        conn.execute(\"UPDATE ips SET allocated = 1 WHERE addr = '10.0.0.5'\")\n        raise RuntimeError(\"crash before second write\")\n        conn.execute(\"INSERT INTO ifaces VALUES ('m1', '10.0.0.5')\")\nexcept RuntimeError as e:\n    print(\"failed:\", e)\n\nprint(conn.execute(\"SELECT * FROM ips\").fetchall())\n```"
+            },
+            {
+              "subgoal": "Observe the rollback",
+              "detail": "Run `python3 txn_demo.py`. It prints `[('10.0.0.5', 0)]`: the first UPDATE was undone, so the IP didn't leak."
+            },
+            {
+              "subgoal": "Commit the happy path",
+              "detail": "Delete the `raise` line and run it again. Now `allocated` is `1` and `ifaces` has the row. Both writes committed together."
+            },
+            {
+              "subgoal": "Notice what the transaction can't cover",
+              "detail": "Suppose you added `requests.post(bmc_url, ...)` inside the `with` block before the raise. The rollback would undo the IP rows, but the BMC would already have acted. That's why NICo commits a recovery point first and makes external calls outside any open transaction."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this \"database first\" pattern. It must commit a recovery point *before* the external call, make the call with no open transaction, then record the result in a **new** transaction.",
+          "partialSolution": "def reboot_machine(conn, machine_id, op_id, call_bmc):\n    with conn:\n        conn.execute(\n            \"INSERT INTO ops(op_id, machine_id, status) VALUES (?, ?, 'pending')\",\n            (op_id, machine_id),\n        )\n    result = ___\n    with ___:\n        conn.execute(\n            \"UPDATE ops SET status = ? WHERE op_id = ?\",\n            (result, op_id),\n        )",
+          "answer": "First blank: `call_bmc(machine_id, op_id)`, called outside any `with conn:` block so no transaction is open. Second blank: `conn`, which starts a fresh transaction for the follow-up write. If the first `with conn:` raises, the function exits before the BMC is ever called."
+        },
+        "independentProblem": {
+          "prompt": "A colleague's handler does this: BEGIN → read machine → send Redfish `GracefulRestart` → wait up to 10 minutes for the host to come back → UPDATE machine state → COMMIT. List three concrete problems, and rewrite it as a sequence of short transactions and external calls.",
+          "hints": [
+            "What happens to row locks during those 10 minutes?",
+            "If the COMMIT fails or the handler times out, what does the database say, and what did the host actually do?",
+            "Split it into: load (commit), recovery point (commit), external call (no txn), later observation and write (new txn)."
+          ],
+          "answer": "Problems: (1) locks are held for minutes and block other workers; (2) a timeout or failed commit rolls back the state change while the host really did reboot, so the database and reality disagree with no record of the attempt; (3) if the process crashes mid-wait, nothing durable says a reboot was issued, so the next run may reboot again. Rewrite: short txn to load state, then commit. Short txn to commit a recovery point (`pending_reboot`, operation ID, requested-at time). Send the Redfish reset with no transaction open. Return `Wait`. On later iterations, observe the host (for example a reboot timestamp newer than the requested-at time) and, in a new short txn, record completion and transition."
+        },
+        "selfExplanation": "Why can't a database transaction make \"update the machine row\" and \"power-cycle the BMC\" atomic, even if both happen between BEGIN and COMMIT?",
+        "checks": [
+          {
+            "question": "In NICo's state handling, when does the state-load transaction commit?",
+            "options": [
+              "Before the handler performs external work",
+              "After the handler's Redfish calls finish",
+              "Only when the resource reaches Ready",
+              "Never; it stays open for the controller's lifetime"
+            ],
+            "answer": "Before the handler performs external work",
+            "explanation": "The state-handling page says the processor reads the snapshot in a short transaction and commits it before external work. Holding it open across calls is exactly the anti-pattern NICo avoids."
+          },
+          {
+            "question": "With the \"database first\" order, what should happen if committing the recovery point fails?",
+            "options": [
+              "Skip the external call",
+              "Make the external call anyway and retry the commit later",
+              "Make the external call inside the failed transaction",
+              "Roll back the BMC"
+            ],
+            "answer": "Skip the external call",
+            "explanation": "Without a durable recovery point, nothing would record that the call was attempted, so recovery after a crash would be guesswork. You can't roll back a BMC anyway."
+          },
+          {
+            "question": "The processor applies all queued handler-owned writes and one of them fails with an operational error. What happens to the others?",
+            "options": [
+              "They are all rolled back together",
+              "Those before the failure stay committed",
+              "Only the failed write is retried",
+              "They are committed and the failure is logged"
+            ],
+            "answer": "They are all rolled back together",
+            "explanation": "They share one transaction, so it's all or nothing. The processor then tries to persist an error outcome in a new transaction."
+          }
+        ],
+        "sources": [
+          "architecture/state_handling.md"
+        ]
+      },
+      {
+        "concept": "idempotency",
+        "prequestions": [
+          {
+            "question": "Which is safe to send twice: \"set fan mode to HIGH\" or \"increase fan speed by 10%\"?",
+            "answer": "\"Set fan mode to HIGH\". Repeating it leaves the same result. Repeating the increase moves the speed further each time."
+          },
+          {
+            "question": "A request to the BMC times out. Did the reboot happen?",
+            "answer": "You can't tell. It might not have arrived, might have half-run, or might have fully succeeded and only the reply was lost. NICo treats a timed-out call as ambiguous and reconciles before retrying."
+          }
+        ],
+        "explanation": "An operation is **idempotent** if doing it twice (or ten times) leaves the system in the same state as doing it once. `x = 5` is idempotent and `x = x + 1` is not. HTTP `PUT` of a full resource is designed to be idempotent; a `POST` that creates something usually isn't.\n\nWhy NICo cares: its state-controller framework **does not guarantee exactly-once execution**. Handlers can rerun after a crash, after a timeout, after a stale queue claim is taken over by another processor, or after an invalidated iteration. Temporal can retry activities. So NICo requires that handlers make their database changes **and** their external effects safe to retry and reconcile.\n\nTechniques:\n\n- **Desired-state operations:** express the call as \"make it so\" (\"boot order = DPU first\") rather than \"do a thing\".\n- **Idempotency key / stable operation ID:** attach an ID derived from durable state. The receiver remembers IDs it has handled and replays the original result instead of acting again.\n- **Check before acting:** observe whether the effect already exists.\n\nWhen a previous attempt's outcome is unclear, NICo classifies it:\n\n- **Absent:** retry only if repetition is safe.\n- **Complete and desired:** adopt it and persist completion.\n- **Partial or unwanted:** finish, compensate or remove it only through a documented safe operation.\n- **Unknown:** keep observing safely, or **fail closed**: keep the recovery point, don't advance, record an actionable error.\n\nA real example from the rack state machine: the switch certificate batch is **non-idempotent**. If RMS can't find the persisted job, NICo goes to `Error` rather than resubmitting. The ScaleUpFabricManager V2 request, by contrast, is an **idempotent desired state**, so if RMS has lost the job, NICo simply resubmits it.\n\nRelated: NICo's *explicit enqueue* is idempotent. Asking for a resource that is already queued doesn't create a second queue entry.",
+        "analogy": "A lift call button. Pressing it five times calls the lift once. Where it breaks down: a lift button needs no ID because there is only one lift and one \"called\" flag. Real systems often need an operation ID to tell \"the same request again\" apart from \"a genuinely new request that looks identical\".",
+        "workedExample": {
+          "title": "Make a fake reboot endpoint retry-safe with an idempotency key",
+          "steps": [
+            {
+              "subgoal": "Start with the unsafe version",
+              "detail": "```python\nreboots = []\n\ndef reboot_unsafe(machine):\n    reboots.append(machine)\n    return \"ok\"\n\nreboot_unsafe(\"m1\"); reboot_unsafe(\"m1\")  # client retried after a timeout\nprint(len(reboots))  # 2: the host rebooted twice\n```"
+            },
+            {
+              "subgoal": "Derive a stable operation ID from durable state",
+              "detail": "The caller builds the ID from facts that don't change between retries, such as the machine ID plus the controller-state version it read: `op_id = f\"{machine}-reboot-v{version}\"`. A retry of the same attempt gets the same ID, and a later, genuinely new reboot (at a higher version) gets a new one."
+            },
+            {
+              "subgoal": "Have the receiver remember IDs",
+              "detail": "```python\nreboots, seen = [], {}\n\ndef reboot(machine, op_id):\n    if op_id in seen:\n        return seen[op_id]\n    reboots.append(machine)\n    seen[op_id] = \"ok\"\n    return \"ok\"\n\nreboot(\"m1\", \"m1-reboot-v1\"); reboot(\"m1\", \"m1-reboot-v1\")\nprint(len(reboots))  # 1\nreboot(\"m1\", \"m1-reboot-v2\")\nprint(len(reboots))  # 2: a deliberate second reboot\n```"
+            },
+            {
+              "subgoal": "Handle integrations that offer no keys",
+              "detail": "A plain Redfish `ComputerSystem.Reset` doesn't remember your IDs. In that case, persist a recovery point (requested-at timestamp) and on retry check the evidence first. The rack state machine does this: a reboot batch completes when each host reports a Scout reboot timestamp later than the persisted batch timestamp. Only reissue the reset if the evidence says it is absent."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this receiver so that a repeated `op_id` returns the stored result without applying the effect again.",
+          "partialSolution": "def apply_once(store, op_id, effect):\n    if ___:\n        return store[op_id]\n    result = effect()\n    store[op_id] = ___\n    return result",
+          "answer": "First blank: `op_id in store`. Second blank: `result`. (In a real system, recording the ID and applying the effect have to be made durable together, or reconciled, otherwise a crash between them reopens the window.)"
+        },
+        "independentProblem": {
+          "prompt": "For each operation, say whether it is naturally idempotent, and if not, how a NICo handler could make retries safe: (a) set host boot order to DPU first; (b) Redfish `GracefulRestart`; (c) submit the RMS switch certificate batch; (d) mark an IP as allocated to machine m1.",
+          "hints": [
+            "Ask: does doing it a second time change anything beyond the first time?",
+            "For (b) and (c), think about the rack state machine's choices: evidence checks, and going to Error.",
+            "For (d), think about a desired-state write keyed by machine."
+          ],
+          "answer": "(a) Idempotent: it's a desired state, and setting it again changes nothing. (b) Not idempotent, since each call reboots again. Persist a recovery point with a requested-at time, and on retry check for a reboot timestamp newer than it before reissuing. (c) Not idempotent, per the rack doc. Persist the returned job ID and poll it. If the outcome is ambiguous or the job is missing, fail closed to `Error` instead of resubmitting. (d) Idempotent if written as \"allocation of this IP = m1\" (an upsert keyed by IP and machine), not as \"allocate the next free IP\", which would grab a new IP on every retry."
+        },
+        "selfExplanation": "NICo already records progress durably. Why does it still require external effects to be safe to retry?",
+        "checks": [
+          {
+            "question": "Does NICo's state-controller framework guarantee exactly-once execution of handlers?",
+            "options": [
+              "No; handlers and external effects must be safe to retry",
+              "Yes, through the queue claim",
+              "Yes, but only for Transition outcomes",
+              "Yes, because Temporal wraps every handler"
+            ],
+            "answer": "No; handlers and external effects must be safe to retry",
+            "explanation": "The state-handling page says the framework doesn't guarantee exactly-once execution, and that the queue claim coordinates dispatch but doesn't fence writes or effects. Core state controllers are not Temporal workflows."
+          },
+          {
+            "question": "In ConfigureNmxCluster, RMS can no longer find the persisted ScaleUpFabricManager V2 job. What does NICo do, and why?",
+            "options": [
+              "Resubmits it, because the V2 request is an idempotent desired state",
+              "Moves to Error, because every RMS job is non-idempotent",
+              "Waits forever for the job to reappear",
+              "Rolls back the certificate batch"
+            ],
+            "answer": "Resubmits it, because the V2 request is an idempotent desired state",
+            "explanation": "The rack doc treats V2 as idempotent, so resubmitting is safe. Going to Error is the response for the non-idempotent certificate batch. A \"rollback\" of external work doesn't exist."
+          },
+          {
+            "question": "A previous attempt's outcome is unknown and no safe way exists to repeat or compensate. What should the handler do?",
+            "options": [
+              "Fail closed: keep the recovery point, don't advance, record an actionable error",
+              "Retry until it succeeds",
+              "Assume it succeeded and transition",
+              "Delete the recovery point and start fresh"
+            ],
+            "answer": "Fail closed: keep the recovery point, don't advance, record an actionable error",
+            "explanation": "Blind retries or assuming success can double an effect or hide a failure. Deleting the recovery point throws away the evidence needed to reconcile."
+          }
+        ],
+        "sources": [
+          "architecture/state_handling.md",
+          "architecture/state_machines/rackstatemachine.md"
+        ]
+      },
+      {
+        "concept": "optimistic-concurrency-stale-write-protection",
+        "prequestions": [
+          {
+            "question": "Two workers each read machine m1 at version 7. Worker A writes state \"Rebooting\" and version 8. Then worker B, still holding its version-7 view, writes \"Ready\". What went wrong?",
+            "answer": "B overwrote A's newer change based on stale data (a lost update). A version check on write (`WHERE version = 7`) would make B's update match zero rows and be rejected."
+          },
+          {
+            "question": "Does a stale write rejection mean the system is broken?",
+            "answer": "No. In NICo it's a normal event. The iteration is invalidated, logged at info level, and requeued so it runs again on fresh state."
+          }
+        ],
+        "explanation": "**Optimistic concurrency** assumes conflicts are rare. You don't lock a row while you think; you read it along with a **version**, do your work, and write back only if the stored version still matches the one you read. The guard sits in the UPDATE itself:\n\n```sql\nUPDATE machines SET state = 'Ready', version = 8\nWHERE id = 'm1' AND version = 7;\n```\n\nIf someone else committed in between, the version is no longer 7. The statement matches **zero rows** and your **stale write** is rejected. Checking the affected row count tells you which happened. (\"Pessimistic\" locking would instead hold a lock from read to write, which conflicts with keeping transactions short.)\n\n**In NICo:** the processor passes `old_version` and `new_version` to `persist_controller_state`, but these values **don't enforce anything by themselves**. Each `StateControllerIO` implementation has to apply a guard. The common one is an optimistic version predicate; owner or claim predicates and transactionally locked rereads are others. The machine controller's write updates the host only when its controller-state version still matches. The SPDM controller guards the attestation device's version. On a mismatch or a missing row, the write returns `ConditionalWrite::NotApplied(ControllerStateNotCurrent)`.\n\nWhat happens next:\n\n1. The iteration is **invalidated**. The processor rolls back the whole transaction, *including handler-owned writes*, and persists no state, history or outcome from that iteration.\n2. This is **not an operational failure**. It's logged at info level and an immediate requeue is scheduled.\n3. A **new pass loads fresh state**. NICo doesn't retry the rejected write against the old snapshot, because decisions made on stale data may be wrong.\n\nThe same idea shows up in NICo REST key groups. Each edit gets a new version (for example `V2-T1666644937952400`), and an update with `ifVersionMatch` fails if another admin edited the group concurrently.",
+        "analogy": "Editing a shared wiki page. When you hit save, the wiki checks the page hasn't changed since you opened it, and if it has, it refuses and makes you reload. Where it breaks down: a wiki usually shows you a merge screen. NICo doesn't merge. It throws the whole iteration away and decides again from fresh state.",
+        "workedExample": {
+          "title": "Watch a stale write get rejected in SQLite",
+          "steps": [
+            {
+              "subgoal": "Set up a versioned row",
+              "detail": "```python\n# occ_demo.py\nimport sqlite3\n\nconn = sqlite3.connect(\":memory:\")\nconn.execute(\"CREATE TABLE machines(id TEXT PRIMARY KEY, state TEXT, version INTEGER)\")\nconn.execute(\"INSERT INTO machines VALUES ('m1', 'Discovered', 7)\")\nconn.commit()\n```"
+            },
+            {
+              "subgoal": "Both workers read the same version",
+              "detail": "```python\nread_a = conn.execute(\"SELECT version FROM machines WHERE id='m1'\").fetchone()[0]\nread_b = conn.execute(\"SELECT version FROM machines WHERE id='m1'\").fetchone()[0]\n```\nBoth get `7`."
+            },
+            {
+              "subgoal": "Write with a version predicate",
+              "detail": "```python\ndef write(state, old):\n    with conn:\n        cur = conn.execute(\n            \"UPDATE machines SET state=?, version=? WHERE id='m1' AND version=?\",\n            (state, old + 1, old),\n        )\n    return cur.rowcount == 1\n\nprint(\"A applied:\", write(\"Rebooting\", read_a))  # True\nprint(\"B applied:\", write(\"Ready\", read_b))      # False: stale\nprint(conn.execute(\"SELECT * FROM machines\").fetchall())\n```\nThe output ends with `[('m1', 'Rebooting', 8)]`, so A's update survived."
+            },
+            {
+              "subgoal": "React like NICo does",
+              "detail": "B shouldn't retry `write(\"Ready\", 8)` blindly. It should treat the result as \"iteration invalidated\", throw away its decision, reload (now version 8, state Rebooting), and run its logic again. In NICo the rejection also rolls back any other writes B queued in the same transaction."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this guarded write so it applies only if the stored version still equals `old_version`, and reports whether it applied.",
+          "partialSolution": "def persist_state(conn, machine_id, new_state, old_version):\n    with conn:\n        cur = conn.execute(\n            \"UPDATE machines SET state = ?, version = ? WHERE id = ? AND ___\",\n            (new_state, old_version + 1, machine_id, old_version),\n        )\n    return ___",
+          "answer": "First blank: `version = ?`, bound to `old_version`. Second blank: `cur.rowcount == 1`. A missing row also gives 0 rows, which NICo likewise treats as not applied."
+        },
+        "independentProblem": {
+          "prompt": "Tenant admins Ana and Ben both open key group \"MyKeys\" at version `V2-T1666644937952400`. Ana adds Key3 and saves with `ifVersionMatch=V2-T1666644937952400`. Ben then removes Key1 and saves with the same `ifVersionMatch`. What happens to each save, and what should Ben's UI do? Then name the analogous outcome inside a NICo state controller.",
+          "hints": [
+            "Ana's save changes the version. To what, roughly?",
+            "Ben's precondition names a version that no longer exists.",
+            "In a controller this is \"iteration invalidated\": what gets rolled back, and what runs next?"
+          ],
+          "answer": "Ana's save matches and succeeds, and the group gets a new version (for example `V3-T…`). Ben's save fails because the stored version no longer matches. His UI should reload the group (which now has Key3), show him the current state and let him redo the removal. It shouldn't silently overwrite Ana's change. In a controller, the persistence call returns `NotApplied(ControllerStateNotCurrent)`, the processor rolls back the whole iteration including handler-owned writes, logs it at info level, and requeues immediately so the handler runs again on fresh state."
+        },
+        "selfExplanation": "Why does NICo throw away a rejected iteration and reload, instead of just retrying the same write with the new version number?",
+        "checks": [
+          {
+            "question": "The processor passes `old_version` to `persist_controller_state`, but the implementation ignores it and reports success. What happens?",
+            "options": [
+              "The processor cannot detect the stale write; protection depends on the implementation",
+              "The processor rejects the write anyway",
+              "PostgreSQL detects the conflict automatically",
+              "Temporal retries the write"
+            ],
+            "answer": "The processor cannot detect the stale write; protection depends on the implementation",
+            "explanation": "The state-handling page warns about exactly this: the version values don't enforce anything by themselves, so check the concrete implementation before relying on stale-write rejection."
+          },
+          {
+            "question": "How does NICo treat an invalidated iteration?",
+            "options": [
+              "As a normal event: info-level log, rollback, immediate requeue",
+              "As an operational error with a persisted error outcome",
+              "As a reason to move the resource to Error state",
+              "It retries the same write against the old snapshot"
+            ],
+            "answer": "As a normal event: info-level log, rollback, immediate requeue",
+            "explanation": "Invalidation isn't an operational failure. No error outcome is persisted, and `CheckApplied` doesn't retry against the old snapshot; a fresh pass reloads state."
+          },
+          {
+            "question": "A guarded `UPDATE … WHERE id = ? AND version = ?` affects 0 rows. Which of these could be the cause?",
+            "options": [
+              "Another writer changed the version, or the row no longer exists",
+              "The transaction committed twice",
+              "The UPDATE succeeded but the driver hid it",
+              "The database is out of disk"
+            ],
+            "answer": "Another writer changed the version, or the row no longer exists",
+            "explanation": "NICo treats both cases (missing target or version mismatch) as `NotApplied`. Disk errors raise exceptions; they don't produce a clean 0-row result."
+          }
+        ],
+        "sources": [
+          "architecture/state_handling.md",
+          "architecture/key_group_sync.md"
+        ]
+      },
+      {
+        "concept": "worklock-lease-and-fencing",
+        "prequestions": [
+          {
+            "question": "A worker holds a 30-second lock and then freezes for 60 seconds (say, a long GC pause or a VM migration). Another worker takes the lock. The first worker wakes up still \"holding\" its lock object. Is it safe for it to write?",
+            "answer": "No. It lost ownership while frozen. It must prove it still owns the lease inside the same transaction as its write (a fence), and that check will fail."
+          },
+          {
+            "question": "Is \"my lease should still be valid because only 10 seconds have passed\" good evidence of ownership?",
+            "answer": "No. NICo's docs say not to use elapsed time as proof of ownership or loss. Only the fence check against the database is evidence."
+          }
+        ],
+        "explanation": "Some work runs longer than one short transaction and must not be done by two workers at once. A **lease** is a lock with an expiry: a database row saying \"worker W owns key K until time E\". If W dies, the lease eventually expires and someone else can take over, so nothing stays stuck forever. To keep a lease while still working, the owner **renews** it periodically (a keepalive).\n\nThe danger is that a lease can be lost *while the old owner keeps running*. Its process pauses, renewal fails, another worker takes over, and the old owner wakes up believing it's still in charge. **Fencing** stops that zombie: every protected write must prove ownership at write time, inside the same transaction.\n\n**In NICo:** the work-lock manager hands out a `WorkLock`, an expiring lease with a background task that tries to renew it automatically. The rules:\n\n- Holding the Rust `WorkLock` value in scope is **not** proof of ownership.\n- Before protected writes, call **`WorkLock::fence_transaction`** and do those writes **in the same short transaction**. Treat any fencing error, even a database query failure, as a failed fence, and roll back or discard.\n- Retry protected writes only in a **new** transaction after `fence_transaction` succeeds there.\n- `fence_transaction` does **not** renew the lease. Nominal expiry alone doesn't prove loss either: if no takeover has changed the worker ID, the fence can still succeed and serialise a later takeover behind your transaction. If the worker ID *has* changed, acquire a new `WorkLock` before doing protected work.\n- Fencing is **opt-in** and per key. It can't stop a transaction that skips the fence or uses a different key.\n- **External effects** aren't covered. They need their own fencing or compare-and-set, safe repetition, serialisation and reconciliation.\n\nDon't confuse this with the state controller's **queue claim**. That coordinates dispatch (another processor can reclaim a row once `processing_started_at` is older than 3× the configured timeout), but it doesn't fence lifecycle writes. Neither mechanism gives exactly-once execution.",
+        "analogy": "A hotel key card with checkout time. The card opens the door until the front desk re-issues the room. A fence is the door checking with the desk *at the moment you swipe*, not when you were handed the card. Where it breaks down: a hotel door blocks you physically. Database fencing only works if every protected write actually swipes, because the fence is opt-in.",
+        "workedExample": {
+          "title": "Build a toy lease and fence in SQLite (not NICo's schema)",
+          "steps": [
+            {
+              "subgoal": "Create the lock table",
+              "detail": "```python\n# lease_demo.py\nimport sqlite3, time\n\ndb = sqlite3.connect(\"lease.db\", isolation_level=None, timeout=10)\ndb.executescript(\"\"\"\nDROP TABLE IF EXISTS work_locks; DROP TABLE IF EXISTS machines;\nCREATE TABLE work_locks(key TEXT PRIMARY KEY, worker_id TEXT NOT NULL, expires_at REAL NOT NULL);\nCREATE TABLE machines(id TEXT PRIMARY KEY, state TEXT NOT NULL);\nINSERT INTO machines VALUES ('m1', 'NeedsReboot');\n\"\"\")\n```\n`isolation_level=None` lets us write `BEGIN IMMEDIATE`/`COMMIT` ourselves. `BEGIN IMMEDIATE` takes SQLite's write lock, which serialises our transactions."
+            },
+            {
+              "subgoal": "Acquire: take over only if expired",
+              "detail": "```python\ndef acquire(key, worker, ttl):\n    now = time.time()\n    db.execute(\"BEGIN IMMEDIATE\")\n    db.execute(\n        \"INSERT INTO work_locks VALUES (?, ?, ?) \"\n        \"ON CONFLICT(key) DO UPDATE SET worker_id=excluded.worker_id, expires_at=excluded.expires_at \"\n        \"WHERE work_locks.expires_at < ?\",\n        (key, worker, now + ttl, now),\n    )\n    owner = db.execute(\"SELECT worker_id FROM work_locks WHERE key=?\", (key,)).fetchone()[0]\n    db.execute(\"COMMIT\")\n    return owner == worker\n```"
+            },
+            {
+              "subgoal": "Fence: prove ownership inside the write transaction",
+              "detail": "```python\ndef fenced_write(key, worker, machine, state):\n    db.execute(\"BEGIN IMMEDIATE\")\n    try:\n        row = db.execute(\n            \"SELECT 1 FROM work_locks WHERE key=? AND worker_id=?\", (key, worker)\n        ).fetchone()\n        if row is None:\n            raise RuntimeError(\"fence failed\")\n        db.execute(\"UPDATE machines SET state=? WHERE id=?\", (state, machine))\n        db.execute(\"COMMIT\")\n        return True\n    except Exception:\n        db.execute(\"ROLLBACK\")\n        return False\n```\nThe fence checks the **worker ID**, not the clock, matching NICo's rule against elapsed-time reasoning."
+            },
+            {
+              "subgoal": "Simulate a zombie worker",
+              "detail": "```python\nprint(acquire(\"machine:m1\", \"A\", ttl=1))           # True\ntime.sleep(1.5)                                     # A freezes; lease expires\nprint(acquire(\"machine:m1\", \"B\", ttl=30))          # True: takeover\nprint(fenced_write(\"machine:m1\", \"B\", \"m1\", \"Ready\"))     # True\nprint(fenced_write(\"machine:m1\", \"A\", \"m1\", \"NeedsReboot\")) # False: zombie fenced out\nprint(db.execute(\"SELECT * FROM machines\").fetchall())   # [('m1', 'Ready')]\n```"
+            },
+            {
+              "subgoal": "Note the edge case NICo calls out",
+              "detail": "Remove B's `acquire` line and run it again. A's lease is nominally expired, but no one took over, so A's fence still **succeeds**. That's consistent with the docs: expiry alone doesn't prove loss, and a later takeover simply waits behind A's transaction."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the fence inside this write transaction so the UPDATE only commits if `worker` still owns `key`. Any fence problem must roll back.",
+          "partialSolution": "def protected_update(db, key, worker, machine_id):\n    db.execute(\"BEGIN IMMEDIATE\")\n    try:\n        owned = db.execute(\n            \"SELECT 1 FROM work_locks WHERE ___\",\n            (key, worker),\n        ).fetchone()\n        if owned is None:\n            raise RuntimeError(\"fence failed\")\n        db.execute(\"UPDATE machines SET state='Ready' WHERE id=?\", (machine_id,))\n        db.execute(\"COMMIT\")\n    except Exception:\n        db.execute(\"___\")\n        raise",
+          "answer": "First blank: `key = ? AND worker_id = ?`. Second blank: `ROLLBACK`. The check and the write share one transaction. Doing the fence in a separate earlier transaction would reopen the race."
+        },
+        "independentProblem": {
+          "prompt": "Worker A holds the WorkLock for `machine:m7`. It sends a Redfish reset to m7's BMC, then pauses for 2 minutes. Meanwhile its keepalive fails and worker B acquires the lock. A wakes up and wants to (1) write `state = Rebooted` to the database and (2) send a second Redfish call to change the boot order. What happens to each, and what should A do?",
+          "hints": [
+            "Where does `fence_transaction` run, and what does it compare?",
+            "Does a database fence stop an HTTP call to a BMC?",
+            "After losing ownership, what must A do before mutating anything external?"
+          ],
+          "answer": "(1) A's `fence_transaction` sees that the worker ID changed to B and fails, so A must roll back or discard the transaction and the write never commits. (2) The database fence does nothing to stop A's Redfish call. If A sends it, it's an unprotected mutation that may conflict with B. A must stop mutating, do read-only discovery at most, and acquire a new WorkLock (which only succeeds after B releases it or B's lease expires) before any protected work. The boot-order call itself should be safe to repeat (a desired-state call) and reconciled, or protected by external fencing or compare-and-set. Separately, the first reset A sent is now an ambiguous effect that the current owner has to reconcile."
+        },
+        "selfExplanation": "Why must the fence check happen in the same transaction as the protected write, rather than once at the start of the work?",
+        "checks": [
+          {
+            "question": "Does `WorkLock::fence_transaction` renew the lease?",
+            "options": [
+              "No; a background task handles renewal, and the fence only proves ownership for that transaction",
+              "Yes, every call extends the expiry",
+              "Yes, but only if the lease has expired",
+              "Only when called outside a transaction"
+            ],
+            "answer": "No; a background task handles renewal, and the fence only proves ownership for that transaction",
+            "explanation": "The docs say `WorkLock` starts a background renewal task and that `fence_transaction` doesn't renew. Using the fence as a heartbeat is a misconception."
+          },
+          {
+            "question": "A transaction writes to rows protected by `machine:m1` but never calls `fence_transaction`. What protects it?",
+            "options": [
+              "Nothing; fencing is opt-in and can't stop a transaction that omits it",
+              "The work-lock manager blocks it automatically",
+              "PostgreSQL rejects it",
+              "The queue claim fences it"
+            ],
+            "answer": "Nothing; fencing is opt-in and can't stop a transaction that omits it",
+            "explanation": "The docs say the mechanism can't stop a transaction that omits the fence or uses another key. The queue claim coordinates dispatch but doesn't fence lifecycle writes."
+          },
+          {
+            "question": "A worker's lease nominally expired 5 seconds ago, but no other worker has taken over. What does `fence_transaction` do?",
+            "options": [
+              "It can still succeed, and a later takeover is serialised behind the transaction",
+              "It always fails once the expiry time has passed",
+              "It renews the lease and succeeds",
+              "It deletes the lease"
+            ],
+            "answer": "It can still succeed, and a later takeover is serialised behind the transaction",
+            "explanation": "Nominal expiry doesn't prove ownership loss. Only a changed worker ID does. That's why elapsed time is not evidence either way."
+          }
+        ],
+        "sources": [
+          "architecture/state_handling.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Mini state controller: survive crashes, races and rate limits",
+      "goal": "Build a tiny state controller in Python and SQLite that moves 12 fake machines from `NeedsReboot` to `Ready` by calling a fake BMC microservice. The fake BMC is rate-limited with GCRA. Every machine must be rebooted exactly once, even when you crash the worker mid-operation and run two workers that race each other.",
+      "whyItMatters": "This is a miniature of what NICo's state controllers must do. Short transactions, a durable recovery point before an external call, a stable idempotency key, a version-guarded state write, and a lease plus fence keep the database consistent and stop the hardware from being rebooted twice. The fake BMC's 429s mirror the DPU agent's GCRA limiter, and the separate service shows why every hop needs retries.",
+      "setup": [
+        "Linux or macOS with Python 3.9+ (stdlib only: sqlite3, http.server, urllib, fractions)",
+        "curl",
+        "A working directory, e.g. `mkdir ~/mini-controller && cd ~/mini-controller`",
+        "Optional for the stretch: the Temporal CLI (`brew install temporal`, or `curl -sSf https://temporal.download/cli.sh | sh`)"
+      ],
+      "steps": [
+        {
+          "subgoal": "Create the database",
+          "detail": "```python\n# init_db.py\nimport sqlite3\n\nc = sqlite3.connect(\"lab.db\")\nc.executescript(\"\"\"\nDROP TABLE IF EXISTS machines; DROP TABLE IF EXISTS work_locks; DROP TABLE IF EXISTS ops;\nCREATE TABLE machines(id TEXT PRIMARY KEY, state TEXT NOT NULL, version INTEGER NOT NULL);\nCREATE TABLE work_locks(key TEXT PRIMARY KEY, worker_id TEXT NOT NULL, expires_at REAL NOT NULL);\nCREATE TABLE ops(op_id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, status TEXT NOT NULL);\n\"\"\")\nc.executemany(\"INSERT INTO machines VALUES (?, 'NeedsReboot', 1)\", [(f\"m{i}\",) for i in range(12)])\nc.commit()\n```\nRun `rm -f bmc_effects.log && python3 init_db.py`."
+        },
+        {
+          "subgoal": "Run the fake BMC microservice",
+          "detail": "It rate-limits with GCRA (3/s, burst 8) and honours an idempotency key (`op_id`). Every *real* effect is appended to `bmc_effects.log`.\n```python\n# bmc.py\nimport json, threading, time\nfrom fractions import Fraction\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n\nRATE, BURST = 3, 8\nT = Fraction(1, RATE)\nTAU = (BURST - 1) * T\nstate = {\"tat\": Fraction(0), \"seen\": {}}\nlock = threading.Lock()\n\ntry:\n    with open(\"bmc_effects.log\") as f:\n        state[\"seen\"] = {line.strip(): True for line in f if line.strip()}\nexcept FileNotFoundError:\n    pass\n\ndef gcra_allow(now):\n    tat = max(state[\"tat\"], now)\n    if tat - now > TAU:\n        return False\n    state[\"tat\"] = tat + T\n    return True\n\nclass Handler(BaseHTTPRequestHandler):\n    def do_POST(self):\n        length = int(self.headers[\"Content-Length\"])\n        op_id = json.loads(self.rfile.read(length))[\"op_id\"]\n        with lock:\n            if op_id in state[\"seen\"]:\n                code, result = 200, {\"op_id\": op_id, \"replayed\": True}\n            elif not gcra_allow(Fraction(time.monotonic())):\n                code, result = 429, {\"error\": \"rate limited\"}\n            else:\n                with open(\"bmc_effects.log\", \"a\") as f:\n                    f.write(op_id + \"\\n\")\n                state[\"seen\"][op_id] = True\n                code, result = 200, {\"op_id\": op_id, \"replayed\": False}\n        data = json.dumps(result).encode()\n        self.send_response(code)\n        self.send_header(\"Content-Type\", \"application/json\")\n        self.send_header(\"Content-Length\", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\nThreadingHTTPServer((\"127.0.0.1\", 8081), Handler).serve_forever()\n```\nStart it with `python3 bmc.py` in its own terminal. Test it:\n```bash\ncurl -s -X POST -d '{\"op_id\":\"test-1\"}' http://127.0.0.1:8081/reset; echo\ncurl -s -X POST -d '{\"op_id\":\"test-1\"}' http://127.0.0.1:8081/reset; echo   # replayed: true\nfor i in $(seq 1 12); do curl -s -o /dev/null -w '%{http_code} ' -X POST -d \"{\\\"op_id\\\":\\\"b$i\\\"}\" http://127.0.0.1:8081/reset; done; echo\n```\nThe loop should print several `200`s and then `429`s. Afterwards, stop the BMC, run `rm -f bmc_effects.log`, and start it again so the test IDs don't pollute your results."
+        },
+        {
+          "subgoal": "Write lease helpers",
+          "detail": "In `worker.py`, open the database with `sqlite3.connect(\"lab.db\", isolation_level=None, timeout=10)` and copy `acquire(key, worker, ttl)` from the lesson's worked example (`BEGIN IMMEDIATE` plus an upsert that only takes over an expired lease). Use the key `machine:<id>` and a TTL of 3 seconds. Write the fence yourself: inside a `BEGIN IMMEDIATE` transaction, `SELECT 1 FROM work_locks WHERE key=? AND worker_id=?`, and raise if no row is returned. Give each worker a unique ID, e.g. `f\"{socket.gethostname()}-{os.getpid()}\"`."
+        },
+        {
+          "subgoal": "Write the controller loop in the right order",
+          "detail": "For each machine, follow this sequence:\n1. **Lease:** `acquire`. If you don't get it, skip the machine for now.\n2. **Load (short txn, commit):** read `state, version`. If it isn't `NeedsReboot`, skip.\n3. **Recovery point (short txn, commit):** `op_id = f\"{mid}-reboot-v{version}\"`, then `INSERT OR IGNORE INTO ops VALUES (?, ?, 'pending')`.\n4. **External call (no txn open):** POST `{\"op_id\": op_id}` with `urllib.request`. On HTTP 429 (`urllib.error.HTTPError` with `.code == 429`), sleep about 0.4 s and retry with the **same** `op_id`.\n5. **Optional pause:** if the env var `PAUSE_AFTER_CALL` is set, `time.sleep(float(...))`.\n6. **Optional crash:** if the env var `CRASH_AFTER_CALL` is set, `os._exit(1)` right here, after the BMC acted but before the database knows.\n7. **Fenced, versioned write (one txn):** fence, then `UPDATE machines SET state='Ready', version=version+1 WHERE id=? AND version=?` and `UPDATE ops SET status='done' WHERE op_id=?`. If the fence fails or `rowcount != 1`, `ROLLBACK` and print `stale write rejected` or `fence failed`; otherwise `COMMIT`.\n\nLoop over all machines until none is left in `NeedsReboot`."
+        },
+        {
+          "subgoal": "Inject a crash",
+          "detail": "```bash\nCRASH_AFTER_CALL=1 python3 worker.py   # dies after the first BMC call\npython3 worker.py                       # finishes the job\n```\nIn the BMC's output, look for the crashed machine's `op_id` being requested again on the second run. It was answered with `replayed: true`, so the second request didn't cause a second effect."
+        },
+        {
+          "subgoal": "Force a race",
+          "detail": "Reset with `python3 init_db.py`, stop the BMC, run `rm -f bmc_effects.log`, and restart the BMC. Then run two workers at once:\n```bash\nPAUSE_AFTER_CALL=5 python3 worker.py &   # slow worker: its 3 s lease expires mid-pause\nsleep 1; python3 worker.py\nwait\n```\nThe fast worker takes over the slow worker's machine, gets a replay from the BMC and commits. When the slow worker wakes, it must print `fence failed` (or `stale write rejected`) and commit nothing."
+        }
+      ],
+      "verify": "Run these after the race step:\n```bash\nsort bmc_effects.log | uniq -d | wc -l   # expect 0: no op_id applied twice\nwc -l < bmc_effects.log                    # expect 12: one real reboot per machine\npython3 -c \"import sqlite3; print(sqlite3.connect('lab.db').execute('SELECT state, version, COUNT(*) FROM machines GROUP BY 1, 2').fetchall())\"\n# expect [('Ready', 2, 12)]\n```\nThe slow worker's output should also include at least one `fence failed` or `stale write rejected` line.",
+      "hints": [
+        "`sqlite3.OperationalError: database is locked`: pass `timeout=10` to `connect`, and make sure you never leave a `BEGIN` open while calling the BMC.",
+        "With `isolation_level=None` you control transactions yourself. Every `BEGIN IMMEDIATE` needs a matching `COMMIT` or `ROLLBACK` on every code path, so use try/except.",
+        "`python3 bmc.py` logs requests to stderr. If you background it and redirect output, use `python3 bmc.py > bmc.out 2>&1 &`.",
+        "If `bmc_effects.log` shows 13+ lines, check that your `op_id` comes from the version you *read*, not from a random UUID or the current time. A retry must reuse the same ID.",
+        "If the slow worker never gets fenced out, its pause must be longer than the lease TTL, and the fast worker must call `acquire` after the lease has expired."
+      ],
+      "stretch": "Add a background thread that renews the lease every second, then show that a renewal thread alone doesn't save a paused worker (Python's `time.sleep` doesn't block other threads, so simulate a frozen process with `kill -STOP <pid>` and later `kill -CONT <pid>`). Then start `temporal server start-dev`, create the `cloud`, `site` and a random-UUID namespace with `temporal operator namespace create --namespace <name>`, and port the reboot step into a Temporal activity using the Python SDK (`pip install temporalio`). Kill the worker mid-activity and confirm that the retried activity is still applied only once, thanks to the BMC's `op_id` check."
+    }
+  }
+}

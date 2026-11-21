@@ -1,0 +1,488 @@
+{
+  "intro": "Chapter 1 covered what is inside a server: CPUs, PCIe devices, NICs and the BMC, the small always-on management computer that you reach over the out-of-band (OOB) network. This chapter moves one layer up. It covers the firmware that runs before any operating system, and the lifecycle NICo puts every physical host through.\n\nWe start with the big picture. **Bare-metal lifecycle management** is the job of taking a server from \"just racked\" to \"rented to a tenant\" and back to \"clean and ready\", again and again, without people doing it by hand. NICo splits that job into **Day 0, Day 1 and Day 2**. In Chapter 4 you saw how state machines move a resource through states safely. The lifecycle phases are what those state machines are actually stepping through.\n\nThen we go down into the firmware. **UEFI** is the firmware that starts the machine and picks what to boot. **Secure Boot** decides whether a bootloader is trusted enough to run. Two small pieces of firmware-reported data come up all the time in NICo's hardware handling. The first is the **UEFI device path**, a text address for a device that NICo parses to find MAC addresses and order interfaces. The second is **DMI platform identity**, the vendor and product name the firmware reports about the machine.\n\nNICo reads all of this from outside the host, through the BMC's **Redfish** API (HTTP + JSON, which you already know from Chapter 3). The chapter ends with a build where you do the same thing against a mock BMC on your laptop.",
+  "objectives": [
+    "Describe the stages a physical server goes through from racking to reuse, and explain why bare metal needs more cleanup than a cloud VM",
+    "Classify NICo operations as Day 0, Day 1 or Day 2 and justify the choice",
+    "Check whether a machine booted with UEFI and Secure Boot, both locally and through the Redfish fields NICo uses",
+    "Parse a UEFI device path to extract a MAC address and a numeric PCI ordering key",
+    "Read a machine's DMI platform identity (vendor, product, serial) and spot placeholder or missing values",
+    "Build a small Redfish client that runs a Day 0-style readiness check against a mock BMC"
+  ],
+  "lessons": [
+    {
+      "concept": "bare-metal-lifecycle-management",
+      "prequestions": [
+        {
+          "question": "When you terminate a cloud VM, the provider destroys its virtual disk. When a tenant gives back a physical server, what else might still hold the previous tenant's data or changes?",
+          "answer": "The physical drives (data stays until it is securely erased), RAM contents, the TPM, firmware and UEFI settings the tenant may have changed, and the network configuration that connected the host to the tenant's private network. All of them have to be cleaned or checked before the next tenant gets the machine."
+        },
+        {
+          "question": "A new server arrives and is cabled into a rack. Before anyone can rent it, what do you think has to be checked?",
+          "answer": "That it is the machine you expected (serial number, correct components), that the hardware works (burn-in tests), that its firmware is at the approved version, and that it has network addresses and isolation set up. NICo calls this discovery, validation and ingestion."
+        }
+      ],
+      "explanation": "A cloud VM is cheap to create and destroy. If something is wrong with it, you delete it and start a new one. A physical server can't be deleted. It sits in a rack for years, is used by many tenants one after another, and keeps state in places a VM doesn't have: drive contents, firmware versions, UEFI settings, TPM keys.\n\n**Bare-metal lifecycle management** means managing a physical server through its whole life under software control:\n\n1. **Discovery**: find the machine once it is racked and cabled. NICo does this by talking to the server's BMC over the out-of-band network using Redfish. It only accepts machines listed in an expected-machines manifest.\n2. **Validation**: confirm the hardware matches its expected SKU (the hardware configuration it was bought as), run burn-in tests, and bring firmware up to the site baseline. A machine that can't be brought up to standard is quarantined instead of handed out.\n3. **Provisioning**: isolate the host on the network for one tenant, lock its firmware settings, and boot the tenant's OS image over the network (PXE/iPXE).\n4. **Operation**: monitor health and apply firmware updates, but only on hosts that are healthy and not in use.\n5. **Cleanup for reuse (sanitization)**: when the tenant releases the host, securely erase the drives, clear the TPM where supported, remove the tenant's network configuration, and check firmware integrity again. Then the host goes back into the pool.\n\nThe goal, in the words of NICo's docs, is to make *physical servers behave like cloud instances*: you deploy, manage and scale them through APIs.\n\nNICo also treats every host as **untrustworthy by default**. A bare-metal tenant has full control of real hardware and could try to change firmware or leave something behind. So NICo makes security decisions from out-of-band data (what the BMC reports), not from whatever software is running on the host.\n\nIn NICo, each managed host is a server plus one or more BlueField DPUs. A DPU is a smart NIC with its own ARM computer, and it acts as the enforcement boundary for network isolation. You'll meet DPUs in detail later. For now, think of a DPU as a locked gate between the host and the network that the tenant can't open.",
+      "analogy": "A car rental fleet. Each new car is inspected when it arrives, then rented out, returned, cleaned and checked, and rented again. Now and then it is serviced while nobody is renting it. Where it breaks down: a renter can't rewrite the car's engine software, but a bare-metal tenant has full control of the hardware and could change firmware. So the \"cleaning\" step has to re-establish trust (firmware checks, TPM clear, re-attestation), not just wipe the seats.",
+      "workedExample": {
+        "title": "Trace one server from loading dock to second tenant",
+        "steps": [
+          {
+            "subgoal": "Rack and cable",
+            "detail": "A technician racks the server and plugs in its BMC port and data ports. That's the only manual step. The BMC asks for an IP address over DHCP on the OOB network, and that request is how NICo first sees it."
+          },
+          {
+            "subgoal": "Discover and match",
+            "detail": "NICo's site controller probes the BMC over Redfish and reads the inventory: CPUs, GPUs, NICs, DPUs, storage. It only ingests machines listed in `expected_machines.json`, which records each BMC's MAC address, chassis serial number and factory credentials."
+          },
+          {
+            "subgoal": "Validate",
+            "detail": "NICo checks the inventory against the expected SKU, runs burn-in tests, and updates UEFI and BMC firmware to the site baseline. If it can't reach the baseline, the host is **quarantined**."
+          },
+          {
+            "subgoal": "See what 'inventory' means on your own machine",
+            "detail": "On Linux, these commands show the same kinds of facts discovery collects. NICo gets them via Redfish, not from a shell.\n```bash\nlscpu | head -n 15              # CPU model, sockets, NUMA nodes\nip -br link                     # NICs and their MAC addresses\nlsblk -d -o NAME,SIZE,MODEL     # drives\n```\nOn macOS: `system_profiler SPHardwareDataType SPNetworkDataType | head -n 40`."
+          },
+          {
+            "subgoal": "Provision, operate, release",
+            "detail": "Tenant A gets the host: network isolation, UEFI lockdown, PXE boot of their OS. While the host is in use, health is monitored out of band. When Tenant A releases it, NICo securely erases the drives, clears the TPM (if supported), removes Tenant A's network config, and checks firmware again. Only then can Tenant B get it."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Fill in the bare-metal equivalent of each cloud action.",
+        "partialSolution": "| Cloud VM action | Bare-metal equivalent in NICo |\n|---|---|\n| Launch instance from an image | Isolate the network, lock UEFI, then PXE/iPXE-boot the tenant's OS |\n| Terminate instance (disk destroyed) | ___ : secure-erase drives, TPM clear, remove tenant network config, recheck firmware |\n| Provider retires faulty hardware silently | A host that cannot reach the firmware baseline is ___ instead of entering the pool |",
+        "answer": "First blank: tenant release / sanitization (NICo's \"tenant transition\"). Second blank: quarantined."
+      },
+      "independentProblem": {
+        "prompt": "A colleague suggests: \"To save time between tenants, just reinstall the OS over the network. The new OS image overwrites everything anyway.\" List at least three things this misses, and explain why NICo can't trust the host to report that it is clean.",
+        "hints": [
+          "Think about what lives outside the OS partition: other drives, chips on the motherboard, the network.",
+          "Look at the sanitization list: drives, memory overwrite, InfiniBand reset, TPM, attestation, firmware integrity, and the network cleanup.",
+          "Why not trust the host? Who controlled the host's software a moment ago?"
+        ],
+        "answer": "A reinstall misses: (1) data on other drives or areas the installer doesn't overwrite, which is why NICo securely erases NVMe and SAS/SATA drives; (2) memory contents, which is why it verifies the UEFI memory-overwrite request; (3) TPM state, which is cleared where supported; (4) firmware or UEFI changes the tenant may have made, which is why firmware integrity is revalidated (and the host re-attested, if attestation is on); (5) the network: the old tenant's VPC config, routes and IP allocations have to be removed from the DPU, and the release isn't complete until the DPU confirms it has left the tenant networks. The host can't be trusted to say it is clean because the previous tenant controlled its software. That is why NICo uses only out-of-band checks for security decisions."
+      },
+      "selfExplanation": "Why does \"make physical servers behave like cloud instances\" take more steps than managing VMs, even though the API a tenant sees might look the same?",
+      "checks": [
+        {
+          "question": "What does NICo do with a host it cannot bring up to the site firmware baseline?",
+          "options": [
+            "Makes it available but flags it in the inventory",
+            "Quarantines it",
+            "Deletes its record and waits for rediscovery",
+            "Hands it to the tenant with a warning"
+          ],
+          "answer": "Quarantines it",
+          "explanation": "The lifecycle docs say NICo automatically quarantines hosts it can't bring to the baseline. Making the host available with a flag or a warning would let out-of-baseline firmware reach tenants, which is exactly what the baseline exists to prevent. Deleting the record isn't a lifecycle step."
+        },
+        {
+          "question": "Why does NICo base security decisions on out-of-band (BMC/Redfish) data instead of agents on the host OS?",
+          "options": [
+            "Out-of-band data is faster to collect",
+            "The host OS may be controlled by a tenant and can't be trusted",
+            "Host OSes don't expose hardware information",
+            "Redfish is the only protocol NICo supports"
+          ],
+          "answer": "The host OS may be controlled by a tenant and can't be trusted",
+          "explanation": "NICo treats every host as untrustworthy by default, and software on the host could lie about its own state. Speed isn't the reason. Host OSes do expose hardware information (NICo's Scout agent gathers some during discovery). And NICo uses other protocols too, such as gRPC and DHCP."
+        }
+      ],
+      "sources": [
+        "overview/what-is-nico.md",
+        "overview/capabilities.md",
+        "overview/lifecycle.md",
+        "getting-started/prerequisites/bmc-oob-setup.md"
+      ]
+    },
+    {
+      "concept": "day-0-day-1-day-2-lifecycle",
+      "prequestions": [
+        {
+          "question": "Guess: in operations jargon, is \"Day 2\" literally the second day after install?",
+          "answer": "No. It's a phase name. Day 0 is bring-up, Day 1 is initial configuration and provisioning, and Day 2 is everything that happens for the rest of the system's life (operations, upgrades, changes)."
+        },
+        {
+          "question": "Which phase would you guess upgrading NICo itself to a newer release belongs to?",
+          "answer": "Day 2. NICo's docs list platform upgrades (re-running setup.sh from a newer release) as a Day 2 operation."
+        }
+      ],
+      "explanation": "NICo groups the lifecycle from the previous lesson into three phases. The names come from common operations jargon, but NICo gives each one a specific scope.\n\n**Day 0: Discovery, validation and ingestion.** Everything from hardware arriving to a host being declared ready for tenants. The goal is *zero-touch*: once a host is racked and cabled, NICo does the rest. Day 0 includes Redfish discovery over the OOB network, pairing each DPU with its host (via LLDP and serial-number matching), SKU validation and burn-in, firmware baseline enforcement, DPU OS and HBN provisioning, optional attestation (off by default), and allocating IP pools, DHCP and DNS. Site-wide setup also belongs here. The site-wide BMC and UEFI credentials must exist before ingestion starts, and this is when you pick a credential store and enable site-wide features such as machine identity.\n\n**Day 1: Isolation, lockdown and provisioning.** Getting a ready host to a tenant. NICo builds network isolation on Ethernet (DPU-enforced VXLAN/EVPN and per-tenant VRFs), InfiniBand (P_Key partitions) and NVLink (partitions). It applies UEFI lockdown, secures the BMC, disables in-band host-to-BMC access, sets the UEFI boot order and PXE-boots the tenant's OS. NICo's job ends once the host starts booting. Configuring the installed OS is up to the operator or tenant. Per-tenant configuration, such as one org's machine-identity settings, is also Day 1.\n\n**Day 2: Operations, health and tenant transitions.** Continuous Redfish and DPU-agent monitoring, firmware updates on healthy *unoccupied* hosts, upgrades of NICo itself, sanitization when a tenant leaves, decommissioning, and break-fix.\n\nTwo points often trip people up:\n\n- The phases describe **what kind of work** is happening, not dates. One host can be in Day 0 ingestion while another host in the next rack is in Day 2 sanitization.\n- A host **loops**. Day 2 sanitization returns it to the available pool, and the next tenant assignment is Day 1 work again.\n\nA useful test: *Is the work about getting hardware or the site into a known-good state? Day 0. About handing it to a specific tenant? Day 1. About keeping it healthy or moving it between tenants? Day 2.*",
+      "analogy": "An apartment building. Day 0 is construction and inspection, done once per unit. Day 1 is getting a unit ready for a specific renter: locks changed, keys handed over. Day 2 is maintenance, repairs and the move-out cleaning between renters. Where it breaks down: an apartment is inspected once, but NICo re-checks firmware integrity, and can re-attest the host, every time a tenant leaves. Trust is re-established on every cycle, not just at construction.",
+      "workedExample": {
+        "title": "Classify five events",
+        "steps": [
+          {
+            "subgoal": "Event: a BMC sends its first DHCP request through the OOB relay",
+            "detail": "The hardware is just appearing and NICo is discovering it. **Day 0.**"
+          },
+          {
+            "subgoal": "Event: setting `enabled = true` under `[machine_identity]` in the site config",
+            "detail": "This turns a feature on for the whole site, before any tenant configures it. The machine-identity guide calls this Day 0, and calls per-org issuer and audience config Day 1. **Day 0.**"
+          },
+          {
+            "subgoal": "Event: assigning InfiniBand P_Keys to a host's ports for tenant Acme",
+            "detail": "Isolation for one specific tenant. **Day 1.**"
+          },
+          {
+            "subgoal": "Event: BMC firmware update scheduled on an idle, healthy host",
+            "detail": "Keeping running infrastructure compliant. NICo only does this on unoccupied hosts. **Day 2.**"
+          },
+          {
+            "subgoal": "Event: secure erase after Acme releases the host",
+            "detail": "A tenant transition. **Day 2.** Afterwards the host is available again, and the next assignment is Day 1."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Fill in the phase for each row.",
+        "partialSolution": "| Work item | Phase |\n|---|---|\n| SKU validation and burn-in of a newly racked host | Day 0 |\n| Applying UEFI lockdown before handing a host to a tenant | ___ |\n| Re-running `setup.sh` from a newer NICo release | ___ |\n| Allocating IP pools for BGP, loopback and host OS during ingestion | Day 0 |",
+        "answer": "UEFI lockdown before tenant use is Day 1 (host lockdown). Re-running setup.sh to upgrade NICo is Day 2 (platform upgrade)."
+      },
+      "independentProblem": {
+        "prompt": "A tenant has just released a host. Put these in a sensible order and label each with its phase: (a) host enters the available pool, (b) tenant B's OS is PXE-booted, (c) DPU confirms it has moved off all tenant-A networks, (d) secure erase of NVMe drives, (e) tenant B's VRF and P_Keys are configured, (f) UEFI lockdown applied for tenant B.",
+        "hints": [
+          "Release isn't finished until cleanup is confirmed. Which item is the confirmation?",
+          "Cleanup (d, c) is Day 2. Everything for tenant B happens after the host is back in the pool.",
+          "Isolation and lockdown come before the OS boots, so the tenant's OS never runs on a host that isn't isolated and locked."
+        ],
+        "answer": "d (Day 2) → c (Day 2, the convergence gate: release isn't reported complete until the DPU confirms) → a (end of the Day 2 transition) → e (Day 1) → f (Day 1) → b (Day 1). e and f can be in either order, as long as both happen before b."
+      },
+      "selfExplanation": "Why is it useful to keep site-wide setup (Day 0) separate from per-tenant configuration (Day 1)? Think about what breaks if a tenant could change a site-wide setting.",
+      "checks": [
+        {
+          "question": "Which of these is Day 1 work in NICo?",
+          "options": [
+            "Linking each DPU to its host via LLDP and serial matching",
+            "Setting the UEFI boot order and PXE-booting the tenant's OS image",
+            "Scheduling BMC firmware updates on unoccupied hosts",
+            "Verifying the UEFI memory-overwrite request after release"
+          ],
+          "answer": "Setting the UEFI boot order and PXE-booting the tenant's OS image",
+          "explanation": "OS provisioning is Day 1. DPU-host pairing happens during discovery (Day 0). Firmware updates on idle hosts and memory-overwrite verification are Day 2 operations and sanitization. The memory step can look like \"preparing for the next tenant\", but it belongs to the release transition."
+        },
+        {
+          "question": "After NICo hands off a booting host to a tenant, who is responsible for configuring the installed OS?",
+          "options": [
+            "NICo, via the DPU agent",
+            "The operator or tenant",
+            "NICo's Scout agent",
+            "The BMC"
+          ],
+          "answer": "The operator or tenant",
+          "explanation": "The lifecycle docs say NICo doesn't manage the installed software beyond the boot handoff. The DPU agent configures DPU networking, not the host OS. Scout runs only during discovery, before a tenant is assigned."
+        },
+        {
+          "question": "Short answer: why are the phases better thought of as categories of work than as points on a calendar?",
+          "options": [],
+          "answer": "Different hosts are in different phases at the same time, and each host loops through Day 1 → Day 2 → Day 1 with every tenant.",
+          "explanation": "A site never \"finishes\" Day 0. New racks arrive while older hosts are being sanitized or upgraded. The phase describes the work, not the date."
+        }
+      ],
+      "sources": [
+        "overview/lifecycle.md",
+        "getting-started/installation-options/day0-machine-identity.md",
+        "getting-started/installation-options/day0-credential-store.md",
+        "getting-started/prerequisites/bmc-oob-setup.md"
+      ]
+    },
+    {
+      "concept": "uefi-firmware-and-secure-boot",
+      "prequestions": [
+        {
+          "question": "Before Linux starts, something has to set up RAM, find the disks and NICs, and decide what to boot. What runs at that point, and where is it stored?",
+          "answer": "The platform firmware, which on modern servers is UEFI. It is stored in flash memory on the motherboard, not on a disk."
+        },
+        {
+          "question": "If anyone can put a modified bootloader on the boot disk, what stops it from running before your OS's security even starts?",
+          "answer": "Secure Boot. The firmware checks the bootloader's cryptographic signature against keys stored in the firmware and refuses to run anything unsigned or untrusted."
+        }
+      ],
+      "explanation": "**UEFI** (Unified Extensible Firmware Interface) is the firmware standard that replaced the old PC BIOS. When a server powers on, UEFI initializes the CPUs, memory and PCIe devices, then picks a boot device. The firmware lives in flash on the motherboard. It keeps its settings in **NVRAM variables**, including a list of boot entries (`Boot0000`, `Boot0001`, ...) and a `BootOrder` variable that says which to try first. A boot entry might point to a `.efi` file on a disk's EFI System Partition, or to a NIC for network boot (PXE).\n\n**Secure Boot** is a UEFI feature that only lets signed code run during boot. The firmware holds key databases: a Platform Key (PK) and Key Exchange Keys (KEK) that control who may change the lists, an allowed list (`db`) and a revoked list (`dbx`). Every bootloader and kernel image is checked against them. If its signature doesn't chain to an allowed key, or the image has been revoked, the firmware won't run it. On Linux, the usual chain starts with a small `shim` loader signed with Microsoft's UEFI CA, which then checks GRUB and the kernel.\n\nWhy NICo cares:\n\n- NICo's hardware prerequisites say **UEFI + Secure Boot** should be enabled on both site controller and managed hosts. Separately, the BMC **must** support a Redfish **Secure Boot toggle** so NICo can enable or disable it.\n- NICo controls what a host boots. It changes boot settings through the boot source override (`PATCH /redfish/v1/Systems/{id}`) and reads `Boot.BootOrder` to report and verify the order, so hosts PXE-boot the right image.\n- NICo manages a **per-device UEFI password**. A site default is set before ingestion, so a tenant can't open the setup screen and change settings. During tenant use NICo also applies **UEFI lockdown** to block unauthorized BIOS changes.\n- UEFI firmware is part of the **firmware baseline** checked during ingestion and updated during Day 2.\n\nAll of this happens over Redfish. The relevant endpoints include `/redfish/v1/Systems/{id}/SecureBoot` (fields `SecureBootEnable` and `SecureBootCurrentBoot`), `/redfish/v1/Systems/{id}/Bios` for BIOS attributes, and `Bios.ChangePassword` for the UEFI password.\n\nOne limitation to remember: Secure Boot checks *who signed* the code, not whether the code is safe. Signed but vulnerable code still runs unless it has been added to `dbx`.",
+      "analogy": "A club bouncer with a list of trusted signatures. Only guests whose invitation is signed by a known host get in, and there's a separate banned list. Where it breaks down: the bouncer only checks the invitation, not behaviour. A signed guest who misbehaves (a signed but vulnerable bootloader) still gets in unless someone adds them to the banned list (`dbx`).",
+      "workedExample": {
+        "title": "Check UEFI and Secure Boot on a Linux machine, then find the same facts in Redfish",
+        "steps": [
+          {
+            "subgoal": "Did this machine boot via UEFI?",
+            "detail": "```bash\n[ -d /sys/firmware/efi ] && echo \"UEFI boot\" || echo \"Legacy BIOS boot (or not Linux)\"\n```\nThe kernel creates `/sys/firmware/efi` only when UEFI firmware started it. Docker containers and some VMs may show legacy boot."
+          },
+          {
+            "subgoal": "Is Secure Boot on?",
+            "detail": "```bash\nmokutil --sb-state 2>/dev/null || \\\n  od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-e98032b8c63c\n```\n`mokutil` prints `SecureBoot enabled` or `disabled`. In the raw efivar, the first 4 bytes are attribute flags and the **5th byte is the value**: `6 0 0 0 1` means enabled, `6 0 0 0 0` means disabled."
+          },
+          {
+            "subgoal": "Look at the boot order",
+            "detail": "```bash\nsudo efibootmgr        # install with: sudo apt install efibootmgr\n```\nYou'll see `BootOrder: 0001,0000,...` followed by each `Boot####` entry. Add `-v` to see each entry's UEFI device path (next lesson)."
+          },
+          {
+            "subgoal": "Map to what NICo uses over Redfish",
+            "detail": "NICo doesn't log in to the host. It asks the BMC:\n- `GET /redfish/v1/Systems/{id}/SecureBoot` → `SecureBootEnable`, `SecureBootCurrentBoot`\n- `GET /redfish/v1/Systems/{id}` → `Boot.BootOrder`, e.g. `[\"NIC.Slot.3-1\", \"HardDisk.Direct.0-0:AHCI\"]`, to report and verify the order\n- `PATCH /redfish/v1/Systems/{id}` → boot source override (boot once / boot first) to change what boots\n- `POST .../Bios/Actions/Bios.ChangePassword` → UEFI password management\n\nIt's the same information, gathered and changed out of band."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete the Redfish request that turns Secure Boot on for system `1`. Use the endpoint and field named in NICo's Redfish reference.",
+        "partialSolution": "```bash\ncurl -k -u admin:password -X PATCH \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"___\": ___}' \\\n  https://bmc.example/redfish/v1/Systems/1/___\n```",
+        "answer": "Body `{\"SecureBootEnable\": true}`, URL ending `/redfish/v1/Systems/1/SecureBoot`. (The host usually has to reboot before `SecureBootCurrentBoot` reports the new state.)"
+      },
+      "independentProblem": {
+        "prompt": "A Redfish read returns `{\"SecureBootEnable\": true, \"SecureBootCurrentBoot\": \"Disabled\"}`. On another host, you run `od -An -t u1` on the SecureBoot efivar and get `6 0 0 0 0`. What state is each machine in, and what would you do before treating the first one as Secure Boot-protected?",
+        "hints": [
+          "There are two fields for a reason: one is a setting, the other describes the boot that actually happened.",
+          "In the efivar output, which byte holds the value?",
+          "Settings usually take effect on the next boot."
+        ],
+        "answer": "Host 1: Secure Boot is *configured* on, but the current boot didn't use it, most likely because the change is waiting for a reboot. Reboot it and confirm that `SecureBootCurrentBoot` reports `Enabled` before trusting it. Host 2: the 5th byte is 0, so Secure Boot is off for the current boot."
+      },
+      "selfExplanation": "Why does NICo need a UEFI password and UEFI lockdown as well as Secure Boot? What attack would still work if only Secure Boot were enabled?",
+      "checks": [
+        {
+          "question": "What does Secure Boot actually verify?",
+          "options": [
+            "That the bootloader and kernel are signed by a key the firmware trusts",
+            "That the OS has no known vulnerabilities",
+            "That the disk is encrypted",
+            "That the BMC password has been rotated"
+          ],
+          "answer": "That the bootloader and kernel are signed by a key the firmware trusts",
+          "explanation": "Secure Boot is a signature check against the firmware's key databases (db/dbx). It doesn't scan for vulnerabilities (signed but vulnerable code runs unless revoked), doesn't encrypt disks, and has nothing to do with BMC credentials."
+        },
+        {
+          "question": "Where does UEFI keep the boot order?",
+          "options": [
+            "In a file on the OS root filesystem",
+            "In NVRAM variables in the firmware",
+            "In the BMC's DHCP lease",
+            "In the TPM"
+          ],
+          "answer": "In NVRAM variables in the firmware",
+          "explanation": "`BootOrder` and the `Boot####` entries are UEFI variables stored in firmware NVRAM. That's why the BMC can report and change boot settings with no OS running. The OS can read and write them (efibootmgr), but they don't live on its filesystem. The TPM stores measurements and keys, not boot order."
+        }
+      ],
+      "sources": [
+        "getting-started/prerequisites/hardware.md",
+        "getting-started/prerequisites/bmc-oob-setup.md",
+        "architecture/redfish/endpoints_reference.md",
+        "overview/capabilities.md",
+        "overview/lifecycle.md"
+      ]
+    },
+    {
+      "concept": "uefi-device-path",
+      "prequestions": [
+        {
+          "question": "Here is a string from a server's boot options: `PciRoot(0x2)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(B83FD2909582,0x1)`. Without reading ahead, what do you think the last part is?",
+          "answer": "The MAC address of the network port, B8:3F:D2:90:95:82, written without separators. The `0x1` is the interface type, where 1 means Ethernet."
+        },
+        {
+          "question": "From Chapter 1, a PCI address looks like bus:device.function. Why might firmware avoid putting bus numbers in a device's address?",
+          "answer": "Bus numbers are assigned during PCI enumeration and can change when cards are added or moved. Describing the route from the root (device and function at each bridge) is more stable."
+        }
+      ],
+      "explanation": "UEFI needs a way to say exactly which device a boot entry or interface refers to. It uses a **device path**: a chain of nodes that walks from the root of the hardware down to the device. Firmware stores it in binary, but Redfish and `efibootmgr -v` show the **text form**:\n\n```\nPciRoot(0x2)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(B83FD2909582,0x1)\n```\n\nRead it left to right:\n\n- `PciRoot(0x2)`: PCI root complex (host bridge) number 2.\n- `Pci(0x1,0x0)`: device 0x1, function 0x0 on that root. This is usually a PCIe root port or bridge.\n- `Pci(0x0,0x0)`: device 0, function 0 behind that bridge. This is the NIC itself.\n- `MAC(B83FD2909582,0x1)`: the network interface, with its MAC address in plain hex and interface type 1 (Ethernet).\n\nThe `Pci(device,function)` nodes are the device and function numbers from Chapter 1's PCI address, one pair per bridge level. Bus numbers are left out because they depend on enumeration. Other node types exist too, such as `NVMe(...)`, `Sata(...)`, `IPv4(...)` and `Uri(...)`.\n\nNICo's Redfish reference describes two uses of device paths:\n\n1. **MAC extraction.** Boot options (`/Systems/{id}/BootOptions/{id}`) have a `UefiDevicePath`. NICo pulls the MAC out with a regex on `MAC(...,` and formats it, turning `B83FD2909582` into `B8:3F:D2:90:95:82`. Together with the `DisplayName` (which NICo checks for \"OOB\"), this identifies the out-of-band boot interface.\n2. **Interface ordering.** System Ethernet interfaces also have a `UefiDevicePath`. NICo uses it to pick the *primary* interface by PCI path order. The reference shows the path parsed into a dotted form like `2.1.0.0.0`. Reading the example above as \"root number, then each device and function\" gives exactly that.\n\nOne practical trap: compare the numbers as **numbers**. As strings, `Pci(0x10,...)` sorts before `Pci(0x2,...)`, but 0x10 is 16, which is larger than 2.",
+      "analogy": "A postal address versus a person's name. The MAC address is like a name: it says *who*, but not where they live. The device path is the full address, from country (root complex) to street (bridge) to house (device/function) to person (MAC), so you can find them and sort neighbours by location. Where it breaks down: postal addresses are stable, but a device path changes if you move a card to another slot, even though the MAC (the \"name\") stays the same.",
+      "workedExample": {
+        "title": "Parse a boot option's device path by hand, then in Python",
+        "steps": [
+          {
+            "subgoal": "Split into nodes",
+            "detail": "`PciRoot(0x2)` / `Pci(0x1,0x0)` / `Pci(0x0,0x0)` / `MAC(B83FD2909582,0x1)`"
+          },
+          {
+            "subgoal": "Build the ordering key",
+            "detail": "Root 0x2 → 2. Then the device,function pairs: (1,0), (0,0). Joined: `2.1.0.0.0`, which matches the format in NICo's reference."
+          },
+          {
+            "subgoal": "Extract and format the MAC",
+            "detail": "Take the hex before the first comma in `MAC(`: `B83FD2909582`. Split it into pairs: `B8:3F:D2:90:95:82`."
+          },
+          {
+            "subgoal": "Do it in Python",
+            "detail": "Save as `devpath.py` and run `python3 devpath.py`:\n```python\nimport re\n\ndef mac_from_path(path):\n    m = re.search(r\"MAC\\(([0-9A-Fa-f]+),\", path)\n    if m is None:\n        return None\n    raw = m.group(1).upper()\n    return \":\".join(raw[i:i + 2] for i in range(0, len(raw), 2))\n\ndef pci_key(path):\n    nums = []\n    root = re.search(r\"PciRoot\\((0x[0-9A-Fa-f]+)\\)\", path)\n    if root:\n        nums.append(int(root.group(1), 16))\n    for dev, fn in re.findall(r\"Pci\\((0x[0-9A-Fa-f]+),(0x[0-9A-Fa-f]+)\\)\", path):\n        nums += [int(dev, 16), int(fn, 16)]\n    return nums\n\np = \"PciRoot(0x2)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(B83FD2909582,0x1)\"\nprint(mac_from_path(p))                          # B8:3F:D2:90:95:82\nprint(\".\".join(str(n) for n in pci_key(p)))      # 2.1.0.0.0\n```\nNICo's docs write the regex with the POSIX class `[[:alnum:]]`. Python's `re` doesn't support POSIX classes, so we use `[0-9A-Fa-f]`. `Pci\\(` doesn't match inside `PciRoot(`, because the text `Root` comes between `Pci` and `(`."
+          },
+          {
+            "subgoal": "See real ones (optional, Linux on UEFI)",
+            "detail": "`sudo efibootmgr -v` prints each boot entry with its device path. Network entries often end in `MAC(...)/IPv4(...)`."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Fill in the two blanks so the function prints `B8:3F:D2:90:95:82`.",
+        "partialSolution": "```python\nimport re\n\ndef mac_from_path(path):\n    m = re.search(r\"___\", path)\n    if m is None:\n        return None\n    raw = m.group(1).upper()\n    return \":\".join(raw[i:i + 2] for i in range(0, ___, 2))\n\nprint(mac_from_path(\"PciRoot(0x2)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(B83FD2909582,0x1)\"))\n```",
+        "answer": "First blank: `MAC\\(([0-9A-Fa-f]+),` (escaped parenthesis, one capture group of hex digits, then the comma). Second blank: `len(raw)`. The literal `12` also works for 6-byte MACs."
+      },
+      "independentProblem": {
+        "prompt": "A host reports three Ethernet interfaces:\n\n- A: `PciRoot(0x0)/Pci(0x10,0x0)/Pci(0x0,0x0)/MAC(0C42A1B2C3D4,0x1)`\n- B: `PciRoot(0x0)/Pci(0x2,0x0)/Pci(0x0,0x0)/MAC(0C42A1B2C3D5,0x1)`\n- C: `PciRoot(0x2)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(B83FD2909582,0x1)`\n\nGive each one's ordering key and the order you get by sorting on PCI path numerically. Then explain what goes wrong if you sort the raw strings instead.",
+        "hints": [
+          "Convert each hex number to decimal. 0x10 isn't 10.",
+          "Python compares lists element by element, so `sorted(paths, key=pci_key)` works.",
+          "As strings, compare `Pci(0x1` and `Pci(0x2` character by character."
+        ],
+        "answer": "Keys: A = 0.16.0.0.0, B = 0.2.0.0.0, C = 2.1.0.0.0. Numeric order: B, A, C. A plain string sort puts A first, because \"0x10\" and \"0x2\" first differ at the character after \"0x\", and \"1\" < \"2\". That ranks device 16 ahead of device 2 and can pick the wrong primary interface."
+      },
+      "selfExplanation": "Why is the device path more useful than the MAC address alone for choosing a server's primary interface, and why is the MAC still needed?",
+      "checks": [
+        {
+          "question": "In `Pci(0x1C,0x3)`, what are the two numbers?",
+          "options": [
+            "PCI device 0x1C and function 0x3",
+            "PCI bus 0x1C and device 0x3",
+            "Slot number and port number on the chassis",
+            "Vendor ID and device ID"
+          ],
+          "answer": "PCI device 0x1C and function 0x3",
+          "explanation": "PCI nodes in a device path are (device, function). Bus numbers are deliberately left out because they're assigned at enumeration. The numbers aren't physical slot or port labels (those look like `NIC.Slot.3-1` in Redfish boot option IDs). Vendor and device IDs identify the *kind* of device, not where it is."
+        },
+        {
+          "question": "Which Redfish field does NICo parse with a `MAC(...,` regex to get a boot interface's MAC address?",
+          "options": [
+            "BootOptions → UefiDevicePath",
+            "Managers → EthernetInterfaces → MACAddress",
+            "Systems → SerialNumber",
+            "Boot → BootOrder"
+          ],
+          "answer": "BootOptions → UefiDevicePath",
+          "explanation": "The Boot Options section of the Redfish reference documents the MAC regex on `UefiDevicePath`. The `MACAddress` under Manager EthernetInterfaces belongs to the *BMC*, which is a different device. SerialNumber and BootOrder don't contain MACs."
+        }
+      ],
+      "sources": [
+        "architecture/redfish/endpoints_reference.md"
+      ]
+    },
+    {
+      "concept": "dmi-platform-identity",
+      "prequestions": [
+        {
+          "question": "On Linux, without root, how could a program find out that it's running on, say, a Dell PowerEdge R750 rather than a Supermicro board?",
+          "answer": "Read `/sys/class/dmi/id/sys_vendor` and `/sys/class/dmi/id/product_name`. The firmware publishes these as DMI/SMBIOS data, and the kernel exposes them."
+        },
+        {
+          "question": "Who writes those vendor and product strings: the OS, the firmware, or the hardware itself?",
+          "answer": "The firmware. UEFI builds the SMBIOS tables at boot from values the manufacturer programmed in. The OS just reads them, and they can be wrong or contain placeholders."
+        }
+      ],
+      "explanation": "**DMI** (Desktop Management Interface) is an old name that stuck. The data actually comes from **SMBIOS** tables, which the firmware builds in memory at boot to describe the machine. The most important table is **Type 1, System Information**. It holds the *manufacturer* (system vendor), *product name*, version, *serial number* and a UUID. Other tables describe the baseboard (Type 2), the chassis (Type 3), memory and more.\n\n**DMI platform identity** means the system vendor and product name the host firmware reports. Together they answer the question \"what kind of machine is this?\". Software that needs different behaviour on different platforms usually keys on these two strings. You'll see platform identity come up again in later chapters.\n\nWhere you can see it:\n\n- Linux: `/sys/class/dmi/id/sys_vendor` and `product_name` are world-readable. `product_serial` and `product_uuid` need root. `sudo dmidecode -t system` dumps the whole Type 1 table.\n- macOS: `system_profiler SPHardwareDataType` shows model and serial (Apple's own format, not a Linux sysfs path).\n- Redfish: `GET /redfish/v1/Systems/{id}` returns `Manufacturer`, `Model` and `SerialNumber`. NICo's Redfish reference describes how it uses each:\n  - `SerialNumber` is **Critical**. It feeds machine ID generation via a DMI hash, and DPU-host pairing fails without it.\n  - `Manufacturer` is **Recommended** for machine ID generation, with a `DEFAULT_DMI_SYSTEM_MANUFACTURER` fallback when it's missing.\n  - `Model` is **Recommended** for DPU model detection (BF2 vs BF3), with a graceful fallback.\n\nThings to keep in mind:\n\n- **It's self-reported, not proven.** Firmware writes the strings and nothing signs them, so treat them as a label, not as attestation. Attestation is a separate mechanism (TPM, covered later).\n- **Placeholders happen.** Whitebox boards often report `To Be Filled By O.E.M.` or `Default string`. A VM reports its hypervisor: a QEMU q35 VM says `QEMU` / `Standard PC (Q35 + ICH9, 2009)`.\n- **Normalize before comparing.** Trailing spaces and different capitalization are common. NICo's reference notes that it trims whitespace from chassis and network adapter serial numbers, which is a good reason to normalize every serial you compare.",
+      "analogy": "The manufacturer's label printed on the box: brand, model, serial. It's quick, usually right, and it's how you find the matching manual. Where it breaks down: a box label is printed once in a factory, but DMI strings come from firmware, so a firmware update or a careless board vendor can change or blank them. And anyone who can reflash the firmware can forge them.",
+      "workedExample": {
+        "title": "Read your machine's platform identity and map it to Redfish",
+        "steps": [
+          {
+            "subgoal": "Read vendor and product (Linux, no root)",
+            "detail": "```bash\ncat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name\n```\nA laptop might print `LENOVO` and `21CBCTO1WW`. A cloud VM might print `Amazon EC2` or `QEMU`."
+          },
+          {
+            "subgoal": "Read the serial (needs root)",
+            "detail": "```bash\nsudo cat /sys/class/dmi/id/product_serial\nsudo dmidecode -s system-serial-number\n```\nOn macOS: `system_profiler SPHardwareDataType | grep -E 'Model|Serial'`."
+          },
+          {
+            "subgoal": "Map to Redfish",
+            "detail": "The BMC reports the same facts:\n```json\n{\"Manufacturer\": \"Dell Inc.\", \"Model\": \"PowerEdge R750\", \"SerialNumber\": \"J1234XY\"}\n```\nsys_vendor ↔ `Manufacturer`, product_name ↔ `Model`, product_serial ↔ `SerialNumber`."
+          },
+          {
+            "subgoal": "Normalize and sanity-check",
+            "detail": "```python\nPLACEHOLDERS = {\"\", \"to be filled by o.e.m.\", \"default string\", \"system product name\"}\n\ndef clean(s):\n    s = (s or \"\").strip()\n    return None if s.lower() in PLACEHOLDERS else s\n\nprint(clean(\"Dell Inc.  \"))              # Dell Inc.\nprint(clean(\"To Be Filled By O.E.M.\"))   # None\n```\n`None` here means \"identity unknown\". A careful system should handle that differently from a real value."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete the one-liner so it prints `vendor | product` from Linux sysfs.",
+        "partialSolution": "```bash\nprintf '%s | %s\\n' \"$(cat /sys/class/dmi/id/___)\" \"$(cat /sys/class/dmi/id/___)\"\n```",
+        "answer": "`sys_vendor` and `product_name`."
+      },
+      "independentProblem": {
+        "prompt": "Write a Python function `platform_key(system)` that takes a Redfish System dict and returns a lowercase key such as `\"dell inc.|poweredge r750\"`, or `None` if either Manufacturer or Model is missing or a placeholder. Test it with `{\"Manufacturer\": \" Dell Inc.\", \"Model\": \"PowerEdge R750 \"}` and `{\"Manufacturer\": \"To Be Filled By O.E.M.\", \"Model\": \"X\"}`.",
+        "hints": [
+          "Use `system.get(\"Manufacturer\")` so a missing field doesn't raise an error.",
+          "Reuse `clean()` from the worked example, then lowercase.",
+          "Return `None` if either cleaned value is None. Otherwise return `f\"{v.lower()}|{p.lower()}\"`."
+        ],
+        "answer": "```python\nPLACEHOLDERS = {\"\", \"to be filled by o.e.m.\", \"default string\", \"system product name\"}\n\ndef clean(s):\n    s = (s or \"\").strip()\n    return None if s.lower() in PLACEHOLDERS else s\n\ndef platform_key(system):\n    v = clean(system.get(\"Manufacturer\"))\n    p = clean(system.get(\"Model\"))\n    if v is None or p is None:\n        return None\n    return f\"{v.lower()}|{p.lower()}\"\n\nprint(platform_key({\"Manufacturer\": \" Dell Inc.\", \"Model\": \"PowerEdge R750 \"}))  # dell inc.|poweredge r750\nprint(platform_key({\"Manufacturer\": \"To Be Filled By O.E.M.\", \"Model\": \"X\"}))    # None\n```"
+      },
+      "selfExplanation": "DMI identity is good for deciding what kind of machine you're dealing with, but not for deciding whether a host is trustworthy. Explain why in your own words.",
+      "checks": [
+        {
+          "question": "Which piece of software produces the DMI/SMBIOS vendor and product strings?",
+          "options": [
+            "The host firmware (UEFI), from manufacturer-programmed values",
+            "The Linux kernel, by probing the CPU",
+            "The BMC's DHCP client",
+            "The TPM"
+          ],
+          "answer": "The host firmware (UEFI), from manufacturer-programmed values",
+          "explanation": "Firmware builds the SMBIOS tables at boot. The kernel only exposes them under /sys/class/dmi/id and doesn't create them. CPU probing gives the CPU model, not the system vendor. The BMC can report the strings over Redfish, but it doesn't generate them through DHCP. The TPM stores measurements, not product names."
+        },
+        {
+          "question": "According to NICo's Redfish reference, which System field is Critical because machine ID generation and pairing fail without it?",
+          "options": [
+            "SerialNumber",
+            "Manufacturer",
+            "SKU",
+            "BiosVersion"
+          ],
+          "answer": "SerialNumber",
+          "explanation": "SerialNumber is marked Critical (machine ID via DMI hash, and pairing). Manufacturer is only Recommended and has a default fallback. SKU and BiosVersion are Optional."
+        },
+        {
+          "question": "Short answer: per NICo's Redfish reference, what does NICo use the System `Model` field for?",
+          "options": [],
+          "answer": "DPU model detection (telling BlueField-2 from BlueField-3), with a graceful fallback if it's missing.",
+          "explanation": "The reference marks Model as Recommended for DPU model detection. It isn't used for machine ID (that's SerialNumber, plus Manufacturer with a fallback)."
+        }
+      ],
+      "sources": [
+        "architecture/redfish/endpoints_reference.md"
+      ]
+    }
+  ],
+  "buildTask": {
+    "title": "Mini Site Explorer: a Day 0 readiness check against a mock BMC",
+    "goal": "Run a fake Redfish BMC on your laptop, then write a Python client that reads the host's DMI identity, Secure Boot state, boot order and interface device paths, and prints READY or NOT READY based on Day 0-style checks.",
+    "whyItMatters": "NICo inspects hosts out of band through Redfish. Per its Redfish reference, it reads `SerialNumber` (and `Manufacturer`) for machine ID and pairing, `Model` for DPU model detection, `SecureBoot` to check firmware security, `Boot.BootOrder` to report and verify the boot order, and `UefiDevicePath` to get MACs and pick the primary interface. In this build you call the same endpoints and parse the same fields on a small scale. It's a learning toy: it doesn't call NICo or reproduce NICo's exact logic.",
+    "setup": [
+      "Python 3.8+ (standard library only)",
+      "curl",
+      "A text editor and a terminal on Linux or macOS",
+      "A working directory, e.g. `mkdir mini-explorer && cd mini-explorer`"
+    ],
+    "steps": [
+      {
+        "subgoal": "Write the mock BMC server",
+        "detail": "Save as `mock_bmc.py`. It serves a JSON dict in which each key is a URL path:\n```python\nimport json\nimport sys\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n\nwith open(sys.argv[1]) as f:\n    TREE = json.load(f)\n\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        body = TREE.get(self.path.rstrip(\"/\"))\n        if body is None:\n            self.send_response(404)\n            self.end_headers()\n            return\n        data = json.dumps(body).encode()\n        self.send_response(200)\n        self.send_header(\"Content-Type\", \"application/json\")\n        self.send_header(\"Content-Length\", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\nHTTPServer((\"127.0.0.1\", 8000), Handler).serve_forever()\n```"
+      },
+      {
+        "subgoal": "Write the BMC fixture and the expected-machine record",
+        "detail": "Save as `bmc.json`:\n```json\n{\n  \"/redfish/v1\": {\"Vendor\": \"Acme\", \"Systems\": {\"@odata.id\": \"/redfish/v1/Systems\"}},\n  \"/redfish/v1/Systems\": {\"Members\": [{\"@odata.id\": \"/redfish/v1/Systems/1\"}]},\n  \"/redfish/v1/Systems/1\": {\n    \"Id\": \"1\",\n    \"Manufacturer\": \"Acme Servers Inc. \",\n    \"Model\": \"AS-9000\",\n    \"SerialNumber\": \" SERIAL-1\",\n    \"PowerState\": \"On\",\n    \"Boot\": {\n      \"BootOrder\": [\"NIC.Slot.3-1\", \"Disk.0\"],\n      \"BootOptions\": {\"@odata.id\": \"/redfish/v1/Systems/1/BootOptions\"}\n    },\n    \"EthernetInterfaces\": {\"@odata.id\": \"/redfish/v1/Systems/1/EthernetInterfaces\"},\n    \"SecureBoot\": {\"@odata.id\": \"/redfish/v1/Systems/1/SecureBoot\"}\n  },\n  \"/redfish/v1/Systems/1/SecureBoot\": {\"SecureBootEnable\": true, \"SecureBootCurrentBoot\": \"Enabled\"},\n  \"/redfish/v1/Systems/1/BootOptions\": {\"Members\": [\n    {\"@odata.id\": \"/redfish/v1/Systems/1/BootOptions/NIC.Slot.3-1\"},\n    {\"@odata.id\": \"/redfish/v1/Systems/1/BootOptions/Disk.0\"}\n  ]},\n  \"/redfish/v1/Systems/1/BootOptions/NIC.Slot.3-1\": {\n    \"Id\": \"NIC.Slot.3-1\", \"DisplayName\": \"PXE OOB NIC Slot 3 Port 1\",\n    \"UefiDevicePath\": \"PciRoot(0x2)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(B83FD2909582,0x1)\",\n    \"BootOptionEnabled\": true, \"BootOptionReference\": \"NIC.Slot.3-1\"\n  },\n  \"/redfish/v1/Systems/1/BootOptions/Disk.0\": {\n    \"Id\": \"Disk.0\", \"DisplayName\": \"NVMe Disk 0\",\n    \"UefiDevicePath\": \"PciRoot(0x0)/Pci(0x1,0x2)/Pci(0x0,0x0)/NVMe(0x1,00-00-00-00-00-00-00-00)\",\n    \"BootOptionEnabled\": true, \"BootOptionReference\": \"Disk.0\"\n  },\n  \"/redfish/v1/Systems/1/EthernetInterfaces\": {\"Members\": [\n    {\"@odata.id\": \"/redfish/v1/Systems/1/EthernetInterfaces/NIC1\"},\n    {\"@odata.id\": \"/redfish/v1/Systems/1/EthernetInterfaces/NIC2\"},\n    {\"@odata.id\": \"/redfish/v1/Systems/1/EthernetInterfaces/NIC3\"}\n  ]},\n  \"/redfish/v1/Systems/1/EthernetInterfaces/NIC1\": {\"Id\": \"NIC1\", \"MACAddress\": \"B8:3F:D2:90:95:82\",\n    \"UefiDevicePath\": \"PciRoot(0x2)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(B83FD2909582,0x1)\"},\n  \"/redfish/v1/Systems/1/EthernetInterfaces/NIC2\": {\"Id\": \"NIC2\", \"MACAddress\": \"0C:42:A1:B2:C3:D4\",\n    \"UefiDevicePath\": \"PciRoot(0x0)/Pci(0x10,0x0)/Pci(0x0,0x0)/MAC(0C42A1B2C3D4,0x1)\"},\n  \"/redfish/v1/Systems/1/EthernetInterfaces/NIC3\": {\"Id\": \"NIC3\", \"MACAddress\": \"0C:42:A1:B2:C3:D5\",\n    \"UefiDevicePath\": \"PciRoot(0x0)/Pci(0x2,0x0)/Pci(0x0,0x0)/MAC(0C42A1B2C3D5,0x1)\"}\n}\n```\nSave as `expected.json`. This is a toy format. Only `chassis_serial_number` mirrors a field in NICo's `expected_machines.json`.\n```json\n{\"chassis_serial_number\": \"SERIAL-1\", \"manufacturer\": \"Acme Servers Inc.\", \"model\": \"AS-9000\"}\n```\nThe stray spaces in `Manufacturer` and `SerialNumber` are deliberate. Your client has to trim them."
+      },
+      {
+        "subgoal": "Start the BMC and poke it",
+        "detail": "```bash\npython3 mock_bmc.py bmc.json & sleep 1\ncurl -s http://127.0.0.1:8000/redfish/v1\ncurl -s http://127.0.0.1:8000/redfish/v1/Systems/1/SecureBoot\n```\nYou should get JSON back. The server logs each request to the terminal (on stderr). That's expected."
+      },
+      {
+        "subgoal": "Start the explorer: fetch and identify the platform",
+        "detail": "Create `explorer.py` with this skeleton:\n```python\n#!/usr/bin/env python3\nimport json\nimport re\nimport sys\nimport urllib.request\n\nBASE = sys.argv[1].rstrip(\"/\")\nwith open(sys.argv[2]) as f:\n    EXPECTED = json.load(f)\n\ndef get(path):\n    with urllib.request.urlopen(BASE + path) as r:\n        return json.load(r)\n\ndef members(path):\n    return [get(m[\"@odata.id\"]) for m in get(path)[\"Members\"]]\n\nroot = get(\"/redfish/v1\")\nsystem = members(root[\"Systems\"][\"@odata.id\"])[0]\nproblems = []\n```\nThen add code that:\n- prints `print(\"Vendor (service root):\", root[\"Vendor\"])`\n- strips whitespace from `Manufacturer`, `Model` and `SerialNumber` (use `(system.get(...) or \"\").strip()`) and prints `print(f\"Platform identity: {mfr} | {model} | {serial}\")`\n- appends a message to `problems` if the serial is empty, if it differs from `EXPECTED[\"chassis_serial_number\"]`, or if the manufacturer or model differ from `EXPECTED[\"manufacturer\"]` / `EXPECTED[\"model\"]`."
+      },
+      {
+        "subgoal": "Check Secure Boot",
+        "detail": "Fetch `sb = get(system[\"SecureBoot\"][\"@odata.id\"])` and print exactly:\n```python\nprint(f\"Secure Boot: enabled={sb['SecureBootEnable']} current={sb['SecureBootCurrentBoot']}\")\n```\nAdd a problem unless `sb[\"SecureBootEnable\"]` is `True` **and** `sb[\"SecureBootCurrentBoot\"] == \"Enabled\"`. (Remember the independent problem from the Secure Boot lesson: a setting that hasn't taken effect yet doesn't count.)"
+      },
+      {
+        "subgoal": "Parse device paths, check boot order, print the verdict",
+        "detail": "Paste `mac_from_path` and `pci_key` from the device-path lesson into `explorer.py` (above the code that uses them).\n\n1. Fetch `ifaces = members(system[\"EthernetInterfaces\"][\"@odata.id\"])` and sort with `key=lambda i: pci_key(i[\"UefiDevicePath\"])`. Print the header `print(\"Interfaces (PCI order):\")`, then each interface as:\n```python\nkey = \".\".join(str(n) for n in pci_key(i[\"UefiDevicePath\"]))\nprint(f\"  {key:<11} {i['MACAddress']}\")\n```\n2. Fetch `members(system[\"Boot\"][\"BootOptions\"][\"@odata.id\"])` and find the option whose `DisplayName` contains `OOB`. Extract its MAC with `mac_from_path` and print `print(\"OOB boot MAC:\", oob_mac)`. Add a problem if there's no OOB option, or if its MAC isn't among the interfaces' `MACAddress` values.\n3. Add a problem if `system[\"Boot\"][\"BootOrder\"][0]` isn't the OOB option's `Id`.\n4. Finish with:\n```python\nif problems:\n    print(\"RESULT: NOT READY\")\n    for p in problems:\n        print(\"  -\", p)\n    sys.exit(1)\nprint(\"RESULT: READY\")\n```\nRun `python3 explorer.py http://127.0.0.1:8000 expected.json`. Expected output on the unmodified fixture:\n```\nVendor (service root): Acme\nPlatform identity: Acme Servers Inc. | AS-9000 | SERIAL-1\nSecure Boot: enabled=True current=Enabled\nInterfaces (PCI order):\n  0.2.0.0.0   0C:42:A1:B2:C3:D5\n  0.16.0.0.0  0C:42:A1:B2:C3:D4\n  2.1.0.0.0   B8:3F:D2:90:95:82\nOOB boot MAC: B8:3F:D2:90:95:82\nRESULT: READY\n```\nThe exact spacing doesn't matter for passing. What matters is the order of the interfaces, the OOB MAC and the RESULT line."
+      },
+      {
+        "subgoal": "Break it on purpose",
+        "detail": "Turn Secure Boot off in the fixture and restart the BMC. The `sleep 1` calls give the old server time to release port 8000 and the new one time to start listening:\n```bash\nkill %1; sleep 1\nsed -i.bak 's/\"SecureBootEnable\": true/\"SecureBootEnable\": false/' bmc.json\npython3 mock_bmc.py bmc.json & sleep 1\npython3 explorer.py http://127.0.0.1:8000 expected.json; echo \"exit=$?\"\n```\nYou should see `Secure Boot: enabled=False current=Enabled`, `RESULT: NOT READY`, a Secure Boot problem line and `exit=1`. Restore the fixture with `mv bmc.json.bak bmc.json` and restart the mock the same way (`kill %1; sleep 1`, then `python3 mock_bmc.py bmc.json & sleep 1`). Then try putting `Disk.0` first in `BootOrder` and check that you get a boot-order problem."
+      }
+    ],
+    "verify": "With the original fixture and the mock running, `python3 explorer.py http://127.0.0.1:8000 expected.json; echo \"exit=$?\"` lists the interfaces in the order 0.2.0.0.0, 0.16.0.0.0, 2.1.0.0.0, shows `OOB boot MAC: B8:3F:D2:90:95:82`, and ends with `RESULT: READY` and `exit=0`. After you set `SecureBootEnable` to false and restart the mock, the same command ends with `RESULT: NOT READY`, a Secure Boot problem line and `exit=1`, with no Python traceback.",
+    "hints": [
+      "`OSError: [Errno 98] Address already in use` (Errno 48 on macOS): an old mock is still running or hasn't released the port. Run `kill %1; sleep 1`, or find the process with `lsof -i :8000` and kill that PID.",
+      "`ConnectionRefusedError` / `urllib.error.URLError: <urlopen error [Errno 111] Connection refused>` with exit=1: the explorer ran before the mock was listening, or the mock crashed on startup. Check the mock's terminal output, add `sleep 1` after starting it, and rerun. This is not the NOT READY you're looking for.",
+      "`urllib.error.HTTPError: 404`: the path you requested isn't a key in bmc.json. Print the path before calling `get()`, and check for typos and trailing slashes (the server strips a trailing `/`).",
+      "Serial mismatch even though it looks right: you forgot `.strip()`. The fixture has a leading space in `SerialNumber`.",
+      "Interfaces come out as 0.16 before 0.2: you're sorting strings. Make sure `pci_key` returns a list of ints and you sort on that list, not on the joined text.",
+      "`json.decoder.JSONDecodeError` when starting the mock: you broke bmc.json while editing. Run `python3 -m json.tool bmc.json` to find the bad line."
+    ],
+    "stretch": "Get real firmware data instead of a hand-written fixture. Install QEMU and OVMF (UEFI firmware for VMs; the package is usually `ovmf` or `edk2-ovmf`, and file paths vary by distro). Boot a live Linux ISO with a custom DMI identity, for example `qemu-system-x86_64 -machine q35 -m 2048 -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd -drive if=pflash,format=raw,file=my_vars.fd -smbios type=1,manufacturer=Acme,product=AS-9000,serial=SERIAL-1 -netdev user,id=n0 -device virtio-net-pci,netdev=n0 -cdrom live.iso`, where `my_vars.fd` is a writable copy of the matching OVMF_VARS file. Inside the VM, read `/sys/class/dmi/id/sys_vendor` and `product_name`, run `efibootmgr -v` to see real device paths, and feed one of them through your `mac_from_path` and `pci_key`. Then write a small script that turns the VM's facts into a `bmc.json`-style fixture and run your explorer against it."
+  }
+}

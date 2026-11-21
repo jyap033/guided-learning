@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "database-transaction",
+        "severity": "minor",
+        "problem": "The completion problem's `result = ___` blank expects `call_bmc(machine_id, op_id)`, but the prompt never says what arguments `call_bmc` takes. `call_bmc(machine_id)` is an equally plausible fill, so the expected answer is ambiguous.",
+        "fix": "State the callable's signature in the prompt, e.g. \"`call_bmc(machine_id, op_id)` sends the reset and returns a status string\", or accept any call made outside the `with conn:` block."
+      }
+    ]
+  }
+}

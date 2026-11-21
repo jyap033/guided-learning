@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "intro",
+        "severity": "minor",
+        "problem": "The intro says \"In Chapter 4 you saw how state machines move a resource through states safely\" and \"Chapter 1 covered ... the BMC\". Neither state machines nor the BMC is in the already-covered list, so the explanation leans on concepts the learner may not have.",
+        "fix": "Add a one-sentence definition of a state machine and of the BMC, or drop the chapter cross-references."
+      },
+      {
+        "where": "bare-metal-lifecycle-management",
+        "severity": "minor",
+        "problem": "The worked example says racking and cabling is \"the only manual step\". The next step says NICo only ingests machines listed in expected_machines.json. The docs also require an operator to prepare that manifest and set the site-wide BMC/UEFI credentials before ingestion. Read as written, the two statements contradict each other.",
+        "fix": "Reword to: \"after the expected-machines manifest and site credentials are in place, racking and cabling is the only per-host manual step.\""
+      },
+      {
+        "where": "day-0-day-1-day-2-lifecycle",
+        "severity": "minor",
+        "problem": "The explanation lists HBN, LLDP, VXLAN/EVPN, VRFs, P_Key partitions, NVLink partitions and PXE/iPXE as phase contents without defining any of them. None are in the already-covered list, so the classification task depends on unexplained jargon.",
+        "fix": "Add a short parenthetical for each term (e.g. \"P_Key: InfiniBand partition key, like a VLAN tag\") or say explicitly that they are covered in later chapters and only the phase grouping matters here."
+      }
+    ]
+  }
+}

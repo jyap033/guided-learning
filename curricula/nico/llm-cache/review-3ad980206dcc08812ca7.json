@@ -1,0 +1,46 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "The 'Inject a crash' step tells the learner to find, in the BMC's output, the crashed machine's op_id being requested again and answered with `replayed: true`. bmc.py only logs Python's default request line (e.g. `\"POST /reset HTTP/1.1\" 200 -`), which shows neither the op_id nor the replayed flag. The worker spec doesn't print the response body either, so the learner can't see the proof the step asks for.",
+        "fix": "Add a print to bmc.py's handler, e.g. `print(op_id, code, result.get('replayed'), flush=True)`, or have the worker print each BMC response. Then tell the learner exactly which line to look for (e.g. `m0-reboot-v1 200 True`)."
+      },
+      {
+        "where": "optimistic-concurrency-stale-write-protection",
+        "severity": "major",
+        "problem": "The explanation says NICo REST key groups get a new version on each edit and that an update with `ifVersionMatch` fails on a concurrent edit, as if this is shipped behaviour. key_group_sync.md is a design description. It says the REST API 'could' expose the version and 'does not have to', and only describes the check as a possible capability (its prose calls it `ifVersionNotMatch` semantics). The independent problem is built on this claim.",
+        "fix": "Present it as the design described in the key-group sync doc: versions change on every edit, and the REST API may offer an if-version-match precondition. Either frame the Ana/Ben problem as a hypothetical with that precondition, or drop the claim that NICo REST does this today."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The verify check `sort bmc_effects.log | uniq -d | wc -l` always prints 0 whatever the worker does, because the fake BMC drops repeated op_ids before logging. It doesn't test the learner's controller. Only the line count, the DB query and the fence-failed line actually test the learner's work.",
+        "fix": "Say this check only confirms the BMC's own deduplication. Point out that the line count of 12, the `[('Ready', 2, 12)]` query and the `fence failed`/`stale write rejected` line are the real evidence. Or log every request the BMC accepts, including replays, so a worker that reused bad IDs would show up."
+      },
+      {
+        "where": "microservices-architecture",
+        "severity": "minor",
+        "problem": "'NICo solves point 3 by having one owner for all state' and 'never into a second database' sit badly with the later statement that NICo Flow stores tasks in PostgreSQL. Flow and NICo REST have their own PostgreSQL databases. Only `nico_system_nico` is restricted to the API Service. Learners may read this as a contradiction.",
+        "fix": "Say the API Service is the only writer of the site's system-state database (`nico_system_nico`), and note that NICo REST and Flow keep their own separate databases."
+      },
+      {
+        "where": "worklock-lease-and-fencing",
+        "severity": "minor",
+        "problem": "The edge-case step says to remove B's acquire line and rerun. That also makes B's fenced_write print False and leaves the final row as ('m1', 'NeedsReboot'). The inline comments still show the old outputs, and the text doesn't explain the change.",
+        "fix": "List the expected output for the modified run (True, False, True, [('m1', 'NeedsReboot')]), or say to delete both of B's lines."
+      },
+      {
+        "where": "idempotency",
+        "severity": "minor",
+        "problem": "The 'no keys' step presents the Scout reboot-timestamp check as evidence the reboot happened. The rack doc notes that the timestamp does not prove that this request caused the reboot.",
+        "fix": "Add that the timestamp only shows that some reboot happened after the recovery point, which is enough for the rack barrier, but it isn't proof of causation."
+      }
+    ]
+  }
+}

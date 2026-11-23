@@ -25,9 +25,9 @@ answers hidden until clicked. It ends with a build task you can do on a laptop.
 An AI review pass checks each chapter against the docs; major problems trigger
 one rewrite, and remaining notes are listed at the end of the chapter.
 
-NICo chapters written so far: [1–6](curricula/nico/chapters/README.md). Their
-build tasks were worked through by hand (chapters 1–3 on Docker 29; 4–6 are
-plain Python) and pass as written.
+NICo chapters written so far: [1–9](curricula/nico/chapters/README.md). Their
+build tasks were worked through by hand (Docker 29, or plain Python for 4–6)
+and pass as written.
 Findings from that testing live in `topics/nico/feedback.yaml` and are fed into
 writing and review. Existing chapters are skipped unless you pass `--force`.
 

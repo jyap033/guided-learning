@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "dns",
+        "severity": "minor",
+        "problem": "The explanation and the third check question give 'so the parent zone can delegate to several stable server addresses' as the reason each nico-dns replica has its own VIP. The quick start only says that each replica gets its own VIP (use perPodAnnotations); it gives no reason. The NTP lesson labels its equivalent per-replica-VIP reasoning as general reasoning, but this lesson does not.",
+        "fix": "Add a short qualifier in the explanation and in the check's explanation, e.g. '(general DNS reasoning; the docs state the per-replica VIP design but not the reason)', matching how the NTP lesson handles it."
+      }
+    ]
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "uefi-bios-settings",
+        "severity": "major",
+        "problem": "The 'Where NICo fits' paragraph says 'NICo manages host firmware and its configuration out-of-band over Redfish, for example enabling SR-IOV', and the build task's whyItMatters says 'NICo sets BIOS attributes ... through Redfish'. The docs only say NICo manages host firmware (UEFI, BMC), enforces lockdown, sets boot order and records configuration data. Nothing in them says NICo sets BIOS attributes or enables SR-IOV.",
+        "fix": "Drop the SR-IOV example and the claim that NICo sets BIOS attributes, or label them clearly as hypothetical. Keep to what the docs support: firmware management, lockdown, boot order, and Site Explorer recording configuration data."
+      },
+      {
+        "where": "uefi-lockdown",
+        "severity": "minor",
+        "problem": "The lifecycle paragraph and the independent-problem answer present 'unlock, change, re-lock before the next tenant, then attest' as NICo's documented procedure. The docs only say NICo enables lockdown during active use and schedules firmware updates on healthy, unoccupied hosts. The unlock/re-lock sequence is an inference.",
+        "fix": "Say this is a reasonable model of how the pieces fit together, not a documented NICo workflow."
+      },
+      {
+        "where": "uefi-lockdown",
+        "severity": "minor",
+        "problem": "The worked example says empty output from `sudo dmidecode -t 42` means there is no Host Interface. dmidecode always prints its version and 'SMBIOS ... present' header lines, so the output is never empty.",
+        "fix": "Say that output containing only the header, with no 'Management Controller Host Interface' handle, means there is none."
+      },
+      {
+        "where": "boot-order-and-boot-source-override",
+        "severity": "minor",
+        "problem": "Lesson 1 says to leave the mock running for Lesson 3, but Lesson 3 starts it again. If it is still running, the second start fails with 'Address already in use', which only shows up in /tmp/mock_bmc.log. Job numbers also shift, so the `kill %1` in Lesson 4's HTTP-server step would kill the mock BMC and leave the http.server running.",
+        "fix": "In Lesson 3, either reuse the running mock or say to stop it first (`kill %1`). In Lesson 4, stop the server with `kill $!` saved right after it starts, instead of `kill %1`."
+      },
+      {
+        "where": "dns",
+        "severity": "minor",
+        "problem": "The generic Unbound example uses `forward-zone` to send queries to an authoritative-only server. `forward-zone` is meant for upstream recursive resolvers. For an authoritative server, the standard construct is `stub-zone` with `stub-addr`. The example usually works anyway, but it teaches the wrong construct.",
+        "fix": "Use `stub-zone:` with `name:` and `stub-addr:`, or add a note that NICo's docs say 'forwarding' loosely and that `stub-zone` is the usual choice for an authoritative target."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The 'Turn on the relay' step suggests changing the MAC in dhcp-host to watch an unknown BMC get refused. It doesn't say that dnsmasq has to be restarted to pick up the change, or that rerunning udhcpc first flushes bmc0's address (deconfig). If the request is refused, the BMC is left with no address, and the mock BMC can't bind 10.30.0.50 in the later steps.",
+        "fix": "Give the full procedure: pkill the server dnsmasq, edit the config, restart it, rerun udhcpc and see it fail, then restore the MAC, restart dnsmasq and rerun udhcpc to get 10.30.0.50 back before continuing."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The 'connection refused' hint is garbled: 'Check `/lab/run/bmc.log 2>&1`-style output with `cat /lab/run/bmc.log`.'",
+        "fix": "Rewrite it as: 'Check the mock's output with `cat /lab/run/bmc.log`.'"
+      }
+    ]
+  }
+}

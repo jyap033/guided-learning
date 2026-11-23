@@ -4,20 +4,22 @@
 
 > AI-generated and checked by an AI review pass, not yet by a person. Where a lesson lists sources, those docs pages are the authority.
 
-This chapter covers the services a bare-metal host needs between power-on and a running OS. In Chapter 5 you saw what UEFI firmware is. In Chapter 6 you drove a BMC over Redfish. In Chapter 7 you met the out-of-band (OOB) management path. Here those pieces come together. You will read and stage firmware (BIOS) settings, lock them while a tenant has the machine, and steer the boot device so the host boots from the network. You will also look at the network services every managed machine depends on: DHCP for addresses, DNS for names, NTP for time, and cloud-init for first-boot configuration.
+Earlier chapters gave you the pieces: UEFI firmware and Secure Boot (ch. 5), BMCs and the Redfish API (ch. 6), and the BlueField DPU with its out-of-band interfaces (ch. 7). This chapter covers the services that turn those pieces into something a control plane can drive. That means configuring firmware remotely, choosing what a machine boots, and giving every management endpoint an address, a name and the correct time.
 
-This matters for NICo because its discovery chain starts with one of these protocols. A BMC powers on and sends a DHCP request. A switch on the OOB network relays that request to `nico-dhcp`. NICo Core allocates an address. Site Explorer then reaches the BMC over Redfish using the credentials in `expected_machines.json`. From there NICo manages the boot order, the UEFI firmware and lockdown. Hosts boot from the network and fetch iPXE scripts and cloud-init user-data from the PXE Service. If one link in that chain is misconfigured, a host never appears or never provisions.
+The chapter has two halves. The first half is about **firmware control through the BMC**: BIOS/UEFI settings that only take effect on the next reboot, locking those settings while a tenant has the host, and setting the boot order or a one-time boot override so a host boots from the network. The second half is about **site network services**: cloud-init user-data for first-boot OS setup, NTP for clocks, DNS (authoritative and recursive), DHCP with relays, and the out-of-band (OOB) management network that connects them all to the BMCs.
 
-Each lesson starts with a question to try before reading. Then come an explanation, a worked example you can run on a laptop, and practice problems that give you less help each time. The chapter ends with a build task. Inside one Docker container you will set up a small OOB network: a fake BMC, a DHCP relay, and a controller running DHCP, DNS and NTP. Then you discover the BMC through a relayed DHCP request and provision it over Redfish.
+NICo needs all of this before it can manage a single host. It finds BMCs when their relayed DHCP requests reach `nico-dhcp`. It sets BMC clocks from enterprise NTP servers before ingestion. It runs its own authoritative DNS plus an `unbound` recursive resolver. Its PXE Service serves iPXE scripts and cloud-init user-data. Through Redfish it sets the boot order and enforces UEFI lockdown. If one of these is misconfigured, hosts never appear, TLS to BMCs fails, or machines boot the wrong thing.
+
+Every lesson has a small exercise you can run on a laptop. The build task at the end puts them together into a miniature OOB site inside one Docker container. A mock BMC gets its address through a DHCP relay, resolves names, syncs its clock, and is then told over Redfish to change a BIOS setting and network-boot once.
 
 **By the end of this chapter you can:**
 
-- Read BIOS attributes over Redfish, stage a change as a pending setting, and apply it with a reset
-- Explain how UEFI lockdown combined with disabled in-band host-to-BMC access protects firmware while a tenant has a host
-- Set a one-time or persistent boot source override and predict which device a host boots from on each reboot
-- Write, validate and serve cloud-init user-data over HTTP the way a PXE service does
-- Tell an authoritative DNS server from a recursive resolver, and name the NTP and DNS components NICo runs
-- Trace a BMC's DHCP request through an OOB relay to nico-dhcp, and build a working relay in a lab
+- Stage a BIOS attribute change through a Redfish settings object and explain why it only applies after a reboot
+- Choose between a permanent boot order change and a one-time or continuous boot source override, and apply each through Redfish
+- Explain how UEFI lockdown, per-device UEFI passwords and disabled in-band BMC access together stop a tenant from changing firmware configuration
+- Write and validate cloud-init user-data, and describe where NICo's PXE Service fits in first boot
+- Tell authoritative and recursive DNS apart with dig, and describe how nico-dns, unbound and NTP (enterprise servers and nico-ntp) serve a NICo site
+- Configure a DHCP relay that forwards BMC requests from an OOB segment to a central DHCP server, and troubleshoot a BMC that is never discovered
 
 **How to use this chapter:** answer each *Before you read* question first, even if you have to guess. Try every problem before opening its answer. Guessing and getting things wrong first is part of how this works.
 
@@ -31,7 +33,7 @@ Each lesson starts with a question to try before reading. Then come an explanati
 6. [DNS (authoritative and recursive)](#dns)
 7. [DHCP](#dhcp)
 8. [Out-of-band (OOB) management network](#out-of-band-management-network)
-9. [Build task: Mini OOB network: discover a BMC by relayed DHCP, then provision it over Redfish](#build-task)
+9. [Build task: A miniature OOB site: discover, name, time-sync and network-boot a mock BMC](#build-task)
 
 <a id="uefi-bios-settings"></a>
 ## 1. UEFI/BIOS settings
@@ -40,84 +42,84 @@ Each lesson starts with a question to try before reading. Then come an explanati
 
 ### Before you read
 
-- You PATCH a BIOS attribute through Redfish and get 200 OK. You immediately GET that attribute again. What value do you expect to see, and why?
-- Why can't the firmware simply apply a setting like 'enable SR-IOV' while the OS is running?
+- You send a Redfish PATCH that changes a BIOS setting, and it returns success. You immediately GET the BIOS resource. Do you expect to see the new value? Guess before reading.
+- Why would a bare-metal control plane care about BIOS settings at all, rather than leaving them at factory defaults?
 
 <details>
 <summary>Answers</summary>
 
-- **You PATCH a BIOS attribute through Redfish and get 200 OK. You immediately GET that attribute again. What value do you expect to see, and why?** Usually the old value. The change has been accepted as a pending setting. Firmware reads BIOS settings during POST, so the new value only takes effect after the next reboot.
-- **Why can't the firmware simply apply a setting like 'enable SR-IOV' while the OS is running?** Settings like this decide how PCIe devices are enumerated and how resources are allocated during POST. The running OS has already discovered the hardware based on the old values. Changing them underneath it would make that picture wrong, so they are applied at the next boot.
+- **You send a Redfish PATCH that changes a BIOS setting, and it returns success. You immediately GET the BIOS resource. Do you expect to see the new value? Guess before reading.** Usually not. On most BMCs the write goes to a separate *pending settings* object. The live BIOS resource keeps showing the old value until the next reboot, when the firmware applies the pending change.
+- **Why would a bare-metal control plane care about BIOS settings at all, rather than leaving them at factory defaults?** Features that workloads depend on, such as SR-IOV, virtualization extensions and UEFI boot mode, are switched on or off in firmware. Across a fleet these settings have to be consistent and correct, or the same OS image behaves differently on different hosts.
 
 </details>
 
 ### Explanation
 
-**BIOS settings** (vendors still say "BIOS" even on UEFI machines) are the firmware's configuration: name/value pairs such as `BootMode = Uefi`, `SecureBoot = Enabled` or `SriovGlobalEnable = Disabled`. They live in the firmware's non-volatile storage and are read during **POST**, the self-test and hardware-setup phase that runs before the boot loader.
+**BIOS/UEFI settings** are the firmware's configuration: the options you would otherwise change in the setup menu during boot. Examples are boot mode, virtualization support, SR-IOV, power profiles and boot devices. Firmware stores them as a set of named **attributes**, each with a value such as `"SriovGlobalEnable": "Disabled"`.
 
-Redfish (Chapter 6) exposes them in two places:
+Redfish (ch. 6) exposes these attributes under the system resource:
 
-- **Current settings**: `GET /redfish/v1/Systems/<id>/Bios` returns an `Attributes` object. Treat it as read-only.
-- **Pending settings**: the same response has an `@Redfish.Settings` annotation that points to a *settings object*, often `/Bios/Settings`. You `PATCH` the attributes you want to change there. The BMC stores them as pending.
+- `GET /redfish/v1/Systems/{id}/Bios` returns `Attributes`, the **current** values the firmware is using now.
+- The same response usually includes `@Redfish.Settings.SettingsObject.@odata.id`. This points at a second resource, often `.../Bios/Settings`, that holds **pending** values.
+- You change settings by sending a `PATCH` with `{"Attributes": {...}}` to the pending object, not to the live one.
+- Pending values are applied when the server next reboots. The firmware reads them early in POST, writes them into its configuration store, and the live `Bios` resource then shows them.
 
-The pending values are applied at the **next reboot**, for example the `ComputerSystem.Reset` action you used in Chapter 6. After the reboot, `/Bios` shows the new values and the pending list is empty. Some vendors add an extra step, such as creating a configuration job, or let you choose when changes apply with an `@Redfish.SettingsApplyTime` annotation. Differences like these are why a controller needs vendor detection and OEM handling (Chapter 6).
+There are two reasons for this split. Many settings can only change safely while the OS is not running, and keeping the change separate lets you stage several changes and apply them with one reboot. A reset type from ch. 6 (for example `ForceRestart`) is what makes them take effect.
 
-**Attribute names are vendor-specific.** Redfish standardises where attributes live, not what they are called. Each BMC publishes an **attribute registry** that lists the valid names, types and allowed values. `SriovGlobalEnable` exists on one vendor's servers. Another vendor calls it something else.
+Attribute **names and allowed values are vendor-specific**. Most BMCs publish an attribute registry that describes them. Code that manages a mixed fleet needs per-vendor mappings, which is one reason fleet tooling detects the vendor (ch. 6).
 
-This lesson uses **SR-IOV** (Single Root I/O Virtualization) as a typical example of a firmware setting. SR-IOV lets one PCIe device, such as a NIC, present many lightweight *virtual functions* to the OS, and firmware often has to enable it before the OS can use it.
+Where NICo fits: the docs say NICo manages host firmware (UEFI and BMC) out-of-band, enforces security lockdown, and requires BMCs to support boot order configuration and the Secure Boot toggle through Redfish. Site Explorer records configuration data from each BMC, including boot order and lockdown mode. The debug web UI at `/admin` lets operators make BMC changes through HTTP POST in a peer-reviewed, auditable way. The docs do **not** list which BIOS attributes, if any, NICo writes. `SriovGlobalEnable` in this lesson is a generic illustration of the Redfish mechanism, not a documented NICo setting. Whatever a controller changes this way only lands after a reboot, so it has to be tracked as a state: *staged → rebooted → verified*. That fits the state-machine and idempotency ideas from ch. 4.
 
-**What the NICo docs say about firmware configuration:** NICo manages host UEFI firmware and enforces a firmware baseline. Its BMC Redfish requirements include a **UEFI Secure Boot toggle** (enable/disable Secure Boot) and **boot order configuration**. Site Explorer records configuration data such as **boot order and lockdown mode** from each BMC. The docs don't list which individual BIOS attributes NICo sets, so don't assume any particular attribute from this lesson.
+**Analogy.** It is like editing the config file of a daemon that only reads its config at startup. Your edit is saved, but nothing changes until you restart. The analogy breaks down in two places. You cannot just restart the daemon here; the whole machine has to reboot. And firmware can reject or adjust a value while applying it, so you always need to read the live resource back afterwards.
 
-Two habits from earlier chapters apply. Be **idempotent**: compare current, pending and desired values before you stage anything, so running the same step twice does not cause an extra reboot. And remember that **200 OK means "accepted as pending", not "applied"**. Check the result after the reboot.
+### Worked example: Stage and apply a BIOS change on a mock Redfish BMC
 
-**Analogy.** It's like asking a building manager to change the thermostat schedule. They write your request on tonight's work order (the pending settings), and the schedule actually changes when the system restarts overnight (the reboot). The analogy breaks down in one place: a real BMC can reject the request, or some firmware drops a staged change without telling you. The manager would at least tell you. So always re-read `/Bios` after the reboot.
+**Step 1: Save a mock BMC.**
 
-### Worked example: Stage and apply an SR-IOV change on a mock BMC
-
-**Step 1: Save the mock BMC.**
-
-Save this as `mockbmc.py`. It is a toy that models a small part of Redfish. Lessons 2 and 3 and the build task reuse it.
+Real BMCs are expensive, so this is a ~100-line in-memory imitation of the relevant Redfish resources (Python 3.8+, standard library only). It is **not** a real BMC and **not** part of NICo. The build task reuses it, so save it as `mock_bmc.py`:
 
 ```python
 #!/usr/bin/env python3
-"""mockbmc.py: a toy Redfish-style BMC for learning.
-
-Models a tiny slice of Redfish (Bios, Bios/Settings, Boot, Reset) plus a
-made-up OEM Lockdown flag. Real BMCs differ by vendor; this is not a spec.
-"""
+"""Tiny in-memory imitation of a few Redfish resources, for labs only."""
 import json
+import socketserver
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SYS = "/redfish/v1/Systems/1"
-BOOT_OPTIONS = {
-    "Boot0001": {"DisplayName": "UEFI NVMe: local disk", "Target": "Hdd",
-                 "UefiDevicePath": "PciRoot(0x0)/Pci(0x1,0x1)/Pci(0x0,0x0)/NVMe(0x1,00-00-00-00-00-00-00-00)"},
-    "Boot0002": {"DisplayName": "UEFI PXE IPv4: NIC1", "Target": "Pxe",
-                 "UefiDevicePath": "PciRoot(0x0)/Pci(0x3,0x0)/Pci(0x0,0x0)/MAC(C45AB1C8380E,0x1)/IPv4(0.0.0.0)"},
-    "Boot0003": {"DisplayName": "UEFI HTTP IPv4: NIC1", "Target": "UefiHttp",
-                 "UefiDevicePath": "PciRoot(0x0)/Pci(0x3,0x0)/Pci(0x0,0x0)/MAC(C45AB1C8380E,0x1)/IPv4(0.0.0.0)/Uri()"},
-}
-STATE = {
-    "bios": {"SriovGlobalEnable": "Disabled", "BootMode": "Uefi", "SecureBoot": "Enabled"},
+BOOT_OPTIONS = {"Boot0001": "Hdd", "Boot0002": "Pxe"}
+BOOT_KEYS = {"BootSourceOverrideEnabled", "BootSourceOverrideTarget", "BootOrder"}
+ENABLED = {"Disabled", "Once", "Continuous"}
+TARGETS = {"None", "Pxe", "Hdd", "Cd", "Usb", "BiosSetup"}
+
+state = {
+    "bios": {"SriovGlobalEnable": "Disabled", "BootMode": "Uefi"},
     "pending": {},
-    "boot": {"BootSourceOverrideEnabled": "Disabled", "BootSourceOverrideTarget": "None",
-             "BootOrder": ["Boot0001", "Boot0002", "Boot0003"]},
-    "lockdown": False,
-    "last_boot": None,
+    "boot": {
+        "BootSourceOverrideEnabled": "Disabled",
+        "BootSourceOverrideTarget": "None",
+        "BootOrder": ["Boot0001", "Boot0002"],
+    },
+    "last_boot": "Hdd",
 }
 
 
-def first_option_for(target):
-    for opt_id in STATE["boot"]["BootOrder"]:
-        if BOOT_OPTIONS[opt_id]["Target"] == target:
-            return opt_id
-    return None
+def reset():
+    """Simulate a reboot: apply pending BIOS changes, then pick a boot device."""
+    state["bios"].update(state["pending"])
+    state["pending"].clear()
+    boot = state["boot"]
+    if boot["BootSourceOverrideEnabled"] in ("Once", "Continuous"):
+        state["last_boot"] = boot["BootSourceOverrideTarget"]
+        if boot["BootSourceOverrideEnabled"] == "Once":
+            boot["BootSourceOverrideEnabled"] = "Disabled"
+    else:
+        state["last_boot"] = BOOT_OPTIONS[boot["BootOrder"][0]]
 
 
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, code, body):
-        data = json.dumps(body, indent=2).encode()
+        data = json.dumps(body, indent=2).encode() + b"\n"
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -128,183 +130,151 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(length) or b"{}")
 
-    def blocked_inband(self):
-        if STATE["lockdown"] and self.headers.get("X-Mock-Inband") == "1":
-            self.send_json(403, {"error": "in-band host-to-BMC access disabled (lockdown)"})
-            return True
-        return False
-
     def do_GET(self):
-        if self.blocked_inband():
-            return
         if self.path == SYS:
-            self.send_json(200, {"Id": "1", "Boot": STATE["boot"],
-                                 "Bios": {"@odata.id": SYS + "/Bios"},
-                                 "Oem": {"Mock": {"Lockdown": STATE["lockdown"],
-                                                  "LastBootedFrom": STATE["last_boot"]}}})
+            self.send_json(200, {"Id": "1", "Boot": state["boot"],
+                                 "Oem": {"Lab": {"LastBootSource": state["last_boot"]}}})
         elif self.path == SYS + "/Bios":
-            self.send_json(200, {"Attributes": STATE["bios"],
+            self.send_json(200, {"Attributes": state["bios"],
                                  "@Redfish.Settings": {"SettingsObject": {"@odata.id": SYS + "/Bios/Settings"}}})
         elif self.path == SYS + "/Bios/Settings":
-            self.send_json(200, {"Attributes": STATE["pending"]})
-        elif self.path.startswith(SYS + "/BootOptions/"):
-            opt_id = self.path.rsplit("/", 1)[1]
-            if opt_id in BOOT_OPTIONS:
-                self.send_json(200, {"Id": opt_id, **BOOT_OPTIONS[opt_id]})
-            else:
-                self.send_json(404, {"error": "no such boot option"})
+            self.send_json(200, {"Attributes": state["pending"]})
         else:
             self.send_json(404, {"error": "not found"})
 
     def do_PATCH(self):
-        if self.blocked_inband():
-            return
         body = self.read_json()
         if self.path == SYS + "/Bios/Settings":
-            if STATE["lockdown"]:
-                self.send_json(403, {"error": "BIOS settings locked"})
-                return
             attrs = body.get("Attributes", {})
-            unknown = [k for k in attrs if k not in STATE["bios"]]
+            unknown = sorted(set(attrs) - set(state["bios"]))
             if unknown:
-                self.send_json(400, {"error": "unknown attributes", "names": unknown})
-                return
-            STATE["pending"].update(attrs)
-            self.send_json(200, {"Attributes": STATE["pending"]})
+                return self.send_json(400, {"error": f"unknown attributes: {unknown}"})
+            state["pending"].update(attrs)
+            self.send_json(200, {"Attributes": state["pending"]})
         elif self.path == SYS:
-            if STATE["lockdown"] and "Boot" in body:
-                self.send_json(403, {"error": "boot settings locked"})
-                return
-            if "Boot" in body:
-                STATE["boot"].update(body["Boot"])
-            lock = body.get("Oem", {}).get("Mock", {}).get("Lockdown")
-            if lock is not None:
-                STATE["lockdown"] = bool(lock)
-            self.send_json(200, {"Boot": STATE["boot"], "Lockdown": STATE["lockdown"]})
+            boot = body.get("Boot", {})
+            bad = sorted(set(boot) - BOOT_KEYS)
+            if bad:
+                return self.send_json(400, {"error": f"unsupported Boot properties: {bad}"})
+            if boot.get("BootSourceOverrideEnabled", "Disabled") not in ENABLED:
+                return self.send_json(400, {"error": "bad BootSourceOverrideEnabled"})
+            if boot.get("BootSourceOverrideTarget", "None") not in TARGETS:
+                return self.send_json(400, {"error": "bad BootSourceOverrideTarget"})
+            if not set(boot.get("BootOrder", [])) <= set(BOOT_OPTIONS):
+                return self.send_json(400, {"error": "unknown boot option in BootOrder"})
+            state["boot"].update(boot)
+            self.send_json(200, {"Boot": state["boot"]})
         else:
             self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.blocked_inband():
-            return
-        if self.path != SYS + "/Actions/ComputerSystem.Reset":
-            self.send_json(404, {"error": "not found"})
-            return
-        self.read_json()
-        STATE["bios"].update(STATE["pending"])
-        STATE["pending"] = {}
-        boot = STATE["boot"]
-        if boot["BootSourceOverrideEnabled"] in ("Once", "Continuous"):
-            chosen = first_option_for(boot["BootSourceOverrideTarget"]) or boot["BootOrder"][0]
-            if boot["BootSourceOverrideEnabled"] == "Once":
-                boot["BootSourceOverrideEnabled"] = "Disabled"
-                boot["BootSourceOverrideTarget"] = "None"
+        if self.path == SYS + "/Actions/ComputerSystem.Reset":
+            self.read_json()
+            reset()
+            self.send_response(204)
+            self.end_headers()
         else:
-            chosen = boot["BootOrder"][0]
-        STATE["last_boot"] = chosen
-        self.send_json(200, {"BootedFrom": chosen,
-                             "DisplayName": BOOT_OPTIONS[chosen]["DisplayName"]})
+            self.send_json(404, {"error": "not found"})
+
+
+class Server(ThreadingHTTPServer):
+    def server_bind(self):
+        # Skip HTTPServer's reverse-DNS lookup of the bind address,
+        # which can hang for seconds when no resolver is reachable.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 if __name__ == "__main__":
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
-    print(f"mock BMC on http://{host}:{port}{SYS}", flush=True)
-    HTTPServer((host, port), Handler).serve_forever()
+    print(f"mock BMC on http://{host}:8000{SYS}", flush=True)
+    Server((host, 8000), Handler).serve_forever()
 ```
 
-**Step 2: Start it.**
+`Oem.Lab.LastBootSource` is a field invented for this mock. It shows which device the pretend reboot used.
 
-In terminal 1:
+**Step 2: Start it and wait until it answers.**
 
 ```bash
-python3 mockbmc.py
-# mock BMC on http://127.0.0.1:8000/redfish/v1/Systems/1
+python3 mock_bmc.py 127.0.0.1 2>/tmp/mock_bmc.log &
+MOCK=$!
+SYS=http://127.0.0.1:8000/redfish/v1/Systems/1
+for i in $(seq 1 20); do curl -sf $SYS >/dev/null && break; sleep 0.5; done
 ```
+`MOCK=$!` saves the process ID so you can stop exactly this process later.
 
-In terminal 2, set a shortcut:
+**Step 3: Read current values and find the settings object.**
 
 ```bash
-B=http://127.0.0.1:8000/redfish/v1/Systems/1
+curl -s $SYS/Bios
 ```
-
-**Step 3: Read the current settings.**
-
-```bash
-curl -s $B/Bios
-```
-
-You get `"SriovGlobalEnable": "Disabled"` in `Attributes`, plus `@Redfish.Settings.SettingsObject` pointing to `.../Bios/Settings`. That link tells you where to write changes.
+You see `"SriovGlobalEnable": "Disabled"` and `@Redfish.Settings.SettingsObject.@odata.id` pointing at `/redfish/v1/Systems/1/Bios/Settings`. On a real BMC, take this URL from the response rather than hard-coding it, because vendors use different paths.
 
 **Step 4: Stage the change.**
 
 ```bash
 curl -s -X PATCH -H 'Content-Type: application/json' \
-  -d '{"Attributes": {"SriovGlobalEnable": "Enabled"}}' \
-  $B/Bios/Settings
+  -d '{"Attributes": {"SriovGlobalEnable": "Enabled"}}' $SYS/Bios/Settings
+curl -s $SYS/Bios | grep Sriov      # still "Disabled"
+curl -s $SYS/Bios/Settings          # the pending change is here
 ```
+The write succeeded, but the live value has not changed.
 
-The response lists the pending attributes.
-
-**Step 5: Observe that it is pending, not applied.**
+**Step 5: Reboot and verify.**
 
 ```bash
-curl -s $B/Bios | grep Sriov           # still "Disabled"
-curl -s $B/Bios/Settings | grep Sriov  # "Enabled" (pending)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' \
+  -d '{"ResetType": "ForceRestart"}' $SYS/Actions/ComputerSystem.Reset   # 204
+curl -s $SYS/Bios | grep Sriov      # now "Enabled"
+curl -s $SYS/Bios/Settings          # pending is empty again
 ```
-
-**Step 6: Reboot and confirm.**
-
-```bash
-curl -s -X POST -H 'Content-Type: application/json' \
-  -d '{"ResetType": "ForceRestart"}' $B/Actions/ComputerSystem.Reset
-curl -s $B/Bios | grep Sriov           # now "Enabled"
-curl -s $B/Bios/Settings               # Attributes is empty again
-```
+Reading the value back after the reboot is the step that proves the change took effect. Keep the mock running for the two problems below, then stop it with `kill $MOCK`. Lesson 3 starts a fresh copy.
 
 ### Your turn: finish it
 
-With the mock BMC running, turn SR-IOV back off and apply the change. Fill in the two blanks.
+With the mock running, fill in the blanks so the command stages `BootMode` = `Uefi` as a pending change (and does not touch the live resource).
 
 ```text
-B=http://127.0.0.1:8000/redfish/v1/Systems/1
-curl -s -X PATCH -H 'Content-Type: application/json' \
-  -d '{"Attributes": {"SriovGlobalEnable": "Disabled"}}' \
-  $B/Bios/___
-curl -s -X POST -H 'Content-Type: application/json' \
-  -d '{"ResetType": "ForceRestart"}' \
-  $B/Actions/___
+curl -s -X ___ -H 'Content-Type: application/json' \
+  -d '{"Attributes": {"BootMode": "Uefi"}}' \
+  http://127.0.0.1:8000/redfish/v1/Systems/1/___
 ```
 
 <details>
 <summary>Answer</summary>
 
-The first blank is `Settings`, because changes go to the settings object `/Bios/Settings`, not to `/Bios`. The second blank is `ComputerSystem.Reset`, the Redfish reset action that reboots the system and applies pending settings. Afterwards, `curl -s $B/Bios | grep Sriov` shows `"Disabled"`.
+The method is `PATCH` and the path is `Bios/Settings`:
+
+```bash
+curl -s -X PATCH -H 'Content-Type: application/json' \
+  -d '{"Attributes": {"BootMode": "Uefi"}}' \
+  http://127.0.0.1:8000/redfish/v1/Systems/1/Bios/Settings
+```
 
 </details>
 
 ### Your turn: on your own
 
-Write a small script in Python or bash that makes sure `SriovGlobalEnable` is `Enabled` on the mock BMC, idempotently. It should stage the change and reboot only when the current value is wrong. Run it twice. The second run must not stage anything or reboot.
+Write a small Python script (standard library only) that brings the mock BMC to a desired BIOS state `{"SriovGlobalEnable": "Enabled"}` **idempotently**. Running it twice must cause at most one reboot, and when the host already complies it must not stage anything or reboot.
 
 <details>
 <summary>Hint 1</summary>
 
-Read both `/Bios` (current) and `/Bios/Settings` (pending) before deciding what to do.
+Before writing anything, read both `/Bios` (current) and `/Bios/Settings` (pending).
 
 </details>
 
 <details>
 <summary>Hint 2</summary>
 
-If the current value already matches, print 'already compliant' and exit without any PATCH or POST.
+Only stage attributes where the current value differs from the desired value and the pending value doesn't already contain the desired value.
 
 </details>
 
 <details>
 <summary>Hint 3</summary>
 
-Python's `urllib.request.Request(url, data=..., method='PATCH', headers={'Content-Type': 'application/json'})` lets you send PATCH requests without installing anything. Stage the change only if it isn't already pending, then POST the reset.
+Reboot only if some current value still differs from the desired value. Use `urllib.request.Request(url, data=..., method=...)` for PATCH and POST.
 
 </details>
 
@@ -314,85 +284,86 @@ Python's `urllib.request.Request(url, data=..., method='PATCH', headers={'Conten
 ```python
 import json, urllib.request
 
-BASE = "http://127.0.0.1:8000/redfish/v1/Systems/1"
-WANT = {"SriovGlobalEnable": "Enabled"}
+SYS = "http://127.0.0.1:8000/redfish/v1/Systems/1"
+DESIRED = {"SriovGlobalEnable": "Enabled"}
 
 def call(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(BASE + path, data=data, method=method,
+    req = urllib.request.Request(SYS + path, data=data, method=method,
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req) as r:
-        return json.load(r)
+        raw = r.read()
+        return json.loads(raw) if raw else None
 
 current = call("GET", "/Bios")["Attributes"]
-todo = {k: v for k, v in WANT.items() if current.get(k) != v}
-if not todo:
-    print("already compliant")
+pending = call("GET", "/Bios/Settings")["Attributes"]
+to_stage = {k: v for k, v in DESIRED.items()
+            if current.get(k) != v and pending.get(k) != v}
+if to_stage:
+    call("PATCH", "/Bios/Settings", {"Attributes": to_stage})
+if any(current.get(k) != v for k, v in DESIRED.items()):
+    call("POST", "/Actions/ComputerSystem.Reset", {"ResetType": "ForceRestart"})
+    print("staged and rebooted")
 else:
-    pending = call("GET", "/Bios/Settings")["Attributes"]
-    if any(pending.get(k) != v for k, v in todo.items()):
-        call("PATCH", "/Bios/Settings", {"Attributes": todo})
-    print(call("POST", "/Actions/ComputerSystem.Reset", {"ResetType": "ForceRestart"}))
+    print("already compliant")
 ```
-The first run stages the change and reboots. The second run prints `already compliant`. Comparing current, pending and desired values is what makes the step safe to repeat.
+On a fresh mock, the first run prints `staged and rebooted` and the second prints `already compliant`. (If you already applied the change in the worked example, both runs print `already compliant`; restart the mock to see the first case.) A real controller would also re-read `/Bios` after the reboot and record the result, rather than assuming the change worked.
 
 </details>
 
 ### Explain it
 
-In your own words: Why does Redfish keep current BIOS values (`/Bios`) separate from pending ones (`/Bios/Settings`) instead of letting you PATCH `/Bios` directly? What would a controller lose if the two were merged?
+In your own words: Why does Redfish separate pending settings from current settings instead of writing straight into the live BIOS resource? What would a controller get wrong if it treated a successful PATCH as "done"?
 
 ### Check
 
-**1. After `PATCH /Bios/Settings` returns 200, where does the new value show up first?**
+**1. You PATCH `{"Attributes": {"SriovGlobalEnable": "Enabled"}}` to `/Bios/Settings` and get HTTP 200. Before any reboot, what does `GET /Bios` show for that attribute?**
 
-A. In /Bios Attributes, immediately
-B. In /Bios/Settings Attributes, until the next reboot applies it
-C. Only in the BMC's event log
-D. Nowhere: the PATCH is only remembered if you rebooted beforehand
-
-<details>
-<summary>Answer</summary>
-
-**B.** In /Bios/Settings Attributes, until the next reboot applies it
-
-The settings object holds pending values, and the firmware applies them during the next POST. Seeing the change in /Bios immediately is the most common wrong assumption; it leads people to think a PATCH failed. No reboot is needed before the PATCH.
-
-</details>
-
-**2. Your script sets `SriovGlobalEnable` on one vendor's servers but gets 'unknown attribute' on another vendor's. What is the most likely reason?**
-
-A. Redfish forbids SR-IOV changes on some servers
-B. BIOS attribute names are vendor- and platform-specific and are listed in each BMC's attribute registry
-C. SR-IOV only exists on DPUs
-D. The BMC hides attributes until lockdown is enabled
+A. Enabled, because the PATCH succeeded
+B. Disabled, the old value, until a reboot applies the pending change
+C. An error, because the BIOS is locked until reboot
+D. Both values in a list
 
 <details>
 <summary>Answer</summary>
 
-**B.** BIOS attribute names are vendor- and platform-specific and are listed in each BMC's attribute registry
+**B.** Disabled, the old value, until a reboot applies the pending change
 
-Redfish standardises where attributes live, not what they are called. Look up the platform's attribute registry. SR-IOV is a general PCIe feature, not something specific to DPUs, and lockdown does not hide attributes.
+The 200 only means the pending object accepted the change. Firmware applies pending settings during the next boot, so the live resource shows the old value until then. Locking (next lesson) is a separate mechanism.
 
 </details>
 
-**3. Which firmware-configuration operation appears in NICo's BMC Redfish requirements table?**
+**2. On an unfamiliar vendor's BMC, how should code find the URL where pending BIOS changes go?**
 
-A. UEFI Secure Boot toggle (enable/disable Secure Boot)
-B. Hyper-threading toggle
-C. Memory overclocking profiles
-D. Fan curve configuration
+A. Always use /redfish/v1/Systems/1/Bios/Settings
+B. Read @Redfish.Settings.SettingsObject.@odata.id from the Bios resource
+C. Derive it from the UEFI device path of the boot disk
+D. Look it up in the DMI platform identity
 
 <details>
 <summary>Answer</summary>
 
-**A.** UEFI Secure Boot toggle (enable/disable Secure Boot)
+**B.** Read @Redfish.Settings.SettingsObject.@odata.id from the Bios resource
 
-The requirements table lists power control, boot order configuration, the UEFI Secure Boot toggle, firmware inventory and update, Serial-over-LAN and IPv6. The other options are real BIOS settings on many servers, but the NICo docs don't list them as requirements.
+Paths differ between vendors. The Bios resource tells you where its settings object lives. Device paths and DMI identify hardware; they do not locate Redfish resources.
 
 </details>
 
-**Sources:** [getting-started/prerequisites/bmc-oob-setup.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/prerequisites/bmc-oob-setup.md), [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md)
+**3. True or false: BIOS attribute names such as `SriovGlobalEnable` are fixed by the Redfish standard and are the same on every vendor's BMC.**
+
+A. True
+B. False
+
+<details>
+<summary>Answer</summary>
+
+**B.** False
+
+Redfish standardises the container (the `Attributes` object, the settings object, the registry). The attribute names and allowed values come from each vendor's firmware, so fleet tooling needs per-vendor mappings.
+
+</details>
+
+**Sources:** [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md), [getting-started/prerequisites/bmc-oob-setup.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/prerequisites/bmc-oob-setup.md)
 
 <a id="uefi-lockdown"></a>
 ## 2. UEFI lockdown
@@ -401,186 +372,191 @@ The requirements table lists power control, boot order configuration, the UEFI S
 
 ### Before you read
 
-- A tenant has root access and a serial console on a bare-metal host, but not NICo's BMC password. Name two ways they might still try to change firmware settings.
-- Why would NICo ever need to turn lockdown off again?
+- A tenant has root on a bare-metal server but no access to the BMC network. List two ways they might still try to change its firmware settings.
+- Why not let tenants change BIOS settings and simply reset them when the host is released?
 
 <details>
 <summary>Answers</summary>
 
-- **A tenant has root access and a serial console on a bare-metal host, but not NICo's BMC password. Name two ways they might still try to change firmware settings.** (1) Reboot and enter the UEFI setup menu from the console. A UEFI setup password blocks this. (2) From the running OS, talk to the host's own BMC over an internal channel such as IPMI over KCS or the Redfish Host Interface (a virtual USB NIC), or use vendor tools that write firmware settings. Lockdown and disabling in-band access block these.
-- **Why would NICo ever need to turn lockdown off again?** Between tenants NICo has to change things itself: apply firmware updates, re-apply the firmware baseline, sanitize the machine, and adjust settings. Lockdown is enabled for the tenancy and lifted while the host is back in NICo's hands.
+- **A tenant has root on a bare-metal server but no access to the BMC network. List two ways they might still try to change its firmware settings.** (1) Reboot and open the firmware setup menu through the console. (2) From the running OS, use an in-band path to the BMC, such as IPMI over the local driver (`/dev/ipmi0`), a Redfish Host Interface (a USB network link from host to BMC) or vendor tools, to change BIOS or BMC settings. Writing UEFI variables from the OS is a related path.
+- **Why not let tenants change BIOS settings and simply reset them when the host is released?** Some changes persist or are hard to detect. A tampered firmware configuration could affect the next tenant or undermine the measured-boot trust that NICo re-establishes. Prevention is stronger than cleaning up afterwards.
 
 </details>
 
 ### Explanation
 
-NICo treats every host as untrustworthy. A tenant gets full root, and possibly console access, on real hardware. If they could change firmware configuration, they could, for example, disable Secure Boot (Chapter 5), reorder boot devices, or leave settings behind that affect the next tenant.
+NICo treats every host as untrustworthy by default. Once a tenant has root on a machine, the main firmware risk is that they change its configuration: disabling security features, changing boot behaviour, or leaving something behind for the next tenant. **UEFI lockdown** is how NICo prevents this. It is not one switch. Several controls each close a different path:
 
-**UEFI lockdown** closes this gap. While a tenant has the host, NICo locks UEFI/BIOS settings so they cannot be changed. NICo's capabilities list this as "UEFI lockdown during active use, which prevents unauthorized BIOS changes while a tenant has the host". How lockdown works is vendor-specific. It is usually a BMC or firmware feature exposed through OEM Redfish extensions (Chapter 6). While it is on, configuration writes are refused until it is switched off again from the management side.
+1. **Lock the settings.** Many BMCs offer a lockdown mode that freezes BIOS/BMC configuration so it cannot be changed. NICo enables UEFI lockdown *during active use*, which prevents unauthorized BIOS changes while a tenant has the host. Site Explorer records each host's lockdown mode along with its boot order.
+2. **Password-protect the setup menu.** NICo manages **per-device UEFI passwords**. Before ingestion, operators set site-wide UEFI defaults for hosts and DPUs with `nico-admin-cli` (for example `credential add-uefi --kind=host` and `--kind=dpu`), and Site Explorer refuses to run until they exist. A tenant watching the serial console during boot therefore cannot open setup without the password.
+3. **Remove the in-band back door.** A host OS can often talk to its own BMC without using the network. NICo disables in-band BMC access from within the host, so management is out-of-band only, through the OOB network that NICo controls.
 
-Lockdown alone is not enough, because of **in-band access**. *In-band* means the host OS talking to its own BMC over an internal path: IPMI over the KCS interface, or the Redfish Host Interface, which appears to the OS as a USB network adapter. If that path is open, root on the host can send BMC commands without ever touching the OOB network. NICo therefore **disables in-band host-to-BMC access**, so management happens only out-of-band, from NICo, over the OOB network.
+Lockdown is different from **Secure Boot** (ch. 5). Secure Boot checks that boot code is signed. Lockdown stops configuration from changing. You need both, because a tenant who could change settings might simply turn Secure Boot off.
 
-Supporting layers:
+Lockdown also has a lifecycle. The docs say two things: NICo enables lockdown during active use, and it schedules UEFI and BMC firmware updates on healthy, unoccupied hosts. They do not spell out the exact sequence. A reasonable model of how the pieces fit, and **not** a documented NICo workflow, is: while no tenant holds the host, unlock, make the change, re-lock before the host is assigned again, and let measured-boot attestation check that the host is in the expected state. What the docs do state is that NICo never relies on in-band host reporting for security decisions, so any such checks happen out-of-band.
 
-- **Per-device UEFI passwords.** NICo sets a site-managed UEFI password on each host and DPU. Site Explorer will not start ingesting until those credentials are configured.
-- **Observation.** Site Explorer records each BMC's lockdown mode, so drift is visible.
-- **Attestation.** Measured Boot and TPM checks detect changes that slipped past the other layers.
+**Analogy.** A hotel room: the guest has the key and full use of the room, but the thermostat's service panel is locked, the maintenance phone line in the wall is disconnected, and only staff with a master key can reconfigure anything between guests. The analogy breaks down in one way: hotel staff walk in physically, while NICo does its management remotely over the OOB network, and it checks hosts with cryptographic measurements instead of a visual inspection.
 
-The lifecycle is: apply the firmware baseline while unlocked → enable lockdown → tenant uses the host → NICo disables lockdown → sanitize and re-baseline → lock again for the next tenant.
+### Worked example: Audit the in-band firmware paths on a Linux machine
 
-**Analogy.** In a hotel the thermostat and fuse box are behind a panel only staff can open. Guests use the room but can't rewire it, and housekeeping opens the panel between stays. The analogy breaks down because a hotel panel is a single physical lock. Firmware lockdown depends on vendor implementation quality, and a guest who could phone the front desk from inside the room (in-band access) might get around the panel. That's why NICo also closes the in-band path and verifies with attestation.
-
-### Worked example: Lock a mock BMC and watch tenant attempts fail
-
-**Step 1: Start a fresh mock BMC.**
-
-Restart `mockbmc.py` from Lesson 1 so its state is clean:
+**Step 1: Check whether the machine boots with UEFI.**
 
 ```bash
-python3 mockbmc.py
+[ -d /sys/firmware/efi ] && echo UEFI || echo "legacy BIOS (or not Linux)"
 ```
+On UEFI systems, the OS can see firmware variables. That is one way into firmware state.
 
-In another terminal: `B=http://127.0.0.1:8000/redfish/v1/Systems/1`. In this mock, the header `X-Mock-Inband: 1` stands for "this request comes from the host OS over an internal channel". It is a made-up convention for the lab, not real Redfish.
-
-**Step 2: Show in-band access works while unlocked.**
+**Step 2: Look at the UEFI variables the OS can see.**
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Mock-Inband: 1' $B
-# 200
+ls /sys/firmware/efi/efivars 2>/dev/null | head
+mokutil --sb-state 2>/dev/null || echo "mokutil not installed"
 ```
+You see entries like `BootOrder-8be4df61-...`. The OS can read, and with root sometimes write, these variables. Secure Boot and firmware lockdown limit what such writes can achieve.
 
-**Step 3: Controller enables lockdown out-of-band.**
-
-The mock exposes lockdown as an OEM field, which is how real vendors tend to do it:
+**Step 3: Look for an in-band IPMI channel to a BMC.**
 
 ```bash
-curl -s -X PATCH -H 'Content-Type: application/json' \
-  -d '{"Oem": {"Mock": {"Lockdown": true}}}' $B
+ls -l /dev/ipmi* 2>/dev/null || echo "no IPMI device"
+lsmod 2>/dev/null | grep -i ipmi || true
 ```
+A laptop has none. On a server with a BMC, `/dev/ipmi0` lets root run tools like `ipmitool` against the local BMC without any network access.
 
-**Step 4: Tenant attempts fail.**
+**Step 4: Look for a Redfish Host Interface.**
 
 ```bash
-# in-band from the host: refused entirely
-curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Mock-Inband: 1' $B           # 403
-# BIOS change, even without the in-band header: refused while locked
-curl -s -X PATCH -H 'Content-Type: application/json' \
-  -d '{"Attributes": {"SecureBoot": "Disabled"}}' $B/Bios/Settings           # BIOS settings locked
+sudo dmidecode -t 42 2>/dev/null || echo "dmidecode not available"
 ```
+SMBIOS type 42 ("Management Controller Host Interface") advertises a host-to-BMC link, typically a USB network interface that carries Redfish. dmidecode always prints a header first: its version and a line like `SMBIOS 3.3.0 present.` If nothing follows that header, meaning no `Handle ...` entry titled `Management Controller Host Interface`, the machine has no Host Interface.
 
-**Step 5: Release: unlock, then changes work again.**
+**Step 5: Map each path to its control.**
 
-```bash
-curl -s -X PATCH -H 'Content-Type: application/json' \
-  -d '{"Oem": {"Mock": {"Lockdown": false}}}' $B
-curl -s -X PATCH -H 'Content-Type: application/json' \
-  -d '{"Attributes": {"SriovGlobalEnable": "Enabled"}}' $B/Bios/Settings      # accepted
-```
+| Path you found | Control that closes it |
+|---|---|
+| Firmware setup menu via console | Per-device UEFI password |
+| `/dev/ipmi0`, Redfish Host Interface | Disable in-band host-to-BMC access |
+| Changing BIOS settings at all while assigned | UEFI lockdown during active use |
+| Booting unsigned code | Secure Boot (ch. 5) |
+| Anything that slipped through | Out-of-band checks and measured-boot attestation |
 
 ### Your turn: finish it
 
-Fill in the blanks so the host is locked before the tenant gets it, and so the last command proves in-band access is refused (it should print 403).
+This toy policy function decides whether a BIOS write is allowed. Fill in the blanks so that in-band writes are never allowed, and out-of-band writes are only allowed when no tenant has the host.
 
 ```text
-B=http://127.0.0.1:8000/redfish/v1/Systems/1
-# 1. finish firmware changes while unlocked
-curl -s -X PATCH -H 'Content-Type: application/json' -d '{"Attributes":{"SriovGlobalEnable":"Enabled"}}' $B/Bios/Settings
-curl -s -X POST -H 'Content-Type: application/json' -d '{"ResetType":"ForceRestart"}' $B/Actions/ComputerSystem.Reset
-# 2. lock before the tenant gets the host
-curl -s -X PATCH -H 'Content-Type: application/json' -d '{"Oem":{"Mock":{"Lockdown":___}}}' $B
-# 3. prove in-band access is refused (expect 403)
-curl -s -o /dev/null -w '%{http_code}\n' -H '___: 1' $B
+def bios_write_allowed(source, host_assigned):
+    """source is 'oob' (site controller over the OOB network) or 'inband' (from the host OS)."""
+    if source == "inband":
+        return ___
+    return not ___
+
+
+assert bios_write_allowed("inband", False) is False
+assert bios_write_allowed("oob", True) is False
+assert bios_write_allowed("oob", False) is True
 ```
 
 <details>
 <summary>Answer</summary>
 
-The first blank is `true`, a JSON boolean without quotes. The second blank is `X-Mock-Inband`, the lab's stand-in for a request from the host OS. The order matters: all firmware changes happen before lockdown, because the mock refuses BIOS writes once it is locked.
+```python
+def bios_write_allowed(source, host_assigned):
+    """source is 'oob' (site controller over the OOB network) or 'inband' (from the host OS)."""
+    if source == "inband":
+        return False
+    return not host_assigned
+```
+In-band writes are refused (that path is disabled), and out-of-band writes wait until the host is unassigned (lockdown during active use). This is a teaching model, not NICo code.
 
 </details>
 
 ### Your turn: on your own
 
-Put these actions in the right order for one tenant's stay and the handover to the next tenant. Say which steps happen with lockdown ON. Actions: (a) tenant runs workload, (b) disable lockdown, (c) enable lockdown, (d) apply BIOS/firmware baseline and reboot, (e) sanitize: erase drives and clean up, (f) hand the host to the next tenant. Some actions appear more than once.
+A BIOS setting on 200 hosts needs fixing. 150 of them are currently assigned to tenants. Using the model from this lesson (it is built from documented pieces, not a documented NICo procedure), describe how the fix could be rolled out so that lockdown is respected and every host ends up both fixed and locked. Name each step and say what is checked out-of-band.
 
 <details>
 <summary>Hint 1</summary>
 
-Lockdown has to be on before the tenant ever touches the host.
+Lockdown stays on while a tenant has the host, so ask when each host becomes eligible.
 
 </details>
 
 <details>
 <summary>Hint 2</summary>
 
-NICo can't re-baseline or change settings while the host is locked, so lockdown comes off before any NICo maintenance.
+The docs say NICo schedules firmware work on healthy, unoccupied hosts. Think about what happens between release and the next assignment.
 
 </details>
 
 <details>
 <summary>Hint 3</summary>
 
-The pattern repeats: baseline → lock → use → unlock → clean → baseline → lock → hand over.
+One reasonable order is: unlock → stage → reboot → verify → re-lock → attest, with every check going through the BMC rather than the host OS.
 
 </details>
 
 <details>
 <summary>Answer</summary>
 
-d → c → (lockdown ON) a → b → e → d → c → (lockdown ON) f. Lockdown is on whenever a tenant has the host, and off only while NICo is working on it between tenants.
+Fix the 50 unassigned hosts first. Leave the 150 assigned hosts alone until each is released, because lockdown stays on during active use and must not be bypassed. For each eligible (healthy, unoccupied) host: (1) unlock out-of-band; (2) stage the BIOS change in the Redfish settings object; (3) reboot so it applies; (4) read the live Bios resource back over Redfish to confirm the value; (5) re-enable lockdown and confirm the lockdown mode; (6) run measured-boot attestation before the host can be assigned again. Every check goes through the BMC, never through software inside the host. Assigned hosts receive the fix after release, before their next assignment. This sequence is a reasonable model; the docs confirm the ingredients (lockdown during active use, firmware work on unoccupied hosts, out-of-band monitoring, measured-boot attestation) but not this exact order.
 
 </details>
 
 ### Explain it
 
-In your own words: Explain in your own words why UEFI lockdown on its own doesn't protect firmware if a tenant can still reach the BMC from inside the host. What does disabling in-band access add?
+In your own words: Explain in your own words why NICo needs both lockdown and disabled in-band BMC access, and why either one alone would leave a gap.
 
 ### Check
 
-**1. What does 'in-band host-to-BMC access' mean?**
+**1. A tenant runs `ipmitool` on the host OS to change a BMC setting through `/dev/ipmi0`. Which control is aimed at exactly this path?**
 
-A. The tenant OS talking to its own BMC over an internal channel such as IPMI KCS or the Redfish Host Interface
-B. NICo talking to the BMC over the OOB network
-C. The DPU agent polling NICo Core for configuration
-D. A switch relaying DHCP from the BMC
-
-<details>
-<summary>Answer</summary>
-
-**A.** The tenant OS talking to its own BMC over an internal channel such as IPMI KCS or the Redfish Host Interface
-
-In-band means the path goes through the host itself. NICo's own Redfish traffic over the OOB network is the out-of-band path that NICo keeps. DPU agent polling and DHCP relay are unrelated.
-
-</details>
-
-**2. When does NICo keep UEFI lockdown enabled?**
-
-A. Only during discovery
-B. While a tenant has the host
-C. Permanently; it is never disabled
-D. Only while firmware updates are running
+A. Secure Boot
+B. Disabling in-band host-to-BMC access
+C. The per-device UEFI password
+D. DHCP relay on the OOB switch
 
 <details>
 <summary>Answer</summary>
 
-**B.** While a tenant has the host
+**B.** Disabling in-band host-to-BMC access
 
-Lockdown protects the host during active use. It can't be permanent, because NICo has to change settings and update firmware between tenants, and firmware updates need the host unlocked.
+`/dev/ipmi0` is an in-band channel from the host to its BMC. Secure Boot checks boot-code signatures, and the UEFI password protects the setup menu. Neither covers an OS-level BMC channel. DHCP relay has nothing to do with it.
 
 </details>
 
-**3. Besides lockdown and disabling in-band access, name one other NICo measure that stops a tenant from changing or hiding firmware changes.**
+**2. "Secure Boot is enabled, so UEFI lockdown adds nothing." Why is this wrong?**
+
+A. It is correct; Secure Boot already blocks all BIOS changes
+B. Secure Boot verifies signed boot code; lockdown stops configuration changes, including someone turning Secure Boot off
+C. Lockdown is just a different name for Secure Boot
+D. Secure Boot only works on DPUs
 
 <details>
 <summary>Answer</summary>
 
-Any one of: per-device UEFI passwords managed by NICo; Site Explorer recording lockdown mode; Measured Boot/TPM attestation, which detects changes.
+**B.** Secure Boot verifies signed boot code; lockdown stops configuration changes, including someone turning Secure Boot off
 
-UEFI passwords block the setup menu. Site Explorer's records make drift visible. Attestation catches anything the other layers missed.
+They protect different things. Without lockdown, the Secure Boot toggle itself is a setting a tenant could change.
 
 </details>
 
-**Sources:** [overview/capabilities.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/capabilities.md), [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md), [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [getting-started/prerequisites/bmc-oob-setup.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/prerequisites/bmc-oob-setup.md)
+**3. When does NICo keep UEFI lockdown enabled?**
+
+A. Only during initial discovery
+B. While a tenant has the host (active use)
+C. Never; it relies on attestation instead
+D. Only while firmware updates run
+
+<details>
+<summary>Answer</summary>
+
+**B.** While a tenant has the host (active use)
+
+The docs describe UEFI lockdown during active use, which prevents unauthorized BIOS changes while a tenant has the host. Firmware updates are scheduled on unoccupied hosts, and attestation is an additional check, not a replacement.
+
+</details>
+
+**Sources:** [overview/capabilities.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/capabilities.md), [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md), [getting-started/prerequisites/bmc-oob-setup.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/prerequisites/bmc-oob-setup.md), [getting-started/quick-start.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/quick-start.md), [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md)
 
 <a id="boot-order-and-boot-source-override"></a>
 ## 3. Boot order and boot source override
@@ -589,408 +565,420 @@ UEFI passwords block the setup menu. Site Explorer's records make drift visible.
 
 ### Before you read
 
-- A server's boot order is [local disk, network], and the disk holds a working OS. How could you make it boot from the network exactly once without editing the boot order?
-- After a 'Once' override has been used, what happens on the following reboot?
+- A server's boot order is Disk, then Network. You want it to boot from the network exactly once to reinstall, then go back to normal on its own. What do you change?
+- Why might a control plane want every managed host to try the network before the local disk on every boot?
 
 <details>
 <summary>Answers</summary>
 
-- **A server's boot order is [local disk, network], and the disk holds a working OS. How could you make it boot from the network exactly once without editing the boot order?** Set a one-time boot source override through Redfish: `BootSourceOverrideEnabled: Once` and `BootSourceOverrideTarget: Pxe`. The next boot goes to the network. After that the override clears and the normal order applies again.
-- **After a 'Once' override has been used, what happens on the following reboot?** The host falls back to its normal boot order. The override resets to Disabled/None.
+- **A server's boot order is Disk, then Network. You want it to boot from the network exactly once to reinstall, then go back to normal on its own. What do you change?** Leave the boot order alone and set a **one-time boot override** to the network (in Redfish: `BootSourceOverrideEnabled: Once`, `BootSourceOverrideTarget: Pxe`), then reboot. The next boot uses the override and later boots follow the normal order.
+- **Why might a control plane want every managed host to try the network before the local disk on every boot?** The network boot server then decides on each boot what the host should run: an installer, a discovery agent, or simply "continue to local disk". Control stays on the server side and does not depend on whatever happens to be on the disk.
 
 </details>
 
 ### Explanation
 
-In Chapter 5 you saw that UEFI keeps **boot options** (`Boot0001`, `Boot0002`, …), each with a device path, plus a **BootOrder** list. On every boot the firmware tries the options in order until one works.
+UEFI's boot manager (ch. 5) keeps a list of **boot options**, the `Boot0000`, `Boot0001`, … variables. Each one names a device path, such as a disk partition or a network interface's PXE/HTTP boot. A separate `BootOrder` variable lists which options to try, in order. UEFI also has `BootNext`, which is used for one boot and then cleared.
 
-Redfish exposes this under `/redfish/v1/Systems/<id>` in the `Boot` object:
+Redfish exposes this on the ComputerSystem resource under `Boot`:
 
-- `BootOrder`: an array of references such as `"Boot0001"`. Each has a matching resource under `BootOptions/` with a `DisplayName` and a `UefiDevicePath`. Changing it is **persistent**. On some BMCs it is staged like a BIOS setting and applied at the next reboot.
-- `BootSourceOverrideTarget`: a device *class* to boot instead, for example `Pxe`, `Hdd`, `Cd`, `Usb`, `UefiHttp` or `BiosSetup`. `None` means no override.
-- `BootSourceOverrideEnabled`: `Disabled`, `Once` (used on the next boot, then cleared) or `Continuous` (used on every boot until changed).
+- `BootOrder`: the **persistent** order, as references like `["Boot0001", "Boot0002"]`. Changing it affects every future boot.
+- `BootSourceOverrideTarget`: a device *class* to boot instead, such as `Pxe`, `Hdd`, `Cd`, `Usb`, `BiosSetup` or `None`. Many BMCs list the allowed values in `BootSourceOverrideTarget@Redfish.AllowableValues`.
+- `BootSourceOverrideEnabled`: `Disabled`, `Once` (the next boot only; the BMC sets it back to `Disabled` afterwards) or `Continuous` (every boot until you change it).
+- `BootSourceOverrideMode`: `UEFI` or `Legacy` on BMCs that support it.
 
-The override sits on top of the boot order without changing it. If the target isn't available, for example network boot is disabled on the NIC, many firmwares fall back to the normal order without reporting anything. So check where the host actually booted.
+You set these with `PATCH /redfish/v1/Systems/{id}` and a `{"Boot": {...}}` body. Nothing happens until the machine resets, so a controller usually sends the PATCH and then a reset action.
 
-**Why NICo cares:** NICo provisions machines by network-booting them (PXE/iPXE, covered in Chapter 12). Its BMC requirements include *boot order configuration*, described as "Set UEFI boot order (DPU first)": the DPU's network path comes first in the UEFI order. Managed hosts are configured to always boot from PXE. NICo's PXE Service then decides what the host gets, and if a local bootable device is found, the host boots it. A persistent network-first order means every boot, including one the tenant starts from inside the OS, passes through NICo instead of depending on someone remembering to set an override. Site Explorer records each host's boot order, and the Debug Web UI lets operators change boot orders.
+**Which one to use:** use an override for one-off actions like "reinstall now", and change the boot order when you want a permanent policy.
 
-**Analogy.** The boot order is like the saved route preferences in your GPS. A one-time override is "take the detour for this trip only", and Continuous is "always use the detour until I say stop". The analogy breaks down because a GPS tells you when a road is closed. Firmware whose override target doesn't exist often falls back to the normal route without telling you.
+In NICo: BMCs must support boot order configuration through Redfish, which NICo uses to set the UEFI boot order with the DPU first, so the host boots from the network through its DPU. Managed hosts are configured to always boot from PXE. NICo's PXE Service fetches the correct artifact for each host from NICo Core, and if a local bootable device is found the host boots it. Site Explorer records boot order, and operators can change boot orders from the debug web UI.
 
-### Worked example: PXE once, then back to disk
+**Analogy.** A GPS has a saved route preference ("avoid tolls"), which is the boot order, and a "detour for this trip only", which is a `Once` override. The analogy breaks down because you have to arm the detour before starting the car, and it is the BMC, not the driver, that clears it after one trip. Some firmware also reorders or ignores entries it cannot use.
 
-**Step 1: Inspect the current boot settings.**
+### Worked example: One-time PXE boot vs. continuous override on the mock BMC
 
-Start `mockbmc.py` from Lesson 1, then:
-
-```bash
-B=http://127.0.0.1:8000/redfish/v1/Systems/1
-curl -s $B | python3 -c 'import json,sys; print(json.load(sys.stdin)["Boot"])'
-# {'BootSourceOverrideEnabled': 'Disabled', 'BootSourceOverrideTarget': 'None', 'BootOrder': ['Boot0001', 'Boot0002', 'Boot0003']}
-```
-
-**Step 2: Decode the boot options.**
+**Step 1: Start a fresh copy of the mock from Lesson 1.**
 
 ```bash
-for o in Boot0001 Boot0002 Boot0003; do curl -s $B/BootOptions/$o | grep DisplayName; done
-# Boot0001 = local NVMe, Boot0002 = PXE IPv4, Boot0003 = UEFI HTTP
+pkill -f mock_bmc.py 2>/dev/null; sleep 0.5   # stop any copy left over from Lesson 1
+python3 mock_bmc.py 127.0.0.1 2>/tmp/mock_bmc.log &
+MOCK=$!
+SYS=http://127.0.0.1:8000/redfish/v1/Systems/1
+for i in $(seq 1 20); do curl -sf $SYS >/dev/null && break; sleep 0.5; done
+curl -s $SYS
 ```
+Stopping the old copy first matters: a second copy cannot bind port 8000, and its `Address already in use` error would only appear in `/tmp/mock_bmc.log`. `BootOrder` is `["Boot0001", "Boot0002"]` (Hdd, then Pxe) and the override is `Disabled`.
 
-So the persistent order is disk first.
-
-**Step 3: Set a one-time PXE override.**
+**Step 2: Arm a one-time PXE override.**
 
 ```bash
 curl -s -X PATCH -H 'Content-Type: application/json' \
-  -d '{"Boot": {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": "Pxe"}}' $B
+  -d '{"Boot": {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": "Pxe"}}' $SYS
 ```
 
-**Step 4: Reboot and check.**
+**Step 3: Reboot and see the override used up.**
 
 ```bash
-curl -s -X POST -H 'Content-Type: application/json' -d '{"ResetType":"ForceRestart"}' \
-  $B/Actions/ComputerSystem.Reset
-# "BootedFrom": "Boot0002"  (PXE)
-curl -s $B | grep Override
-# Enabled is back to "Disabled", Target to "None": the override was used up
+RESET='{"ResetType": "ForceRestart"}'
+curl -s -X POST -H 'Content-Type: application/json' -d "$RESET" $SYS/Actions/ComputerSystem.Reset
+curl -s $SYS | grep -E 'LastBootSource|OverrideEnabled'
 ```
+`LastBootSource` is `Pxe` and `BootSourceOverrideEnabled` has gone back to `Disabled`.
 
-**Step 5: Reboot again.**
+**Step 4: Reboot again: back to the normal order.**
 
 ```bash
-curl -s -X POST -H 'Content-Type: application/json' -d '{"ResetType":"ForceRestart"}' \
-  $B/Actions/ComputerSystem.Reset
-# "BootedFrom": "Boot0001"  (back to disk)
+curl -s -X POST -H 'Content-Type: application/json' -d "$RESET" $SYS/Actions/ComputerSystem.Reset
+curl -s $SYS | grep LastBootSource      # Hdd
 ```
+
+**Step 5: Compare with Continuous.**
+
+```bash
+curl -s -X PATCH -H 'Content-Type: application/json' \
+  -d '{"Boot": {"BootSourceOverrideEnabled": "Continuous", "BootSourceOverrideTarget": "Pxe"}}' $SYS
+for n in 1 2; do curl -s -X POST -H 'Content-Type: application/json' -d "$RESET" $SYS/Actions/ComputerSystem.Reset; done
+curl -s $SYS | grep -E 'LastBootSource|OverrideEnabled'   # Pxe, Continuous
+```
+On a real Linux UEFI machine, `sudo efibootmgr` shows the in-band equivalents (`BootCurrent`, `BootOrder`), and `sudo efibootmgr -n 0002` sets a one-time `BootNext`. NICo uses the out-of-band Redfish route instead, because it does not trust the host OS. Keep the mock running for the problems below, then stop it with `kill $MOCK`.
 
 ### Your turn: finish it
 
-Fill in the body so the next boot (only) goes to the network.
+Make PXE the **permanent** first boot choice on the mock (Boot0002 is Pxe, Boot0001 is Hdd) by changing the boot order, not the override. Fill in the blank.
 
 ```text
 curl -s -X PATCH -H 'Content-Type: application/json' \
-  -d '{"Boot": {"BootSourceOverrideEnabled": "___", "BootSourceOverrideTarget": "___"}}' \
+  -d '{"Boot": {"BootOrder": [___]}}' \
   http://127.0.0.1:8000/redfish/v1/Systems/1
 ```
 
 <details>
 <summary>Answer</summary>
 
-The first blank is `Once`. The second blank is `Pxe`. `Continuous` would also give you PXE on the next boot, but it would keep doing so on every boot after that.
+`"Boot0002", "Boot0001"`, giving:
+
+```bash
+curl -s -X PATCH -H 'Content-Type: application/json' \
+  -d '{"Boot": {"BootOrder": ["Boot0002", "Boot0001"]}}' \
+  http://127.0.0.1:8000/redfish/v1/Systems/1
+```
+First set the override back to `Disabled` (for example, PATCH `{"Boot": {"BootSourceOverrideEnabled": "Disabled"}}`) if you left `Continuous` on. After any reset, `LastBootSource` is `Pxe`, and it stays that way.
 
 </details>
 
 ### Your turn: on your own
 
-Make the mock host boot from the network on every reboot without using any override, so the setup matches NICo's persistent network-first order. Prove it with two resets in a row.
+Write `netboot_once.sh`. It should arm a one-time PXE boot on the mock, reset the system, and then *verify*, exiting non-zero on failure, that the host booted from PXE and that the override was used up. The BMC URL should come from a `SYS` environment variable with a sensible default.
 
 <details>
 <summary>Hint 1</summary>
 
-A persistent change means editing `BootOrder`, not the override fields.
+Three HTTP calls: a PATCH on the system, a POST to the reset action, a GET to verify.
 
 </details>
 
 <details>
 <summary>Hint 2</summary>
 
-PATCH `/redfish/v1/Systems/1` with a `Boot` object that contains only a new `BootOrder` array.
+Use `curl -sf` so HTTP errors fail the script, and `set -e`.
 
 </details>
 
 <details>
 <summary>Hint 3</summary>
 
-Put `Boot0002` first: `{"Boot": {"BootOrder": ["Boot0002", "Boot0001", "Boot0003"]}}`.
+Parse the GET with `python3 -c` and `json.load(sys.stdin)`, then assert on `Oem.Lab.LastBootSource` and `Boot.BootSourceOverrideEnabled`.
 
 </details>
 
 <details>
 <summary>Answer</summary>
 
-```bash
-B=http://127.0.0.1:8000/redfish/v1/Systems/1
-curl -s -X PATCH -H 'Content-Type: application/json' \
-  -d '{"Boot": {"BootOrder": ["Boot0002", "Boot0001", "Boot0003"]}}' $B
-for i in 1 2; do
-  curl -s -X POST -H 'Content-Type: application/json' -d '{"ResetType":"ForceRestart"}' \
-    $B/Actions/ComputerSystem.Reset | grep BootedFrom
-done
-# both print "Boot0002"
+```sh
+#!/bin/sh
+set -e
+SYS=${SYS:-http://127.0.0.1:8000/redfish/v1/Systems/1}
+H='Content-Type: application/json'
+curl -sf -H "$H" -X PATCH \
+  -d '{"Boot":{"BootSourceOverrideEnabled":"Once","BootSourceOverrideTarget":"Pxe"}}' "$SYS" >/dev/null
+curl -sf -H "$H" -X POST -d '{"ResetType":"ForceRestart"}' \
+  "$SYS/Actions/ComputerSystem.Reset" >/dev/null
+curl -sf "$SYS" | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+assert s["Oem"]["Lab"]["LastBootSource"] == "Pxe", "did not boot from PXE"
+assert s["Boot"]["BootSourceOverrideEnabled"] == "Disabled", "override not consumed"
+print("one-time PXE boot OK")'
 ```
-On real hardware, some BMCs stage `BootOrder` changes until the next reboot. Read the order back after the first reset to confirm it took.
+On real hardware you would read the boot result from logs or from what the PXE server saw, not from a mock-only OEM field.
 
 </details>
 
 ### Explain it
 
-In your own words: Why would an operator want a persistent network-first boot order instead of setting a one-time PXE override before each provisioning step? Think about reboots NICo didn't start.
+In your own words: Why does NICo set hosts to try the network first on every boot, rather than arming a one-time PXE override each time it wants to reinstall? Which approach depends more on the host's disk contents?
 
 ### Check
 
-**1. You set `BootSourceOverrideEnabled: Once` and `BootSourceOverrideTarget: Pxe`, then the host reboots twice. What happens?**
+**1. You set `BootSourceOverrideEnabled: Once` with target `Pxe`, then reboot twice. Which devices do the two boots use?**
 
-A. Both boots use PXE
-B. The first boot uses PXE; the second follows the normal boot order
-C. The first boot follows the normal order; the second uses PXE
-D. Neither boot changes until BootOrder is edited too
-
-<details>
-<summary>Answer</summary>
-
-**B.** The first boot uses PXE; the second follows the normal boot order
-
-Once is used up by the next boot and then resets to Disabled. 'Both' describes Continuous. An override doesn't require editing BootOrder.
-
-</details>
-
-**2. What are entries like `Boot0001` in a Redfish `BootOrder`?**
-
-A. References to UEFI Boot#### load options, each with a device path
-B. DHCP option numbers for boot files
-C. MAC addresses of NICs
-D. Redfish session IDs
+A. Pxe, then Pxe
+B. Pxe, then whatever BootOrder says
+C. BootOrder both times, since Once needs a BIOS settings change
+D. Nothing changes until you also edit BootOrder
 
 <details>
 <summary>Answer</summary>
 
-**A.** References to UEFI Boot#### load options, each with a device path
+**B.** Pxe, then whatever BootOrder says
 
-They map directly to UEFI boot variables (Chapter 5). DHCP boot-file options are a separate mechanism used later in PXE.
+`Once` applies to the next boot only, and then the BMC sets it back to `Disabled`. `Continuous` would give Pxe both times. Overrides are separate from BIOS attributes and from BootOrder.
 
 </details>
 
-**3. Which Redfish capability does NICo require for boot devices, and what does it say?**
+**2. You PATCH a boot override but never reset the server. What has happened?**
+
+A. The server rebooted automatically into PXE
+B. Nothing visible yet; the override waits for the next boot
+C. The BootOrder was rewritten permanently
+D. The BMC rejected it because no reset was included
 
 <details>
 <summary>Answer</summary>
 
-Boot order configuration: "Set UEFI boot order (DPU first)".
+**B.** Nothing visible yet; the override waits for the next boot
 
-It is listed in the BMC Redfish requirements table. It is how managed hosts are set up to always boot from the network.
+Overrides, like pending BIOS settings, are acted on when the system boots. Making that happen is a separate reset action.
 
 </details>
 
-**Sources:** [getting-started/prerequisites/bmc-oob-setup.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/prerequisites/bmc-oob-setup.md), [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md)
+**3. Which in-band UEFI feature is closest to a Redfish `Once` override?**
+
+A. BootOrder
+B. BootNext
+C. Secure Boot db
+D. The DMI system UUID
+
+<details>
+<summary>Answer</summary>
+
+**B.** BootNext
+
+`BootNext` is used for one boot and then cleared, just like `Once`. `BootOrder` is persistent. The other two are unrelated to boot device choice.
+
+</details>
+
+**Sources:** [getting-started/prerequisites/bmc-oob-setup.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/prerequisites/bmc-oob-setup.md), [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md)
 
 <a id="cloud-init"></a>
 ## 4. cloud-init
 
 ### Before you read
 
-- You boot 50 machines from the same OS image. How does each one end up with its own hostname and SSH key without anyone logging in to it?
-- You edit the user-data and reboot a machine, but the new users and packages don't appear. Guess why.
+- Every customer gets the same OS image. How does each machine end up with its own hostname, users and SSH keys on its first boot?
+- If cloud-init's `runcmd` installs a package, does that command run again on every reboot?
 
 <details>
 <summary>Answers</summary>
 
-- **You boot 50 machines from the same OS image. How does each one end up with its own hostname and SSH key without anyone logging in to it?** A first-boot agent in the image (cloud-init) fetches per-machine data from a datasource (meta-data such as instance-id and hostname, plus user-data with instructions) and applies it.
-- **You edit the user-data and reboot a machine, but the new users and packages don't appear. Guess why.** cloud-init runs its per-instance steps once per instance-id. The instance-id didn't change, so it treated this as the same instance and skipped them.
+- **Every customer gets the same OS image. How does each machine end up with its own hostname, users and SSH keys on its first boot?** An agent inside the image, cloud-init, runs early in boot. It finds per-machine data (meta-data and user-data) from a *datasource*, such as a local seed disk or an HTTP endpoint, and applies it.
+- **If cloud-init's `runcmd` installs a package, does that command run again on every reboot?** No. `runcmd` runs once per instance (tracked by the instance-id). Commands that must run on every boot go in `bootcmd`.
 
 </details>
 
 ### Explanation
 
-**cloud-init** is the standard tool, across many Linux distributions, for configuring an OS on first boot. It ships inside the OS image. Early in boot it detects a **datasource**, which is where its configuration comes from: a cloud metadata service, a small disk or ISO, or an HTTP URL (the *NoCloud* datasource supports all three). It fetches:
+**cloud-init** is the standard tool, across many Linux distributions, for configuring an OS the first time it boots. The image is generic. What makes a machine unique is data handed to it at boot:
 
-- **meta-data**: facts about this instance, mainly `instance-id` and `local-hostname`.
-- **user-data**: what to do. The most common format is YAML that starts with the exact line `#cloud-config`. A plain shell script starting with `#!` also works.
-- Optionally **vendor-data** and **network-config**.
+- **meta-data**: facts about the instance, most importantly an `instance-id` (and often a hostname).
+- **user-data**: what the owner wants done. Usually it is a YAML file whose **first line must be `#cloud-config`**. It can also be a shell script starting with `#!`.
+- **vendor-data** (optional): defaults from the platform operator.
 
-Common `#cloud-config` keys are `users` (with `ssh_authorized_keys`), `packages`, `write_files` and `runcmd`. cloud-init runs in stages through boot (local, network, config, final) and logs to `/var/log/cloud-init.log` and `/var/log/cloud-init-output.log`. `cloud-init status --wait` blocks until it has finished.
+cloud-init gets this data from a **datasource**. **NoCloud** reads it from a local disk labelled `cidata` or from an HTTP URL given on the kernel command line (`ds=nocloud;s=http://server/path/`). Cloud providers use their own metadata services.
 
-**instance-id matters.** Per-instance modules run once for each instance-id. If you reboot with the same id, they are skipped. A new id makes cloud-init treat the machine as a new instance.
+The run is split into stages (local, network, config, final). Each module, such as `users`, `ntp`, `write_files`, `packages` or `runcmd`, has a frequency. Most run **once per instance**: cloud-init records the instance-id and skips them on later boots unless the id changes. `bootcmd` runs on every boot. Logs are in `/var/log/cloud-init.log` and `/var/log/cloud-init-output.log`, and `cloud-init status --wait` blocks until it finishes. `cloud-init schema --config-file FILE` validates a cloud-config before you rely on it.
 
-**In NICo:** the PXE Service serves boot artifacts, including iPXE scripts, **cloud-init user-data** and OS images, to managed hosts and DPUs over HTTP. It asks the API Service which artifact is correct for each host. cloud-init is used in two ways. DPUs get a NICo-provided cloud-init file that installs NICo components on top of the base DPU image. Tenants can supply their own cloud-init to configure the OS they install on the host. Because NICo supports any OS that iPXE can install, cloud-init is the common way to hand that OS its first-boot instructions.
+In NICo, the **PXE Service** serves boot artifacts to managed hosts and DPUs over HTTP: iPXE scripts, **cloud-init user-data** and OS images. It fetches the right artifact for each host from the API Service, so the user-data a host receives depends on what NICo knows about that host. NICo uses cloud-init in two ways. DPUs get a NICo-provided cloud-init file that installs NICo components on top of the base DPU image. Tenants can supply their own cloud-init configuration to set up the OS they chose for the host. NICo works with any OS installable through iPXE.
 
-One caution: user-data often contains secrets or keys, and anything that can reach the datasource can read it. Treat it as sensitive.
+**Analogy.** cloud-init is like a new employee's onboarding packet. Everyone gets the same laptop image, and the packet tells this particular laptop whose it is and what to install. Like a real packet, it is mostly read once: re-reading it on every login would be wasteful or harmful. The analogy breaks down because cloud-init remembers "already onboarded" through the instance-id. Give the same machine a new instance-id and it onboards from scratch, which no employee would do.
 
-**Analogy.** cloud-init is like the setup card taped inside a flat-pack furniture box: same kit everywhere, but the card says which colour handles to fit and whose name goes on the label. The analogy breaks down because cloud-init remembers it has already followed the card for this instance-id. Swap the card without changing the id and nothing happens.
+### Worked example: Write, validate and serve cloud-init user-data
 
-### Worked example: Write, validate and serve user-data like a PXE service
-
-**Step 1: Write the seed files.**
+**Step 1: Write user-data and meta-data.**
 
 ```bash
-mkdir -p seed && cd seed
-cat > meta-data <<'EOF'
-instance-id: node-01-2026a
-local-hostname: node-01
-EOF
+mkdir -p ~/ci-demo && cd ~/ci-demo
 cat > user-data <<'EOF'
 #cloud-config
-hostname: node-01
+hostname: lab-host-01
 users:
   - name: ops
+    groups: [sudo]
     shell: /bin/bash
-    sudo: "ALL=(ALL) NOPASSWD:ALL"
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMP ops@laptop
-packages:
-  - chrony
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyOnlyForTheLab ops@laptop
+ntp:
+  enabled: true
+  servers: [ntp.oob.lab]
 runcmd:
-  - echo "provisioned by cloud-init" > /etc/motd
+  - [sh, -c, 'echo "provisioned at $(date -u)" > /etc/motd']
 EOF
-cd ..
+printf 'instance-id: lab-host-01-v1\nlocal-hostname: lab-host-01\n' > meta-data
 ```
-If you plan to boot a VM in step 4, replace the example key with the contents of your own `~/.ssh/id_ed25519.pub` (create one with `ssh-keygen -t ed25519` if needed). The user `ops` has no password, so SSH with that key is the only way in.
 
-**Step 2: Validate the schema.**
-
-Use a throwaway Ubuntu container so you don't install cloud-init on your laptop:
+**Step 2: Validate it with the real cloud-init.**
 
 ```bash
-docker run --rm -v "$PWD/seed":/seed ubuntu:24.04 bash -c \
-  'apt-get update -qq && apt-get install -y -qq cloud-init >/dev/null && cloud-init schema --config-file /seed/user-data'
+docker run --rm -v "$PWD:/w" ubuntu:24.04 sh -c \
+  'apt-get update -qq && apt-get install -y -qq cloud-init >/dev/null 2>&1 && cloud-init schema --config-file /w/user-data'
 ```
-You should see a line saying the schema is valid. Remove the `#cloud-config` line and run it again to see it fail.
+Expect a line beginning `Valid schema`. (Podman works the same way with `podman run`.)
 
-**Step 3: Serve it over HTTP.**
+**Step 3: Break it on purpose.**
 
-This is what a PXE service does for user-data. Use port 8080 so it doesn't clash with the mock BMC from Lessons 1–3 on port 8000 (or stop `mockbmc.py` with Ctrl-C first):
+Change `hostname: lab-host-01` to `hostname: [lab, host]` and rerun. The schema check reports that `hostname` is not of type string. Change it back. Validating before serving catches typos that would otherwise fail silently on a remote machine.
+
+**Step 4: Serve it over HTTP, like a PXE service would.**
 
 ```bash
-python3 -m http.server 8080 --directory seed
-# in another terminal:
-curl -s http://127.0.0.1:8080/meta-data
+python3 -m http.server 8080 --bind 127.0.0.1 2>/tmp/ci-http.log &
+HTTP_PID=$!
+for i in $(seq 1 20); do curl -sf http://127.0.0.1:8080/user-data >/dev/null && break; sleep 0.5; done
 curl -s http://127.0.0.1:8080/user-data | head -3
+kill $HTTP_PID
 ```
-
-**Step 4: (Optional) Boot a real VM against it.**
-
-With QEMU and an Ubuntu cloud image (`https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img`), point the NoCloud datasource at your server through SMBIOS. Inside QEMU's user network, your laptop is `10.0.2.2`, and the URL must end with `/`. The `hostfwd` option forwards your laptop's port 2222 to the VM's SSH port:
-
-```bash
-qemu-img create -f qcow2 -b noble-server-cloudimg-amd64.img -F qcow2 node01.qcow2
-qemu-system-x86_64 -m 1024 -nographic -accel kvm \
-  -drive file=node01.qcow2,if=virtio \
-  -nic user,model=virtio-net-pci,hostfwd=tcp::2222-:22 \
-  -smbios 'type=1,serial=ds=nocloud;s=http://10.0.2.2:8080/'
-```
-On macOS, use `-accel hvf` (and the arm64 image with `qemu-system-aarch64` on Apple silicon). Your http.server log shows `GET /meta-data` and `GET /user-data`. A 404 for `/vendor-data` is normal. The serial console shows the boot but you can't log in there, because `ops` has no password. To quit QEMU later, press Ctrl-a then x.
-
-**Step 5: Check the result.**
-
-From a second terminal on your laptop, once the VM has booted (allow a minute or two):
-
-```bash
-ssh -p 2222 -i ~/.ssh/id_ed25519 ops@127.0.0.1
-# inside the VM:
-cloud-init status --wait
-cat /etc/motd
-id ops
-```
-If SSH is refused, wait a little longer; sshd starts late on first boot. If something is missing after login, read `/var/log/cloud-init-output.log`.
+Saving `$!` right after the start means `kill` stops exactly this server, even if other background jobs (such as a mock BMC) are still running. A NoCloud client booted with `ds=nocloud;s=http://<server>:8080/` on its kernel command line would fetch `meta-data` and `user-data` from this URL. Optional: `cloud-localds seed.img user-data meta-data` (package `cloud-image-utils`) builds a seed disk you can attach to an Ubuntu cloud image in QEMU to watch the whole first boot.
 
 ### Your turn: finish it
 
-Fill in the two blanks so this is valid cloud-config that creates user `ops` with an SSH key.
+Fill in the two blanks so this is valid cloud-config that installs nginx and then enables it once on first boot.
 
 ```text
 ___
-hostname: node-01
-users:
-  - name: ops
-    shell: /bin/bash
-    sudo: "ALL=(ALL) NOPASSWD:ALL"
-    ___:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMP ops@laptop
-runcmd:
-  - echo "provisioned by cloud-init" > /etc/motd
+hostname: web-01
+package_update: true
+packages:
+  - nginx
+___:
+  - [systemctl, enable, --now, nginx]
 ```
 
 <details>
 <summary>Answer</summary>
 
-The first line is `#cloud-config`, exactly that and on line 1. The key is `ssh_authorized_keys`; the blank already sits at four spaces of indentation, lined up with `shell:`. Check it with `cloud-init schema --config-file user-data`.
+```yaml
+#cloud-config
+hostname: web-01
+package_update: true
+packages:
+  - nginx
+runcmd:
+  - [systemctl, enable, --now, nginx]
+```
+Without the `#cloud-config` header, cloud-init does not treat the file as cloud-config at all. `runcmd` runs once per instance, after packages are installed.
 
 </details>
 
 ### Your turn: on your own
 
-Extend the worked example's user-data so it also creates the file `/etc/nico-lab/role` containing `gpu-worker` with mode `0644`. Validate it with the schema check. Then decide what you must change in meta-data so an already-booted VM applies the new user-data on its next boot.
+Write user-data for a host in this chapter's lab. It should create a user `ops` with passwordless sudo and your SSH key, use `ntp.oob.lab` as its NTP server, and write `/etc/motd` with a fixed message using a file-writing module (not `runcmd`). Validate it with `cloud-init schema`. Then answer: if the host reboots with the same instance-id, which of these steps run again?
 
 <details>
 <summary>Hint 1</summary>
 
-Look up the `write_files` module.
+The modules you need are `users`, `ntp` and `write_files`.
 
 </details>
 
 <details>
 <summary>Hint 2</summary>
 
-Each `write_files` entry takes `path`, `content` and `permissions`. Quote the permissions as a string.
+In `users`, `sudo: "ALL=(ALL) NOPASSWD:ALL"` gives passwordless sudo. `write_files` entries take `path` and `content`.
 
 </details>
 
 <details>
 <summary>Hint 3</summary>
 
-For the rerun, think about the field cloud-init uses to decide whether this is a new instance.
+Think about module frequency: these are per-instance modules.
 
 </details>
 
 <details>
 <summary>Answer</summary>
 
-Add:
 ```yaml
+#cloud-config
+users:
+  - name: ops
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyOnlyForTheLab ops@laptop
+ntp:
+  enabled: true
+  servers: [ntp.oob.lab]
 write_files:
-  - path: /etc/nico-lab/role
+  - path: /etc/motd
     content: |
-      gpu-worker
-    permissions: '0644'
+      Provisioned by cloud-init. Firmware changes go through the site controller.
 ```
-Then change `instance-id` in meta-data, for example to `node-01-2026b`. With the old id, cloud-init's per-instance modules are skipped on reboot.
+On a reboot with the same instance-id, none of these run again, because they are per-instance. If you need something on every boot, put it in `bootcmd`. Note that listing `users:` without `default` also skips creating the image's default user.
 
 </details>
 
 ### Explain it
 
-In your own words: When a bare-metal host passes from one tenant to the next and is reprovisioned, why does it matter that cloud-init keys its first-boot work on instance-id?
+In your own words: Why does cloud-init key its "already done" record on the instance-id instead of simply running everything on every boot? What would go wrong for a bare-metal host that is released and handed to a new tenant if the instance-id did not change?
 
 ### Check
 
-**1. For YAML user-data to be treated as cloud-config, what must the first line be?**
+**1. A user-data file starts with `hostname: web-01` and has no `#cloud-config` line. What happens?**
 
-A. #cloud-config
-B. ---
-C. #!/bin/bash
-D. cloud-config:
+A. cloud-init parses it as YAML anyway
+B. It is not recognised as cloud-config, so the settings are not applied
+C. cloud-init runs it as a shell script
+D. The machine refuses to boot
 
 <details>
 <summary>Answer</summary>
 
-**A.** #cloud-config
+**B.** It is not recognised as cloud-config, so the settings are not applied
 
-cloud-init chooses the user-data format from that header. `---` is just a YAML document marker. `#!/bin/bash` makes the user-data a shell script, which is valid but a different format.
+cloud-init uses the first line to decide what kind of user-data it has. Shell scripts need `#!`. Cloud-config needs `#cloud-config`. Without either, the content is not treated as configuration.
 
 </details>
 
-**2. Which NICo component serves cloud-init user-data to managed hosts?**
+**2. Which cloud-init key is meant for commands that run on *every* boot?**
 
-A. PXE Service
-B. DHCP Server
-C. Hardware Health
-D. Site Explorer
+A. runcmd
+B. bootcmd
+C. write_files
+D. packages
 
 <details>
 <summary>Answer</summary>
 
-**A.** PXE Service
+**B.** bootcmd
 
-The PXE Service serves iPXE scripts, cloud-init user-data and OS images over HTTP, and gets the right artifact from the API Service. DHCP hands out addresses, Hardware Health scrapes sensors, and Site Explorer crawls BMCs.
+`runcmd`, `write_files` and `packages` run once per instance by default. `bootcmd` runs early on every boot.
 
 </details>
 
-**3. Name the two ways NICo uses cloud-init.**
+**3. In NICo, which component serves cloud-init user-data to managed hosts?**
+
+A. nico-dhcp
+B. The PXE Service, over HTTP
+C. The host's BMC through Redfish
+D. The DPU Agent's metadata service
 
 <details>
 <summary>Answer</summary>
 
-DPUs use a NICo-provided cloud-init file to install NICo components on the base DPU image, and tenants can supply custom cloud-init to configure the OS on their host.
+**B.** The PXE Service, over HTTP
 
-Both are described in the glossary entry for cloud-init in NICo.
+The PXE Service serves iPXE scripts, cloud-init user-data and OS images over HTTP, fetching the right artifact for each host from the API Service. DHCP hands out addresses and options. FMDS gives running instances metadata, but the docs name the PXE Service for user-data.
 
 </details>
 
@@ -1001,178 +989,198 @@ Both are described in the glossary entry for cloud-init in NICo.
 
 ### Before you read
 
-- A BMC's clock says it is 2019. NICo connects to its Redfish API over HTTPS. What could go wrong?
-- What do you think 'stratum 2' means for an NTP server?
+- A BMC's clock says 2019-01-01, but it is actually 2026. A controller connects to it over HTTPS. What could go wrong?
+- Why can't you set every clock correctly once at install and leave it?
 
 <details>
 <summary>Answers</summary>
 
-- **A BMC's clock says it is 2019. NICo connects to its Redfish API over HTTPS. What could go wrong?** TLS certificate checks can fail, because certificates look not-yet-valid or expired against the wrong clock. Log and telemetry timestamps can't be lined up with other systems. Anything time-limited, such as tokens or sessions, can behave strangely.
-- **What do you think 'stratum 2' means for an NTP server?** It is two steps from a reference clock. A stratum 1 server is attached directly to a reference such as GPS or an atomic clock, and a stratum 2 server syncs from stratum 1.
+- **A BMC's clock says 2019-01-01, but it is actually 2026. A controller connects to it over HTTPS. What could go wrong?** TLS certificate validity checks compare dates against the clock. A certificate issued in 2025 looks "not yet valid" to a machine that thinks it is 2019, so connections or certificate installation can fail. Log timestamps are also wrong, which makes incidents hard to piece together.
+- **Why can't you set every clock correctly once at install and leave it?** Hardware clocks drift (seconds per day is common). Some devices also lose time when powered off or reset. Clocks need continuous correction against a reference.
 
 </details>
 
 ### Explanation
 
-**NTP** (Network Time Protocol, UDP port 123) keeps clocks in step. A client sends a request and the server returns timestamps. Using the time it sent the request, the time the server received it, the time the server replied, and the time the reply arrived, the client estimates two things: its **offset** (how far off its clock is) and the network **delay**, which it compensates for. Servers advertise a **stratum**: 1 means directly attached to a reference clock, and each step further away adds one. Clients usually use several servers, so one wrong server (a *falseticker*) can be outvoted. **chrony** (`chronyd` daemon, `chronyc` CLI) is a common NTP implementation. **SNTP** is a simpler one-shot form of the same packet exchange.
+**NTP (Network Time Protocol)** keeps clocks in agreement over the network. A client sends a small UDP packet to port **123**. The server replies with timestamps recording when it received the request and when it sent the reply. From these and its own send and receive times, the client works out the **offset** (how far its clock is off) and the **delay** (the network round trip), then gradually corrects its clock.
 
-Why infrastructure cares: TLS (which mTLS and Redfish over HTTPS rely on) checks certificate validity windows against the local clock. Logs from BMCs, DPUs and the control plane are only useful together if their timestamps agree.
+Key terms:
 
-**How NICo handles time:**
+- **Stratum**: the distance from a reference clock. Stratum 1 servers are attached directly to GPS or atomic references; a server syncing from stratum 1 is stratum 2, and so on. Stratum 0 in a reply means "unsynchronised" or a special message.
+- **Leap indicator**: two bits in the reply. A value of 3 means the server's clock is not synchronised.
+- **SNTP**: a simplified one-shot query, enough to read a server's time.
+- **chrony**, **ntpd** and **systemd-timesyncd** are common implementations. chrony is the usual choice for servers.
+- Clients can learn NTP servers from DHCP: option **42** for IPv4, option **56** for DHCPv6.
 
-- `siteConfig.ntp_servers` lists **enterprise NTP server IPs** used for **BMC time setup** and **DHCP option 42** (option 42 is the IPv4 DHCP option that carries NTP servers). Leave it as `[]` to use the legacy DHCP/DNS fallback. NICo sets BMC time from these servers before ingestion.
-- **nico-ntp** is an optional built-in service: a **3-replica chrony StatefulSet** in which each replica gets its own MetalLB VIP. To use it, set `nico-ntp.externalService.enabled: true`, assign three VIPs through `nico-ntp.externalService.perPodAnnotations`, and set `nico-dhcp.config.kea.hookParameters.ntpServer` to a comma-separated list of the same VIPs, **so DPUs receive them over DHCP**. The enterprise servers in `ntp_servers` are still used for BMC pre-ingestion sync, independently of nico-ntp.
-- For IPv6 NTP advertised through DHCPv6 option 56, add AAAA records under `unbound.localData` for the agent's NTP hostname (`carbide-ntp.forge` by default).
+NTP timestamps count seconds from 1900, not from 1970 like Unix time, so code subtracts 2208988800 to convert.
 
-**Analogy.** Imagine setting your watch by asking someone who set theirs from the station clock (stratum 2). NTP goes further: it times how long the answer took to reach you and corrects for that delay. Here the analogy breaks down, because a person passing on the time can't correct for the minute they spent walking over to you.
+How NICo uses time:
 
-### Worked example: Ask an NTP server for the time with 20 lines of Python
+- `siteConfig.ntp_servers` lists **enterprise NTP server IPs** used for **BMC time setup before ingestion** and for **DHCP option 42**. Leaving it `[]` falls back to a legacy DHCP/DNS method.
+- NICo can also run **`nico-ntp`**, a **3-replica chrony StatefulSet** in which each replica gets its own MetalLB VIP. You enable it with `nico-ntp.externalService.enabled: true` and assign three VIPs via `nico-ntp.externalService.perPodAnnotations`. You then list those same VIPs, comma-separated, in `nico-dhcp.config.kea.hookParameters.ntpServer` so **DPUs receive them over DHCP**. The enterprise servers in `ntp_servers` are still used for BMC pre-ingestion sync, independently of `nico-ntp`.
+- For IPv6, providing AAAA records under `unbound.localData` for the agent's NTP hostname (`carbide-ntp.forge` by default) lets the DPU-local server advertise NTP through DHCPv6 option 56.
 
-**Step 1: Write an SNTP client.**
+**Analogy.** Like synchronising watches before an operation by calling a speaking clock. You also account for how long the call took to connect, which is the role of the delay calculation. The analogy breaks down because NTP does not jump your watch to the new time. It speeds up or slows down the clock until it matches, so software never sees time run backwards in normal operation.
 
-Save as `sntp.py` (you'll reuse it in the build task):
+### Worked example: Query an NTP server by hand
+
+**Step 1: Write a one-shot SNTP client.**
+
+Save as `sntp.py` (the build task reuses it):
 
 ```python
-#!/usr/bin/env python3
-"""sntp.py: send one SNTP request and print what the server says."""
 import socket
 import struct
 import sys
 import time
 
 NTP_EPOCH_OFFSET = 2208988800  # seconds from 1900-01-01 to 1970-01-01
-
 server = sys.argv[1] if len(sys.argv) > 1 else "pool.ntp.org"
 request = b"\x1b" + 47 * b"\0"  # LI=0, version 3, mode 3 (client)
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.settimeout(3)
-t_send = time.time()
-sock.sendto(request, (server, 123))
-data, _ = sock.recvfrom(512)
-t_recv = time.time()
-leap = data[0] >> 6
-stratum = data[1]
-secs, frac = struct.unpack("!II", data[40:48])
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.settimeout(3)
+    s.sendto(request, (server, 123))
+    data, _ = s.recvfrom(48)
+leap, stratum = data[0] >> 6, data[1]
+secs, frac = struct.unpack("!II", data[40:48])  # transmit timestamp
 server_time = secs - NTP_EPOCH_OFFSET + frac / 2**32
-local_mid = (t_send + t_recv) / 2
-print(f"server={server} stratum={stratum} leap={leap}")
-print("server time:", time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(server_time)))
-print(f"approx offset (server - local): {server_time - local_mid:+.3f} s, round trip {t_recv - t_send:.3f} s")
+print(f"server={server} stratum={stratum} leap={leap} "
+      f"offset={server_time - time.time():+.3f}s "
+      f"time={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(server_time))}")
 ```
 
-**Step 2: Query a public server.**
+**Step 2: Ask a public server.**
 
 ```bash
 python3 sntp.py pool.ntp.org
-# server=pool.ntp.org stratum=2 leap=0
-# server time: 2026-11-21 10:15:02 UTC
-# approx offset (server - local): +0.004 s, round trip 0.031 s
+# or: python3 sntp.py time.cloudflare.com
 ```
-If it times out, your network may block outbound UDP 123. Try `time.google.com`, or a server your organisation provides.
+Expect stratum 1–3, leap 0, and a small offset (tens of milliseconds) if your laptop is synced. If it times out, your network probably blocks outbound UDP 123.
 
-**Step 3: Compare with your OS's own sync.**
+**Step 3: Compare with your OS's own client.**
 
-Linux with chrony: `chronyc tracking` (look at *Stratum* and *System time*). systemd: `timedatectl`. macOS: `sntp time.apple.com`.
+```bash
+timedatectl 2>/dev/null | grep -i synchron   # systemd Linux
+chronyc tracking 2>/dev/null | head -5       # if chrony is installed
+sntp time.apple.com 2>/dev/null              # macOS built-in
+```
+The OS clients keep correcting continuously. Your script only takes one reading.
 
-**Step 4: Interpret.**
+**Step 4: Relate it to a BMC.**
 
-Stratum 1–3 and an offset in milliseconds mean a healthy clock. `leap=3` or `stratum=0` means the server itself is not synchronised, so don't trust it. Our offset ignores how the delay splits between the two directions, which full NTP handles properly. That's fine for a sanity check.
+A BMC fresh from the factory may have a clock that is way off. Before NICo starts trusting TLS sessions and logs from it, it sets the BMC's time from the enterprise NTP servers in `ntp_servers`. Your script shows the same exchange those servers answer.
 
 ### Your turn: finish it
 
-Two numbers are missing from the SNTP client. Fill them in.
+Fill in the two blanks in this stripped-down client: the NTP port, and the constant that converts NTP seconds (from 1900) into Unix seconds (from 1970).
 
 ```text
-NTP_EPOCH_OFFSET = ___  # seconds from 1900-01-01 to 1970-01-01
-...
-sock.sendto(request, (server, ___))
+import socket, struct, time
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.settimeout(3)
+    s.sendto(b"\x1b" + 47 * b"\0", ("pool.ntp.org", ___))
+    data, _ = s.recvfrom(48)
+secs = struct.unpack("!I", data[40:44])[0]
+print(time.ctime(secs - ___))
 ```
 
 <details>
 <summary>Answer</summary>
 
-`NTP_EPOCH_OFFSET = 2208988800`, because NTP counts seconds from 1900 and Unix time counts from 1970. The port is `123`, the NTP UDP port.
+The port is `123` and the constant is `2208988800`:
+
+```python
+s.sendto(b"\x1b" + 47 * b"\0", ("pool.ntp.org", 123))
+...
+print(time.ctime(secs - 2208988800))
+```
 
 </details>
 
 ### Your turn: on your own
 
-A site has `ntp_servers = ["10.1.1.10", "10.1.1.11"]` in siteConfig. nico-ntp is enabled with VIPs 10.180.126.170–172, and `nico-dhcp.config.kea.hookParameters.ntpServer` is set to those three. (a) Which servers set a host BMC's clock before ingestion? (b) How do DPUs learn about the nico-ntp VIPs? (c) You also want DPUs to get IPv6 NTP through DHCPv6 option 56. What do you add?
+A site sets `ntp_servers = ["10.0.0.5", "10.0.0.6"]` (enterprise servers) and enables `nico-ntp` with VIPs 10.180.126.170–172, which are also put in `nico-dhcp.config.kea.hookParameters.ntpServer`. (a) Which servers are used to set a new host BMC's clock before ingestion? (b) Which NTP servers do DPUs learn over DHCP? (c) Why give each chrony replica its own VIP instead of putting one VIP in front of all three?
 
 <details>
 <summary>Hint 1</summary>
 
-The docs keep enterprise NTP for BMCs separate from nico-ntp.
+Read the two NICo facts separately: one is about BMC pre-ingestion time, the other about what the Kea hook hands to DPUs.
 
 </details>
 
 <details>
 <summary>Hint 2</summary>
 
-Look at what the DHCP hook parameter is for.
+The docs say the enterprise servers continue to be used for BMC pre-ingestion sync *independently* of nico-ntp.
 
 </details>
 
 <details>
 <summary>Hint 3</summary>
 
-IPv6 discovery goes through a DNS name that the agent has built in.
+For (c), think about how an NTP client spots one bad server: it needs several distinct sources to compare. What would a load-balanced single address look like to it?
 
 </details>
 
 <details>
 <summary>Answer</summary>
 
-(a) The enterprise servers in `ntp_servers` (10.1.1.10 and 10.1.1.11). They are used for BMC pre-ingestion time sync whether or not nico-ntp is enabled. (b) Over DHCP: the `ntpServer` hook parameter on nico-dhcp hands out the comma-separated VIPs. (c) AAAA records with reachable IPv6 NTP addresses under `unbound.localData` for the agent's NTP hostname, `carbide-ntp.forge` by default. Without them only the IPv4 path is available.
+(a) The enterprise servers 10.0.0.5 and 10.0.0.6 from `ntp_servers`. (b) The three nico-ntp VIPs, 10.180.126.170, .171 and .172, via the Kea hook's `ntpServer` list. (c) NTP clients compare several independent sources and discard ones that disagree. Three separate addresses give them three distinct servers. A single load-balanced VIP would look like one server whose clock and delay jump around as packets land on different replicas, so the client could neither compare sources nor stay stable if one replica failed. (General NTP reasoning; the docs state the per-replica VIP design but not the reason.)
 
 </details>
 
 ### Explain it
 
-In your own words: Why does it make sense for NICo to set a BMC's time before ingestion, rather than after it starts managing the host? Think about what ingestion does over HTTPS.
+In your own words: Explain why accurate time on a BMC matters to a control plane that talks to it only over HTTPS and Redfish, even though the BMC does not run any tenant workload.
 
 ### Check
 
-**1. What is nico-ntp?**
+**1. An NTP reply has stratum 2. What does that tell you?**
 
-A. A 3-replica chrony StatefulSet where each replica has its own MetalLB VIP
-B. A single NTP pod behind one shared VIP
-C. An NTP client installed on every BMC
-D. Another name for DHCP option 42
+A. The server is two network hops away
+B. The server syncs from a stratum 1 server, which is attached to a reference clock
+C. The clock is off by 2 seconds
+D. It is the second reply in a burst
 
 <details>
 <summary>Answer</summary>
 
-**A.** A 3-replica chrony StatefulSet where each replica has its own MetalLB VIP
+**B.** The server syncs from a stratum 1 server, which is attached to a reference clock
 
-Each replica gets its own VIP, so clients see three independent servers. That gives redundancy and lets clients outvote a bad server. A single shared VIP would hide which replica answered.
+Stratum counts the distance from a reference clock in the sync hierarchy, not network hops or error size.
 
 </details>
 
-**2. Which setting delivers the nico-ntp VIPs to DPUs over DHCP?**
+**2. Which DHCPv4 option carries NTP server addresses, and is listed next to `ntp_servers` in NICo's site config?**
 
-A. nico-dhcp.config.kea.hookParameters.ntpServer
-B. siteConfig.dhcp_servers
-C. nico-ntp.externalService.enabled on its own
-D. deny_prefixes
+A. Option 3
+B. Option 6
+C. Option 42
+D. Option 67
 
 <details>
 <summary>Answer</summary>
 
-**A.** nico-dhcp.config.kea.hookParameters.ntpServer
+**C.** Option 42
 
-Enabling the external service only exposes the VIPs; DHCP has to advertise them as well. `dhcp_servers` lists DHCP servers, not NTP servers, and `deny_prefixes` is an isolation setting.
+Option 3 is the router, 6 is DNS servers, and 67 is the boot file name. NICo's docs say `ntp_servers` is used for BMC time setup and DHCP option 42.
 
 </details>
 
-**3. What is the IPv4 DHCP option number for NTP servers?**
+**3. What is `nico-ntp`?**
+
+A. A wrapper that forwards to the enterprise servers in ntp_servers
+B. A 3-replica chrony StatefulSet, each replica with its own MetalLB VIP
+C. An NTP client that runs on every BMC
+D. A Kea hook that rewrites DHCP option 42
 
 <details>
 <summary>Answer</summary>
 
-42
+**B.** A 3-replica chrony StatefulSet, each replica with its own MetalLB VIP
 
-`ntp_servers` feeds DHCP option 42. The IPv6 equivalent mentioned in the docs is DHCPv6 option 56.
+nico-ntp is NICo's built-in NTP service. Its VIPs are handed to DPUs over DHCP through the Kea hook parameter, while the enterprise servers continue to handle BMC pre-ingestion sync.
 
 </details>
 
@@ -1185,182 +1193,186 @@ Enabling the external service only exposes the VIPs; DHCP has to advertise them 
 
 ### Before you read
 
-- When your laptop looks up www.example.com, does the DNS server in your network settings usually own that name? If not, how does it find the answer?
-- What do you think it means for a zone to be 'delegated' to someone?
+- When your laptop looks up `www.example.com`, does the DNS server in your `/etc/resolv.conf` own that name?
+- Why would a datacenter control plane run its own DNS server instead of putting records in the company DNS?
 
 <details>
 <summary>Answers</summary>
 
-- **When your laptop looks up www.example.com, does the DNS server in your network settings usually own that name? If not, how does it find the answer?** No. It is a recursive resolver. It asks the root servers, then the .com servers, then example.com's authoritative servers, and caches the result.
-- **What do you think it means for a zone to be 'delegated' to someone?** The parent zone publishes NS records saying "for this subdomain, ask these servers". Those servers then become authoritative for the subdomain.
+- **When your laptop looks up `www.example.com`, does the DNS server in your `/etc/resolv.conf` own that name?** Almost certainly not. It is a *recursive resolver*. It asks the servers that do own the name (the authoritative servers) for you, then caches the answer.
+- **Why would a datacenter control plane run its own DNS server instead of putting records in the company DNS?** It creates and changes machines and addresses all the time, so it is the natural source of truth for their names. Delegating a zone to it lets those names stay accurate automatically.
 
 </details>
 
 ### Explanation
 
-DNS (Domain Name System) turns names into addresses. It is split into **zones**, which are parts of the name tree that one party manages, such as `example.com` or `mysite.example.com`.
+DNS turns names into data such as IP addresses. Servers play two very different roles:
 
-Servers play one of two roles:
+- An **authoritative server** owns one or more **zones**, a zone being a part of the name tree such as `mysite.example.com`. It answers only for those zones and marks its answers **authoritative** (the `aa` flag in `dig`). It does not look up anything else.
+- A **recursive resolver** answers *any* name for its clients. It starts at the root, follows **NS** (name server) records down through **delegations** (`com` → `example.com` → …) to the authoritative server, then caches the result for its **TTL**. Its replies have the `ra` (recursion available) flag and usually not `aa`.
 
-- An **authoritative server** answers only for zones it owns, from its own data. Its answers carry the **`aa`** (authoritative answer) flag. Ask it about a name outside its zones and it refers you elsewhere or refuses. It does not look the name up for you.
-- A **recursive resolver** answers *any* name for its clients. It starts at the root, follows **NS referrals** (".com is served by these servers", then "example.com by these"), gets the answer from the authoritative server, and **caches** it for the record's TTL. Its replies carry **`ra`** (recursion available) but usually not `aa`.
+A **delegation** is an NS record in a parent zone saying "this child zone is served by these servers". That is how a company DNS can hand `mysite.example.com` to a different server. Common record types are **A** (IPv4), **AAAA** (IPv6), **PTR** (reverse lookups, address → name), **CNAME** (alias), **NS** and **SOA**.
 
-**Delegation** joins the two. A parent zone delegates a child zone by publishing NS records for it, plus **glue** A/AAAA records when the name servers sit inside the child zone. Recursive resolvers follow that delegation to the child's authoritative servers.
+NICo runs both kinds:
 
-**In NICo** both roles run:
+- **`nico-dns`** is **authoritative for NICo-delegated zones**. The site's base domain is set with `initial_domain_name`. Each `nico-dns` replica gets its own VIP (`perPodAnnotations`), so the parent zone can delegate to several stable addresses.
+- **Unbound** is the **recursive resolver** that handles all DNS queries from managed machines and tenant instances over the OOB network. In the docs' words, it **forwards queries for NICo-managed zones to `nico-dns`** and resolves everything else recursively. ("Forwards" is used loosely there; the docs don't show the Unbound config. In Unbound terms, sending a zone to an authoritative server is usually a `stub-zone`, while `forward-zone` is meant for upstream recursive resolvers.) Extra records can be added with `unbound.localData`, for example AAAA records for the NTP hostname.
 
-- **nico-dns** (the Authoritative DNS Service) is authoritative for **NICo-delegated zones**. It answers queries from the site controller and managed nodes, and gets its data from the API Service over mTLS/gRPC. It runs as replicas with their own VIPs, which are set through `perPodAnnotations`.
-- **Unbound** is the recursive resolver for **managed machines and tenant instances**, reached over the OOB network. It forwards queries for NICo-managed zones to nico-dns and resolves everything else recursively.
+Separately, your *external* DNS must resolve the `nico-api` hostname to its VIP. Getting names right here also matters later: TLS certificates (ch. 19) list the names they are valid for.
 
-The site's base domain is `initial_domain_name` in siteConfig. Separately, your *external* DNS must resolve the `nico-api` hostname to the nico-api VIP.
+**Analogy.** An authoritative server is a company's own reception desk: it knows exactly who works there and won't answer questions about other companies. A recursive resolver is a concierge who phones the right reception desks for you and remembers the answers for a while. The analogy breaks down because the concierge finds the right desk by asking a chain of directories (root, then TLD, then the domain), and because remembered answers expire after a TTL the desk chooses.
 
-**Analogy.** A recursive resolver is a reference librarian: ask about any book and they track it down, keeping popular ones on a nearby shelf (the cache). An authoritative server is the author, who can only speak about their own books. The analogy breaks down because a librarian's shelf copy of a DNS record expires after its TTL, and until then the librarian may hand you an outdated copy even though the author has updated it.
+### Worked example: Tell authoritative and recursive answers apart with dig
 
-### Worked example: Watch authoritative and recursive answers differ
+**Step 1: Ask your normal (recursive) resolver.**
 
-**Step 1: Get dig.**
-
-macOS already has `dig`. On Debian/Ubuntu run `sudo apt install bind9-dnsutils`. Or use a container: `docker run --rm -it debian:stable-slim bash -c 'apt-get update -qq && apt-get install -y -qq bind9-dnsutils >/dev/null && bash'`.
+```bash
+dig example.com A
+```
+(`dig` is built into macOS. On Debian/Ubuntu install `bind9-dnsutils`.) In the `flags:` line, look for `rd ra` (recursion desired, recursion available) and usually **no** `aa`. The `SERVER:` line shows which resolver answered.
 
 **Step 2: Find who is authoritative.**
 
 ```bash
 dig +short NS example.com
 ```
-Pick one of the names it returns. The steps below call it `$NS`, for example `NS=$(dig +short NS example.com | head -1)`.
+These are the servers the `.com` zone delegates `example.com` to.
 
-**Step 3: Ask the authoritative server.**
-
-```bash
-dig @$NS example.com A +norecurse | grep -E 'flags|^example'
-```
-The header flags include **`aa`**: this server owns the zone.
-
-**Step 4: Ask a recursive resolver.**
+**Step 3: Ask the authoritative server directly, without recursion.**
 
 ```bash
-dig @1.1.1.1 example.com A | grep flags
+NS=$(dig +short NS example.com | head -1)
+dig @"$NS" example.com A +norecurse
 ```
-The flags show `rd ra` and no `aa`: the resolver fetched the answer, or served it from cache, on your behalf.
+Now the flags include `aa`: this server owns the zone. Its answer comes from zone data, not from a cache.
 
-**Step 5: Ask the authoritative server about someone else's name.**
+**Step 4: Ask an authoritative server about a name it doesn't own.**
 
 ```bash
-dig @$NS www.wikipedia.org A +norecurse | grep -E 'status|flags'
+dig @"$NS" www.wikipedia.org A +norecurse
 ```
-You get no answer, often `status: REFUSED`, and no `ra`. Authoritative servers don't recurse.
+You get no answer: typically `status: REFUSED`, or an empty answer section with no `aa`. Authoritative servers do not look up other people's names.
 
-**Step 6: See the delegation chain.**
+**Step 5: Watch the whole recursion.**
 
 ```bash
 dig +trace example.com
 ```
-Root → `com.` NS referral → `example.com.` NS referral → the final authoritative answer. This is the walk a recursive resolver does for you.
+This shows root → `com` → `example.com`, which is the path Unbound follows for any non-NICo name a managed machine asks about.
 
 ### Your turn: finish it
 
-In unbound's config syntax, make the resolver send queries for the site's delegated zone to two authoritative servers (illustrative VIPs) and resolve everything else recursively. This shows the idea; it is not NICo's shipped Unbound configuration. You can check your answer with `unbound-checkconf <file>` after `apt install unbound` in a Debian container.
+This is generic Unbound configuration for a resolver that sends one zone, `mysite.example.com`, to an authoritative server at 10.180.126.165 and resolves everything else recursively. It uses `stub-zone`, Unbound's construct for pointing a zone at an authoritative server (`forward-zone` is for upstream recursive resolvers). It illustrates the idea; it is not NICo's chart. Fill in the blanks.
 
 ```text
 server:
     interface: 0.0.0.0
     access-control: 10.0.0.0/8 allow
 
-___:
-    name: "mysite.example.com."
-    ___: 10.180.126.165
-    stub-addr: 10.180.126.166
+stub-zone:
+    name: "___"
+    stub-addr: ___
 ```
 
 <details>
 <summary>Answer</summary>
 
-The first blank is `stub-zone`, so the line reads `stub-zone:` at column 0. The second is `stub-addr`, already indented 4 spaces like the line below it. A stub zone sends non-recursive queries to the authoritative servers you list. Unbound also has `forward-zone`/`forward-addr`, which forward to another resolver instead.
+```text
+stub-zone:
+    name: "mysite.example.com"
+    stub-addr: 10.180.126.165
+```
+Queries under that zone go straight to the authoritative server, sent without the recursion-desired flag. Everything else follows normal recursion from the root.
 
 </details>
 
 ### Your turn: on your own
 
-A tenant instance resolves `github.com` fine, but lookups for names under the site's NICo-managed zone fail. Using dig, how would you work out whether the problem is in the recursive layer or the authoritative layer?
+Two complaints arrive at a NICo site. (1) A managed host resolves `github.com` fine but gets no answer for `bmc-07.mysite.example.com`. (2) An operator's laptop on the corporate network cannot resolve `nico.mysite.example.com`, the nico-api hostname. For each, say which DNS component is most likely at fault and how you would confirm it with `dig`.
 
 <details>
 <summary>Hint 1</summary>
 
-The two layers are Unbound (recursive) and nico-dns (authoritative). Query each one directly.
+Work out which resolver each client uses: managed machines use Unbound, and the laptop uses corporate DNS.
 
 </details>
 
 <details>
 <summary>Hint 2</summary>
 
-Use `+norecurse` when you query nico-dns directly, and look for the `aa` flag.
+For (1), recursion works, so the problem is specific to the NICo zone. What does Unbound do with that zone?
 
 </details>
 
 <details>
 <summary>Hint 3</summary>
 
-If nico-dns answers with `aa` but Unbound fails, look at how Unbound hands that zone to nico-dns. If nico-dns doesn't answer either, look at nico-dns and its VIPs.
+For (2), the nico-api hostname must resolve in *external* DNS to the nico-api VIP. Check the delegation or record there, and query nico-dns directly to separate the two.
 
 </details>
 
 <details>
 <summary>Answer</summary>
 
-1) `dig @<unbound-address> <name>` reproduces the failure. 2) `dig @<nico-dns VIP> <name> +norecurse` asks the authoritative server directly. If you get an answer with `aa`, the record exists, so the fault is between Unbound and nico-dns: the zone forwarding, or reachability from Unbound to the nico-dns VIPs. If nico-dns doesn't answer or returns NXDOMAIN, check the nico-dns pods, their LoadBalancer VIPs (`kubectl get svc -n nico-system`), and whether the record should exist. Public names working shows that Unbound's ordinary recursion is fine.
+(1) Unbound can recurse, so the general resolver works. The NICo-zone path is broken: either Unbound's routing of that zone to `nico-dns` or `nico-dns` itself (missing record, unreachable VIP). Confirm with `dig @<nico-dns-VIP> bmc-07.mysite.example.com +norecurse`. If that gives an `aa` answer, the fault is between Unbound and nico-dns. If it doesn't, the fault is in nico-dns or its data. (2) The laptop uses corporate DNS, which must resolve the nico-api hostname to the nico-api VIP, either as a record or through a delegation to nico-dns. Run `dig nico.mysite.example.com` on the laptop and `dig +short NS mysite.example.com` to see whether a delegation exists. Then query nico-dns directly to see whether it knows the name.
 
 </details>
 
 ### Explain it
 
-In your own words: Why does NICo run both an authoritative server and a recursive resolver, instead of one server that does both jobs for managed machines?
+In your own words: Why does NICo split DNS into an authoritative server for its own zones and a separate recursive resolver for managed machines, instead of one server doing both?
 
 ### Check
 
-**1. What does the `aa` flag in a DNS response mean?**
+**1. A `dig` reply has the `aa` flag set. What does that mean?**
 
-A. The answer came from a server that is authoritative for the zone
-B. The answer came from a cache
-C. The server offers recursion
-D. The answer passed DNSSEC validation
-
-<details>
-<summary>Answer</summary>
-
-**A.** The answer came from a server that is authoritative for the zone
-
-`aa` means authoritative answer. Recursion available is `ra`, cached answers usually lack `aa`, and DNSSEC validation shows as `ad`.
-
-</details>
-
-**2. A managed machine queries a NICo-managed name. Which path does the query take?**
-
-A. To Unbound, which forwards it to nico-dns
-B. Straight to nico-dns, skipping Unbound
-C. To the public root servers
-D. To nico-dhcp
+A. The answer came from a cache
+B. The responding server is authoritative for the zone
+C. Authentication succeeded
+D. The name has an AAAA record
 
 <details>
 <summary>Answer</summary>
 
-**A.** To Unbound, which forwards it to nico-dns
+**B.** The responding server is authoritative for the zone
 
-Unbound handles all DNS queries from managed machines and forwards NICo-managed zones to nico-dns. Going to nico-dns directly isn't the documented path for managed machines, and the public root has no knowledge of NICo-delegated zones.
+`aa` means authoritative answer. Answers from a cache usually lack it. DNSSEC validation shows up as a different flag (`ad`), and `aa` has nothing to do with record types.
 
 </details>
 
-**3. Which record type in a parent zone delegates a child zone to other name servers?**
+**2. A managed host looks up `pypi.org`. Which NICo component handles the query?**
+
+A. nico-dns, authoritatively
+B. Unbound, recursively
+C. nico-dhcp
+D. The PXE Service
 
 <details>
 <summary>Answer</summary>
 
-NS records, plus glue A/AAAA records when the name servers are inside the child zone.
+**B.** Unbound, recursively
 
-NS records are the referrals a recursive resolver follows, as you can see with `dig +trace`.
+Unbound handles all DNS queries from managed machines. It only sends NICo-managed zones to nico-dns and resolves other names recursively.
 
 </details>
 
-**Sources:** [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md), [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [getting-started/quick-start.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/quick-start.md), [glossary.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/glossary.md)
+**3. Why does each `nico-dns` replica get its own VIP?**
+
+A. So a parent zone can delegate to several stable server addresses
+B. Because DNS cannot use load balancers at all
+C. To give each tenant its own zone
+D. Because DHCP requires it
+
+<details>
+<summary>Answer</summary>
+
+**A.** So a parent zone can delegate to several stable server addresses
+
+Delegations list multiple name servers, and resolvers try them individually. Stable per-replica addresses fit that model. The quick start assigns them through `perPodAnnotations`.
+
+</details>
+
+**Sources:** [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md), [getting-started/quick-start.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/quick-start.md), [glossary.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/glossary.md)
 
 <a id="dhcp"></a>
 ## 7. DHCP
@@ -1369,204 +1381,206 @@ NS records are the referrals a recursive resolver follows, as you can see with `
 
 ### Before you read
 
-- A device that has just powered on has no IP address. How can it talk to a DHCP server at all?
-- Broadcasts don't cross routers. How could a BMC in rack 12 reach a DHCP server that sits in the control-plane subnet?
+- A brand-new BMC has no IP address. How can it send a packet asking for one?
+- Broadcasts do not cross routers. How does a DHCP server in a different subnet ever hear that request?
 
 <details>
 <summary>Answers</summary>
 
-- **A device that has just powered on has no IP address. How can it talk to a DHCP server at all?** It broadcasts. It sends a UDP packet from 0.0.0.0 port 68 to 255.255.255.255 port 67, identifying itself by its MAC address. Every device on the L2 segment receives it, including the DHCP server if one is there.
-- **Broadcasts don't cross routers. How could a BMC in rack 12 reach a DHCP server that sits in the control-plane subnet?** Through a DHCP relay on the router or switch interface that faces rack 12. The relay picks up the broadcast and forwards it as unicast to the central server.
+- **A brand-new BMC has no IP address. How can it send a packet asking for one?** It sends a broadcast from source address 0.0.0.0 to 255.255.255.255, UDP port 68 → 67, identifying itself by its MAC address. Every device on the local segment receives it.
+- **Broadcasts do not cross routers. How does a DHCP server in a different subnet ever hear that request?** A DHCP relay agent on the router or switch interface for that segment picks up the broadcast and unicasts it to the server. It records which segment the request came from so the server can choose the right subnet.
 
 </details>
 
 ### Explanation
 
-**DHCP** (Dynamic Host Configuration Protocol) gives devices an IP address and settings automatically. The exchange is known as **DORA**:
+**DHCP (Dynamic Host Configuration Protocol)** gives devices an IP address and network settings automatically. The basic exchange is **DORA**:
 
-1. **Discover**: the client broadcasts "I need an address". It is identified by its MAC (the `chaddr` field).
+1. **Discover**: the client broadcasts "I need an address", including its MAC (client port 68 → server port 67).
 2. **Offer**: a server proposes an address.
-3. **Request**: the client asks for that address.
-4. **Ack**: the server confirms. The client now has a **lease** for a set time and renews it before it expires.
+3. **Request**: the client asks for that offer.
+4. **Ack**: the server confirms. The client now holds a **lease** for a set time and renews it before it expires.
 
-Along with the address, the server sends **options**: 1 (subnet mask), 3 (router), 6 (DNS servers), 42 (NTP servers, seen in Lesson 5), and boot options that PXE uses later (Chapter 12).
+The reply also carries **options**: 1 subnet mask, 3 router, 6 DNS servers, 15 domain name, 42 NTP servers, and boot options used by PXE (ch. 12).
 
-Because Discover is a broadcast, it stays on its L2 segment. A **DHCP relay agent**, usually on the L3 switch interface that is the segment's gateway, catches the broadcast. It writes its own **client-facing interface address** into the packet's **`giaddr`** field and **unicasts** the packet to a configured server. The server uses `giaddr` to choose which subnet to allocate from. That is how one central server can serve many /24s (or /31s, Chapter 3) it isn't attached to. The server replies to the relay, and the relay delivers the reply to the client. Relays may also add **option 82** (relay agent information, such as which port the request came in on).
+**Relays.** Broadcasts stay inside one L2 segment, but you want one central server. A **DHCP relay agent** runs on the router interface (often a switch's VLAN interface) for each segment. It receives the broadcast, writes its own interface address on that segment into the **`giaddr`** field, and unicasts the packet to the configured server. The server uses `giaddr` to choose which subnet to allocate from. Relays can also add option 82, which identifies the switch port. The server replies to the relay, and the relay passes the reply to the client.
 
-**In NICo:**
+In NICo:
 
-- **nico-dhcp** is the central DHCP service. It handles *relayed* requests from physical networks: `Underlay` endpoints (host BMCs, DPU BMCs, DPU OOB interfaces) and, for zero-DPU hosts, `HostInband` interfaces. It is **stateless**: it converts each DHCP request to gRPC, and **NICo Core does the IP address management**. (Its Helm values have keys under `nico-dhcp.config.kea`, such as `hookParameters`, which suggests a Kea-based implementation; the docs pages here don't describe its internals.)
-- A host whose DPU runs in DPU mode gets its own DHCP from a server **on the DPU**. Those requests never reach the underlay or nico-dhcp.
-- **BMC discovery:** when a BMC's relayed request arrives, NICo allocates an address and checks the MAC against the expected-machines table to find initial credentials.
-- A DPU's RJ45 port gets two addresses: one for the DPU OOB interface and one for the DPU BMC.
+- The central **`nico-dhcp`** service answers relayed requests from physical networks: host BMCs, DPU BMCs and DPU OOB interfaces on `Underlay` segments (plus zero-DPU host interfaces on `HostInband`). It is **stateless**. It converts each DHCP request into gRPC and forwards it to **NICo Core**, which does the IP address management.
+- **BMC discovery happens through DHCP.** When a BMC asks for an address, NICo allocates one and looks up the MAC in the expected-machines table to find its initial credentials.
+- Because switches are configured to relay to it, `nico-dhcp` needs a **stable VIP**. The quick start says to set `externalService.enabled: true` explicitly and pin its MetalLB address, so the relay targets do not change on redeploy.
+- A host whose DPU runs in DPU mode gets its own DHCP from a server *on the DPU*. Those requests never reach the underlay.
+- The DPU's RJ45 port gets two addresses from NICo: the DPU OOB address and the DPU BMC address.
 
-**Analogy.** A new employee without a desk number shouts "I need a desk!" in the corridor on floor 12 (broadcast). The floor receptionist (relay) writes "from floor 12" on a note and sends it to HR in another building (unicast to the server), and HR assigns a desk on floor 12 (pool chosen by giaddr). The analogy breaks down in NICo's case: the HR clerk (nico-dhcp) doesn't keep the seating chart. They phone head office (NICo Core) to decide every assignment.
+**Analogy.** A DHCP relay is like an office mailroom. A new employee with no desk drops a note in the local tray saying "I need a desk". The mailroom stamps it "from 3rd floor" (giaddr) and sends it to central facilities, which assigns a desk on the 3rd floor and sends the answer back through the same mailroom. The analogy breaks down because the mailroom forwards only these requests and keeps no record of who sits where: allocation lives entirely with the central server, just as NICo's switches only relay.
 
-### Worked example: Watch a full DORA exchange between two network namespaces
+### Worked example: Watch DORA between a dnsmasq server and a busybox client
 
-**Step 1: Start a lab container.**
+**Step 1: Start a throwaway privileged container.**
 
 ```bash
-docker run --rm -it --privileged --name dhcplab debian:stable-slim bash
+docker run --rm -it --privileged python:3.12-slim bash
 # inside:
-apt-get update && apt-get install -y iproute2 dnsmasq-base busybox
+apt-get update -qq && apt-get install -y -qq iproute2 dnsmasq-base busybox >/dev/null
 ```
-`dnsmasq-base` gives you the dnsmasq binary without a service. `busybox` includes the `udhcpc` DHCP client.
+Everything runs inside this one container, using Linux network namespaces. That avoids Docker's routing rules between containers.
 
-**Step 2: Build one L2 segment.**
+**Step 2: Build a two-namespace segment.**
 
 ```bash
 ip netns add srv; ip netns add cli
-ip link add v-srv type veth peer name v-cli
-ip link set v-srv netns srv; ip link set v-cli netns cli
-ip -n srv addr add 10.30.0.1/24 dev v-srv
-ip -n srv link set v-srv up
-ip -n cli link set v-cli address c4:5a:b1:c8:38:0d   # pretend BMC MAC
-ip -n cli link set v-cli up
+ip link add s0 type veth peer name c0 netns cli
+ip link set s0 netns srv
+ip -n srv addr add 192.168.50.1/24 dev s0
+ip -n srv link set s0 up; ip -n cli link set c0 up
 ```
+`cli` has no address yet, like a fresh BMC.
 
-**Step 3: Start a DHCP server.**
+**Step 3: Run a DHCP server.**
 
 ```bash
-ip netns exec srv dnsmasq --conf-file=/dev/null --no-daemon --user=root --port=0 \
-  --interface=v-srv --bind-interfaces \
-  --dhcp-range=10.30.0.100,10.30.0.150,255.255.255.0,1h \
-  --dhcp-option=option:ntp-server,10.30.0.1 \
-  --dhcp-leasefile=/tmp/srv.leases --pid-file=/tmp/srv.pid \
-  --log-facility=- --log-dhcp > /tmp/srv.log 2>&1 &
+ip netns exec srv dnsmasq --no-daemon --port=0 --interface=s0 --bind-interfaces \
+  --dhcp-range=192.168.50.100,192.168.50.150,1h --dhcp-leasefile=/tmp/leases \
+  --pid-file=/tmp/dnsmasq.pid --user=root --log-dhcp > /tmp/dnsmasq.log 2>&1 &
+sleep 1
 ```
-`--port=0` turns off dnsmasq's DNS so we only test DHCP.
+`--port=0` turns off dnsmasq's DNS so only DHCP runs.
 
-**Step 4: Run the client.**
+**Step 4: Request a lease.**
 
 ```bash
-cat > /tmp/udhcpc.sh <<'EOF'
-#!/bin/sh
-case "$1" in
-  bound|renew)
-    ip addr add "$ip/$subnet" dev "$interface" 2>/dev/null
-    echo "got ip=$ip subnet=$subnet ntp=$ntpsrv"
-    ;;
-esac
-EOF
-chmod +x /tmp/udhcpc.sh
-ip netns exec cli busybox udhcpc -i v-cli -f -q -n -O ntpsrv -s /tmp/udhcpc.sh
+ip netns exec cli busybox udhcpc -i c0 -f -q -n -s /bin/true
 ```
-You'll see `broadcasting discover`, `broadcasting select`, `lease of 10.30.0.1xx obtained`, then `got ip=... ntp=10.30.0.1`.
+udhcpc prints `Sending discover...`, `Sending select...` and `Lease of 192.168.50.1xx obtained`. `-s /bin/true` skips applying the address; we only want to see the exchange.
 
-**Step 5: Read the server's side.**
+**Step 5: Read DORA from the server's side.**
 
 ```bash
-grep -E 'DHCP(DISCOVER|OFFER|REQUEST|ACK)' /tmp/srv.log
-cat /tmp/srv.leases     # expiry, MAC, IP, hostname, client-id
+grep -E 'DHCP(DISCOVER|OFFER|REQUEST|ACK)' /tmp/dnsmasq.log
+cat /tmp/leases
 ```
-Four lines, D-O-R-A, each with the MAC `c4:5a:b1:c8:38:0d`. The MAC is the client's identity, which is exactly what NICo matches against expected machines.
+You see four lines carrying the client's MAC, and a lease entry tying MAC → IP. NICo's version of the lease entry lives in NICo Core's database, and the MAC is what gets matched against `expected_machines.json`. Type `exit` to discard the container.
 
 ### Your turn: finish it
 
-Now put a router between the BMC segment (10.10.0.0/24, router interface 10.10.0.1) and the controller segment, where the DHCP server is at 10.20.0.10. Fill in the relay argument for dnsmasq, whose format is `--dhcp-relay=<local address>,<server address>`.
+In the build task, the OOB "switch" namespace has address 10.30.0.1 on the BMC segment, and the central DHCP server (standing in for the nico-dhcp VIP) is 10.20.0.10. dnsmasq's relay syntax is `--dhcp-relay=<local address on the client segment>,<server address>`. Fill in the blanks.
 
 ```text
-# runs on the router, in its network namespace
-dnsmasq --conf-file=/dev/null --no-daemon --user=root --port=0 \
-  --dhcp-relay=___,___ \
-  --pid-file=/tmp/relay.pid --log-facility=- --log-dhcp
+ip netns exec oob dnsmasq --keep-in-foreground --port=0 \
+  --dhcp-relay=___,___ --pid-file=/tmp/relay.pid --user=root &
 ```
 
 <details>
 <summary>Answer</summary>
 
-`--dhcp-relay=10.10.0.1,10.20.0.10`. The first value is the relay's address on the client-facing segment, which ends up in `giaddr`. The second is the central server. The server then needs a `--dhcp-range` (with netmask) covering 10.10.0.0/24 and a route back to it. You'll build all of this in the chapter's build task.
+```bash
+ip netns exec oob dnsmasq --keep-in-foreground --port=0 \
+  --dhcp-relay=10.30.0.1,10.20.0.10 --pid-file=/tmp/relay.pid --user=root &
+```
+10.30.0.1 becomes the `giaddr` on relayed requests, which tells the server to allocate from 10.30.0.0/24. 10.20.0.10 is where requests are sent.
 
 </details>
 
 ### Your turn: on your own
 
-A relay on interface 10.10.7.1/24 forwards to a central server that has pools for 10.10.5.0/24, 10.10.7.0/24 and 10.20.0.0/24. (a) Which pool does a BMC behind that relay get an address from, and why? (b) In a NICo site, an engineer points the OOB relay at the nico-api VIP instead of the nico-dhcp VIP. What would you see, and where?
+The lab's DHCP server config (in the build task) serves one relayed OOB segment, 10.30.0.0/24. Add a second rack segment, 10.31.0.0/24, whose relay address is 10.31.0.1. BMC `02:00:00:00:00:51` should get 10.31.0.50 with the name `bmc-02`, and each segment's clients must get *their own* router. Write the dnsmasq lines for the server, and the relay line for the new switch.
 
 <details>
 <summary>Hint 1</summary>
 
-The server never sees the BMC's own address, because it doesn't have one yet. What address does the relay put in the packet?
+The server picks the range from the giaddr. You need a second `dhcp-range` covering 10.31.0.0/24.
 
 </details>
 
 <details>
 <summary>Hint 2</summary>
 
-giaddr = 10.10.7.1. Which pool contains it?
+Options that differ by segment need tags: `dhcp-range=set:NAME,...` and `dhcp-option=tag:NAME,...`.
 
 </details>
 
 <details>
 <summary>Hint 3</summary>
 
-For (b), consider who listens on UDP 67 at each VIP, and which logs would stay empty.
+The relay for the new switch is `dhcp-relay=10.31.0.1,10.20.0.10`.
 
 </details>
 
 <details>
 <summary>Answer</summary>
 
-(a) 10.10.7.0/24. The relay writes its client-facing address 10.10.7.1 into giaddr, and the server picks the pool whose subnet contains giaddr. (b) The BMCs never get leases and keep re-sending Discovers. Nothing listens for DHCP on the nico-api VIP, so `kubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp` shows nothing for those MACs, and Site Explorer never finds the BMCs. Fix it by pointing the relay at the nico-dhcp LoadBalancer VIP.
+Server:
+```text
+dhcp-range=set:oob1,10.30.0.100,10.30.0.200,255.255.255.0,1h
+dhcp-range=set:oob2,10.31.0.100,10.31.0.200,255.255.255.0,1h
+dhcp-option=tag:oob1,option:router,10.30.0.1
+dhcp-option=tag:oob2,option:router,10.31.0.1
+dhcp-host=02:00:00:00:00:51,bmc-02,10.31.0.50
+```
+These replace the single untagged `dhcp-range` and router option. New switch:
+```text
+dhcp-relay=10.31.0.1,10.20.0.10
+```
+The server also needs a route back to 10.31.0.0/24 through that switch. NICo's equivalent is defining the segment's prefix and gateway in the site's network configuration and pointing that switch's relay at the nico-dhcp VIP.
 
 </details>
 
 ### Explain it
 
-In your own words: Why does the relay put its own client-facing address into giaddr, and not the address of its uplink towards the server? What would break if it used the uplink address?
+In your own words: Explain why the relay's `giaddr` is enough for one central server to hand out correct addresses on dozens of separate segments, and why that lets NICo's OOB switches stay "dumb" (relay only).
 
 ### Check
 
-**1. How does a DHCP server decide which subnet to allocate from for a relayed request?**
+**1. What does a DHCP relay put in `giaddr`?**
 
-A. From the giaddr the relay filled in
-B. From the vendor prefix of the client's MAC
-C. From the request's UDP source port
-D. It picks a pool at random
-
-<details>
-<summary>Answer</summary>
-
-**A.** From the giaddr the relay filled in
-
-giaddr is the relay's address on the client's segment, so it identifies the subnet. MAC prefixes identify vendors, not locations. The ports are always 67/68.
-
-</details>
-
-**2. In NICo, what decides which IP address a BMC gets?**
-
-A. NICo Core's IP address management; nico-dhcp forwards the request over gRPC
-B. The OOB switch's DHCP pool
-C. The BMC chooses its own address
-D. Kubernetes assigns it
+A. The client's MAC address
+B. Its own interface address on the client's segment
+C. The DHCP server's address
+D. The address being offered
 
 <details>
 <summary>Answer</summary>
 
-**A.** NICo Core's IP address management; nico-dhcp forwards the request over gRPC
+**B.** Its own interface address on the client's segment
 
-nico-dhcp is a stateless proxy and Core performs IPAM. The OOB switches only relay requests; they don't allocate addresses.
+giaddr tells the server which segment the request came from, so it can choose the right subnet, and where to send the reply. The MAC is in a separate field (chaddr), and the offered address goes in yiaddr.
 
 </details>
 
-**3. Which of these DHCP requests does NOT go to central nico-dhcp?**
+**2. In a NICo site, who decides which IP a newly seen BMC gets?**
 
-A. A DPU-mode host's own DHCP, served by the DHCP server on its DPU
-B. A host BMC's request
-C. A DPU BMC's request
-D. A DPU OOB interface's request
+A. The OOB switch's DHCP relay
+B. nico-dhcp, which stores leases itself
+C. NICo Core's IP address management, reached by nico-dhcp over gRPC
+D. The BMC chooses and announces it
 
 <details>
 <summary>Answer</summary>
 
-**A.** A DPU-mode host's own DHCP, served by the DHCP server on its DPU
+**C.** NICo Core's IP address management, reached by nico-dhcp over gRPC
 
-In DPU mode, the per-host DHCP server on the DPU handles the host's requests locally, so they never reach the physical underlay. BMCs and DPU OOB interfaces are Underlay endpoints that nico-dhcp serves.
+nico-dhcp is stateless and forwards to NICo Core, which performs IPAM. Switches only relay.
 
 </details>
 
-**Sources:** [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md), [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [glossary.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/glossary.md), [getting-started/quick-start.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/quick-start.md)
+**3. A host's DPU is managed in DPU mode. Do the host OS's DHCP requests reach nico-dhcp?**
+
+A. Yes, through the OOB relay
+B. No, a DHCP server on the DPU answers them locally
+C. Only if option 82 is set
+D. Only during discovery
+
+<details>
+<summary>Answer</summary>
+
+**B.** No, a DHCP server on the DPU answers them locally
+
+For DPU-mode hosts, NICo runs a per-host DHCP server on the DPU, configured by dpu-agent, so those requests never reach the underlay. nico-dhcp serves underlay endpoints such as BMCs and DPU OOB interfaces.
+
+</details>
+
+**Sources:** [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md), [glossary.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/glossary.md), [getting-started/prerequisites/bmc-oob-setup.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/prerequisites/bmc-oob-setup.md), [getting-started/quick-start.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/quick-start.md)
 
 <a id="out-of-band-management-network"></a>
 ## 8. Out-of-band (OOB) management network
@@ -1575,359 +1589,504 @@ In DPU mode, the per-host DHCP server on the DPU handles the host's requests loc
 
 ### Before you read
 
-- Why put BMCs on their own network instead of the same network as the hosts' data NICs?
-- Do the OOB switches in a NICo site need to run their own DHCP server?
+- A tenant's OS has crashed and its data network is down. How can an operator still power-cycle the machine and watch its console?
+- What is the minimum the OOB switches must do so NICo can find a newly cabled BMC?
 
 <details>
 <summary>Answers</summary>
 
-- **Why put BMCs on their own network instead of the same network as the hosts' data NICs?** So tenants on the data network can't reach the BMCs that control their hardware, and so management still works when the host OS or data network is broken.
-- **Do the OOB switches in a NICo site need to run their own DHCP server?** No. They only relay DHCP to nico-dhcp. NICo manages IP allocation.
+- **A tenant's OS has crashed and its data network is down. How can an operator still power-cycle the machine and watch its console?** Through the BMC, which runs independently of the host OS and is reached over a separate management (out-of-band) network.
+- **What is the minimum the OOB switches must do so NICo can find a newly cabled BMC?** Relay the BMC's DHCP requests to the nico-dhcp VIP. NICo does the addressing and discovery; the switches do not assign addresses themselves.
 
 </details>
 
 ### Explanation
 
-The **OOB management network** is a separate network that connects the BMCs (Chapter 6), and the DPUs' management ports, to the site controller. It is how NICo can discover, power-cycle and repair machines without depending on the host OS. This chapter's pieces meet on it.
+The **out-of-band (OOB) management network** is a separate network that connects the management ports: host BMCs, DPU BMCs and DPU OOB interfaces (ch. 6–7). It does not depend on the host OS or the tenant data network, which is why NICo can discover, power-cycle and repair machines even when the tenant OS is down. Because it reaches every BMC, it is also the most sensitive network on the site.
 
-**Discovery runs entirely over this network:**
+NICo's requirements for it:
 
-1. A BMC powers on and broadcasts DHCP.
-2. The OOB switch's **DHCP relay** forwards the request to the **nico-dhcp VIP** (`NICo_DHCP_EXTERNAL`).
-3. nico-dhcp passes it to NICo Core, which allocates an address.
-4. Site Explorer crawls the BMC over Redfish. It uses the factory credentials listed for that MAC in `expected_machines.json`, then rotates them to site-managed values.
+- **Connectivity** from every BMC to the site controller, normally over a dedicated OOB network.
+- **A DHCP relay on every BMC-facing network**, pointing at the NICo DHCP service IP (`NICo_DHCP_EXTERNAL`, the nico-dhcp VIP).
+- **`Underlay` connectivity** for DPU BMC and DPU OOB interfaces.
+- **The switches only relay.** NICo manages IP allocation for the management network.
 
-Only machines in that manifest are ingested. Site Explorer also refuses to contact any BMC (`MissingCredentials`) until the site-wide BMC root credential and the host and DPU UEFI credentials are set.
+How discovery works, using the earlier lessons: a BMC powers on and broadcasts DHCP. The switch relays it to nico-dhcp. NICo Core allocates an address and checks the MAC against `expected_machines.json`; only listed hosts are discovered and ingested. Site Explorer then crawls the BMC's address over Redfish, collecting serials, power state, boot order, lockdown mode and firmware versions, and pairs hosts with their DPUs. Unbound provides recursive DNS to managed machines over this same OOB network.
 
-**Requirements from the docs:**
+The quick start's step 6 is "Connect the OOB network": configure the relay to the nico-dhcp VIP, then check that requests arrive with
+`kubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp --tail=20`.
 
-- Network connectivity from every BMC to the site controller, normally through a dedicated OOB network.
-- A DHCP relay on **every BMC-facing network**, pointing at the nico-dhcp service IP. The switches *only relay*; NICo allocates.
-- `Underlay` connectivity for DPU BMC and DPU OOB interfaces.
+Two more details. The OOB and management ranges belong in `deny_prefixes`, the CIDRs that tenant instances must not reach. And there is one exception to the dedicated topology: a **zero-DPU host's BMC** (including hosts with DPU policy `nic`) may share a `HostInband` subnet/VLAN with the host OS NIC. The BMC is then still operationally out of band, but it has no dedicated network isolation. The exception never applies to DPU BMCs or DPU OOB interfaces.
 
-**On the NICo side:** nico-dhcp gets a stable VIP from MetalLB's internal pool, set through `nico-dhcp.externalService.annotations`. `externalService.enabled: true` must be set explicitly, because it defaults to false. Add your OOB and management CIDRs to `deny_prefixes` so tenant instances can't reach them. Unbound serves recursive DNS to managed machines over the OOB network.
+**Analogy.** The OOB network is a building's service corridor: maintenance staff reach every room's electrical panel without walking through the guests' rooms, and it keeps working when the main hallway is blocked. The analogy breaks down in one important way: anyone in that corridor can reach every panel at once. That is why tenants must be kept out of it (deny_prefixes, disabled in-band BMC access), not just politely discouraged.
 
-**One exception:** a zero-DPU host's *host BMC* (including a host whose DPU policy is `nic`) may share a `HostInband` subnet/VLAN with the host OS. This never applies to DPU BMCs or DPU OOB interfaces, and that topology lacks dedicated network isolation.
+### Worked example: Find which expected BMCs never reached DHCP
 
-**Analogy.** Think of a building's service corridor: only maintenance staff use it, it reaches every room's fuse box, and it stays open when the guest hallways are closed. The analogy breaks down because a real corridor doesn't need a receptionist at each floor forwarding requests to head office. The OOB network does: every segment needs its DHCP relay pointed at nico-dhcp, or the rooms on that floor are never found.
+**Step 1: Write the expected-machines manifest.**
 
-### Worked example: Bring a new rack's OOB segment online for NICo
-
-**Step 1: Find the relay target.**
+Use the documented format:
 
 ```bash
-kubectl get svc nico-dhcp -n nico-system
+mkdir -p ~/oob-check && cd ~/oob-check
+cat > expected_machines.json <<'EOF'
+{
+  "expected_machines": [
+    {"bmc_mac_address": "C4:5A:B1:C8:38:0D", "bmc_username": "root",
+     "bmc_password": "default-password1", "chassis_serial_number": "SERIAL-1"},
+    {"bmc_mac_address": "C4:5A:FF:FF:FF:FF", "bmc_username": "root",
+     "bmc_password": "default-password2", "chassis_serial_number": "SERIAL-2"}
+  ]
+}
+EOF
 ```
-The external IP should come from your internal VIP pool. If it shows pending, MetalLB hasn't assigned it yet, so fix that first.
 
-**Step 2: List the BMC-facing segments.**
+**Step 2: Record the MACs actually seen on DHCP.**
 
-For the new rack, write down every L3 segment that BMCs or DPU management ports sit on, for example host-BMC VLAN `10.91.12.0/24`, plus the Underlay segments for DPU BMC and DPU OOB. Each one needs a relay.
-
-**Step 3: Configure the relay on each segment's gateway.**
-
-On the switch interface that acts as gateway for each segment, enable DHCP relay with the nico-dhcp VIP as the server. The exact syntax depends on the switch OS, so follow your vendor's docs. The switch must not run its own DHCP pool for these segments.
-
-**Step 4: Tell NICo which machines to expect.**
-
-Add each host's BMC MAC, chassis serial and factory credentials to `expected_machines.json`, then upload it:
+On a real site you would collect these from the nico-dhcp logs or switch tables. Here, simulate the list:
 
 ```bash
-nico-admin-cli -a <nico-api-endpoint> em replace-all --filename expected_machines.json
+printf 'c4:5a:b1:c8:38:0d\n7c:c2:55:00:11:22\n' > observed.txt
 ```
-Also make sure the site-wide BMC and UEFI credentials have been set (Quick Start, Step 7).
 
-**Step 5: Watch requests arrive.**
+**Step 3: Normalise case and sort both lists.**
 
 ```bash
-kubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp --tail=20
-kubectl logs -n nico-system -l app.kubernetes.io/name=nico-api --tail=50 | grep -i "site explorer\|bmc\|discovery"
+jq -r '.expected_machines[].bmc_mac_address' expected_machines.json \
+  | tr '[:upper:]' '[:lower:]' | sort > expected.txt
+tr '[:upper:]' '[:lower:]' < observed.txt | sort > seen.txt
 ```
-First you should see DHCP activity for the new MACs, then Site Explorer contacting the BMCs.
+MACs are case-insensitive, and comparing without normalising produces false mismatches.
+
+**Step 4: Compare.**
+
+```bash
+echo "expected but never seen:"; comm -23 expected.txt seen.txt
+echo "seen but not expected:";   comm -13 expected.txt seen.txt
+```
+Output: `c4:5a:ff:ff:ff:ff` never seen; `7c:c2:55:00:11:22` unexpected.
+
+**Step 5: Interpret.**
+
+- **Never seen**: the request never reached DHCP. Check power and cabling, whether that VLAN has a relay, the relay's target (the nico-dhcp VIP), and the routing between them.
+- **Seen but not expected**: the network works, but the host is not in the manifest, so NICo will not ingest it. Either add it to `expected_machines.json` (with its chassis serial) or find out why an unknown BMC is on the OOB network.
 
 ### Your turn: finish it
 
-Fill in the blanks to print the nico-dhcp VIP and then check that BMC requests are reaching nico-dhcp.
+Here is the same comparison in Python. Fill in the JSON key and the set operator so the first line prints expected MACs that were never seen.
 
 ```text
-VIP=$(kubectl get svc nico-dhcp -n nico-system -o jsonpath='{.status.loadBalancer.ingress[0].___}')
-echo "Configure every BMC-facing relay to forward to $VIP"
-kubectl logs -n nico-system -l app.kubernetes.io/name=___ --tail=20
+import json
+
+machines = json.load(open("expected_machines.json"))["expected_machines"]
+expected = {m["___"].lower() for m in machines}
+seen = {line.strip().lower() for line in open("observed.txt") if line.strip()}
+print("never seen (check relay/cabling):", sorted(expected ___ seen))
+print("seen but not expected (will not be ingested):", sorted(seen - expected))
 ```
 
 <details>
 <summary>Answer</summary>
 
-The first blank is `ip`, the field in the LoadBalancer ingress entry that holds the VIP. The second is `nico-dhcp`, the label value that selects the DHCP service pods.
+The key is `bmc_mac_address` and the operator is `-` (set difference):
+
+```python
+expected = {m["bmc_mac_address"].lower() for m in machines}
+...
+print("never seen (check relay/cabling):", sorted(expected - seen))
+```
 
 </details>
 
 ### Your turn: on your own
 
-Three symptoms in a new NICo site. Diagnose each one. (a) BMCs in rack 7 never show up in the nico-dhcp logs. (b) The rack 9 BMCs show DHCP activity and get addresses, but nothing is ingested, and Site Explorer reports `MissingCredentials`. (c) Hosts ingest fine, but a tenant instance can ping BMC addresses.
+A new rack is cabled to a new OOB switch. Its 16 host BMCs are all in `expected_machines.json`, but none of them are discovered, and `kubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp` shows nothing from their MACs. BMCs in other racks work fine. Write an ordered checklist, from most to least likely, of what to check, and say what each check would prove.
 
 <details>
 <summary>Hint 1</summary>
 
-Follow the chain: relay → VIP → nico-dhcp → Core → Site Explorer → Redfish. Where does each symptom stop?
+The logs show nothing at all, so the problem is before nico-dhcp. Follow the packet from the BMC.
 
 </details>
 
 <details>
 <summary>Hint 2</summary>
 
-`MissingCredentials` is about site-wide credentials, not about a single host.
+A relay needs two things: to be enabled on the BMC-facing VLAN interface, and to point at the right target.
 
 </details>
 
 <details>
 <summary>Hint 3</summary>
 
-(c) is an isolation problem. Which siteConfig field lists CIDRs that instances must not reach?
+Other racks work, so nico-dhcp and its VIP are fine globally. Focus on what is new: the switch, its VLAN/SVI, its relay config and its routing to the VIP.
 
 </details>
 
 <details>
 <summary>Answer</summary>
 
-(a) The requests never reach nico-dhcp. Look for a missing relay on rack 7's BMC segment, a relay pointing at the wrong IP, or no route from that switch to the nico-dhcp VIP. (b) DHCP works. Site Explorer aborts because the site-wide BMC root credential or the host/DPU UEFI site defaults aren't set; set them with `nico-admin-cli credential add-bmc` / `add-uefi` (and confirm the MACs are in `expected_machines.json`). (c) The OOB CIDRs are missing from `deny_prefixes`. Add the OOB and management ranges so instances can't reach them.
+1. **Relay configured on the new switch's BMC-facing VLAN interface.** Without it, the broadcasts never leave the rack. Check the switch config, or capture on the uplink for UDP 67 traffic.
+2. **Relay target is the nico-dhcp VIP** (`NICo_DHCP_EXTERNAL`), not an old or typo'd address. A wrong target sends packets elsewhere.
+3. **Routing between the switch and the VIP in both directions.** Replies go back to the relay's giaddr, so the site must route the new segment's prefix back to this switch. Ping or trace from the switch's SVI to the VIP.
+4. **Physical: BMC ports cabled to the right ports and VLAN, and link up.** Compare the switch's MAC table with the manifest MACs.
+5. **The segment is defined in NICo.** Once requests arrive, NICo needs this prefix in its network configuration to allocate from it. This becomes the next issue after the logs start showing the MACs.
+
+When nico-dhcp logs show the MACs, the network side is done, and you move on to Site Explorer, credentials and the manifest.
 
 </details>
 
 ### Explain it
 
-In your own words: Why does NICo want the OOB switches to relay to one central nico-dhcp, instead of each switch handing out addresses itself? Think about discovery and who owns IP allocation.
+In your own words: Explain why NICo puts address allocation and discovery in the central nico-dhcp/Core path and asks the OOB switches only to relay. What does this buy you when you add a rack or redeploy the site controller?
 
 ### Check
 
-**1. What must the OOB switches do for NICo discovery to work?**
+**1. What must the OOB switches do for NICo to discover BMCs?**
 
-A. Relay BMC DHCP requests to the nico-dhcp VIP
-B. Run a DHCP pool for each BMC VLAN
-C. NAT the BMCs out to the internet
-D. Proxy Redfish to NICo
-
-<details>
-<summary>Answer</summary>
-
-**A.** Relay BMC DHCP requests to the nico-dhcp VIP
-
-The switches only relay, and NICo manages IP allocation. A local switch pool would hand out addresses NICo doesn't know about, so discovery would never start.
-
-</details>
-
-**2. Which device may share a HostInband subnet with the host OS instead of using a dedicated OOB network?**
-
-A. The host BMC of a zero-DPU host
-B. A DPU BMC
-C. A DPU OOB interface
-D. Any BMC, as long as it uses a tagged VLAN
+A. Run their own DHCP pools for the BMC subnets
+B. Relay BMC DHCP requests to the nico-dhcp VIP
+C. Run Redfish against each BMC
+D. Forward all BMC traffic to the DPU
 
 <details>
 <summary>Answer</summary>
 
-**A.** The host BMC of a zero-DPU host
+**B.** Relay BMC DHCP requests to the nico-dhcp VIP
 
-The docs limit the exception to host BMCs on zero-DPU hosts (including DPU policy `nic`) and state that it doesn't apply to DPU BMC or DPU OOB interfaces.
+NICo manages IP allocation. The switches only need to relay DHCP to the NICo DHCP service IP. Running local pools would bypass NICo's discovery. Site Explorer, not the switches, is what talks Redfish.
 
 </details>
 
-**3. A BMC's DHCP request reaches nico-dhcp, but the host is never ingested. Its MAC is missing from which file?**
+**2. Which endpoint may share a `HostInband` subnet with the host OS instead of sitting on a dedicated OOB network?**
+
+A. A DPU BMC
+B. A DPU OOB interface
+C. The host BMC of a zero-DPU host
+D. Any BMC, if the operator chooses
 
 <details>
 <summary>Answer</summary>
 
-expected_machines.json (the Expected Machines manifest)
+**C.** The host BMC of a zero-DPU host
 
-Only hosts listed in the manifest are discovered and ingested. The manifest also supplies the factory credentials Site Explorer uses.
+The documented exception covers only a zero-DPU host's BMC (including DPU policy `nic`). It does not apply to DPU BMCs or DPU OOB interfaces, and that topology lacks dedicated network isolation.
 
 </details>
 
-**Sources:** [getting-started/prerequisites/bmc-oob-setup.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/prerequisites/bmc-oob-setup.md), [getting-started/quick-start.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/quick-start.md), [glossary.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/glossary.md), [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [overview/what-is-nico.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/what-is-nico.md)
+**3. Why should the OOB network's prefixes be included in `deny_prefixes`?**
+
+A. So DHCP relays can find them
+B. To stop tenant instances from reaching BMCs and other management endpoints
+C. Because MetalLB requires it
+D. To speed up DNS
+
+<details>
+<summary>Answer</summary>
+
+**B.** To stop tenant instances from reaching BMCs and other management endpoints
+
+`deny_prefixes` lists CIDRs that instances must not reach, such as OOB, control plane and management. The OOB network reaches every BMC, so tenant access to it would undermine isolation.
+
+</details>
+
+**Sources:** [getting-started/prerequisites/bmc-oob-setup.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/prerequisites/bmc-oob-setup.md), [getting-started/quick-start.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/getting-started/quick-start.md), [glossary.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/glossary.md), [architecture/overview.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/architecture/overview.md), [overview/capabilities.md](https://github.com/dsx-ai-factory/infra-controller/blob/38a79e71dff48df7480134da2363acddd5ec117f/docs/overview/capabilities.md)
 
 <a id="build-task"></a>
-## Build task: Mini OOB network: discover a BMC by relayed DHCP, then provision it over Redfish
+## Build task: A miniature OOB site: discover, name, time-sync and network-boot a mock BMC
 
-**Goal:** Inside one Docker container, build three network namespaces: a BMC, a router acting as the DHCP relay, and a controller running DHCP, DNS and NTP. The BMC gets a fixed address through the relay. The controller finds it by DNS, the BMC checks its time against the controller's NTP server, and the controller then stages an example BIOS change (SR-IOV), sets a one-time PXE boot, reboots, and locks the host down.
+**Goal:** Inside one privileged container, build three network namespaces: `bmc` (a mock BMC), `oob` (an OOB switch acting as router and DHCP relay) and `svc` (the site controller, with a DHCP server standing in for the nico-dhcp VIP, DNS, NTP and a PXE-style HTTP server for user-data). Have the BMC get its address through the relay. Confirm that it can resolve names and read the time. Then, acting as the controller over the OOB network, stage a BIOS change and a one-time PXE boot through Redfish, reboot it, and check the result.
 
-**Why it matters for NICo:** This is a small-scale version of NICo's discovery path. A BMC broadcasts DHCP, the OOB relay forwards it to a central server that knows the BMC's MAC, names and time services are handed out, and the controller drives firmware settings, boot order and lockdown over Redfish. Once you've debugged each link here, a real site's "host never appears" or "host won't PXE" problems are much easier to place.
+**Why it matters for NICo:** This is a scaled-down version of NICo's Day 0 path. In a real site, OOB switches relay BMC DHCP to the nico-dhcp VIP, NICo Core allocates the address and matches the MAC against `expected_machines.json`, BMC time is set from enterprise NTP, nico-dns and Unbound provide names, the PXE Service serves cloud-init user-data, and NICo sets the boot order through Redfish and records configuration data such as lockdown mode. The BIOS attribute change in this lab exercises the general Redfish pending-settings mechanism; it is not a documented NICo setting. When discovery or provisioning fails on a real site, you debug the same chain: relay → DHCP → routing → DNS/NTP → Redfish.
 
 **You need:**
 
-- Docker (or rootful Podman: `sudo podman run --privileged ...`). Docker Desktop on macOS works, because the container runs in its Linux VM.
-- A folder (e.g. `~/nico-ch8`) containing `mockbmc.py` from Lesson 1 and `sntp.py` from Lesson 5
-- About 200 MB of disk space for packages
+- Docker (Engine or Desktop) on Linux or macOS. Podman also works but needs rootful mode (`sudo podman run --privileged ...`), because rootless containers usually cannot create network namespaces.
+- About 300 MB of disk for the `python:3.12-slim` image and packages.
+- `mock_bmc.py` from Lesson 1 and `sntp.py` from Lesson 5.
+- A host directory for the lab, e.g. `mkdir -p ~/nico-ch8-lab/pxe && cd ~/nico-ch8-lab`. All files below go there and are mounted into the container at `/lab`.
 
 Try each step yourself first. The details are there when you need them.
 
 <details>
-<summary>Step 1: Start the lab container</summary>
+<summary>Step 1: Write the site service configs</summary>
 
-```bash
-cd ~/nico-ch8      # contains mockbmc.py and sntp.py
-docker run --rm -it --privileged -v "$PWD":/lab -w /lab --name ooblab debian:stable-slim bash
-# inside the container:
-apt-get update && apt-get install -y iproute2 iputils-ping dnsmasq-base busybox chrony bind9-dnsutils curl python3
+Copy `mock_bmc.py` and `sntp.py` into `~/nico-ch8-lab`, then create:
+
+`dnsmasq-server.conf` (DHCP server, standing in for the nico-dhcp VIP, plus the DNS zone `oob.lab`):
+```text
+# --- DNS: answer only for our own zone, no recursion ---
+interface=svc0
+bind-interfaces
+no-resolv
+no-hosts
+domain=oob.lab
+local=/oob.lab/
+host-record=dhcp.oob.lab,10.20.0.10
+host-record=ntp.oob.lab,10.20.0.10
+host-record=pxe.oob.lab,10.20.0.10
+# --- DHCP: relayed requests from the OOB segment 10.30.0.0/24 ---
+dhcp-range=10.30.0.100,10.30.0.200,255.255.255.0,1h
+# Like expected_machines.json: only known MACs get an address
+dhcp-host=02:00:00:00:00:50,bmc-01,10.30.0.50
+dhcp-ignore=tag:!known
+dhcp-option=option:router,10.30.0.1
+dhcp-option=option:dns-server,10.20.0.10
+dhcp-option=option:ntp-server,10.20.0.10
+dhcp-leasefile=/lab/run/leases
+pid-file=/lab/run/dnsmasq.pid
+log-facility=/lab/run/dnsmasq.log
+log-dhcp
+log-queries
+user=root
 ```
-Everything below runs inside this shell. `--rm` means everything is lost when you exit, so paste the steps into `/lab/lab.sh` as you go if you want to re-run them.
 
-</details>
-
-<details>
-<summary>Step 2: Build the topology</summary>
-
+`dnsmasq-relay.conf` (the OOB switch's relay; DNS is turned off):
+```text
+port=0
+dhcp-relay=10.30.0.1,10.20.0.10
+pid-file=/lab/run/relay.pid
+log-facility=/lab/run/relay.log
+log-dhcp
+user=root
 ```
-[bmc] bmc0 ---- oob0 [relay] mgmt0 ---- ctrl0 [ctrl]
-   (DHCP)    10.10.0.1/24    10.20.0.1/24    10.20.0.10/24
-```
-```bash
-for ns in bmc relay ctrl; do ip netns add $ns; ip -n $ns link set lo up; done
-ip link add bmc0 type veth peer name oob0
-ip link set bmc0 netns bmc; ip link set oob0 netns relay
-ip link add mgmt0 type veth peer name ctrl0
-ip link set mgmt0 netns relay; ip link set ctrl0 netns ctrl
-ip -n bmc link set bmc0 address c4:5a:b1:c8:38:0d
-ip -n relay addr add 10.10.0.1/24 dev oob0
-ip -n relay addr add 10.20.0.1/24 dev mgmt0
-ip -n ctrl addr add 10.20.0.10/24 dev ctrl0
-ip -n bmc link set bmc0 up; ip -n relay link set oob0 up
-ip -n relay link set mgmt0 up; ip -n ctrl link set ctrl0 up
-ip -n ctrl route add 10.10.0.0/24 via 10.20.0.1
-ip netns exec relay sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'
-ip netns exec ctrl ping -c1 10.10.0.1     # the controller can reach the relay's OOB side
-```
-The BMC has no IP address yet. It will get one by DHCP.
 
-</details>
-
-<details>
-<summary>Step 3: Start the controller's services (DHCP + DNS, NTP)</summary>
-
-dnsmasq plays both nico-dhcp and the authoritative DNS server for `site.test`. The `dhcp-host` line has the same job as an expected-machines entry: it maps a known MAC to an identity.
-
-```bash
-ip netns exec ctrl dnsmasq --conf-file=/dev/null --no-daemon --user=root \
-  --interface=ctrl0 --bind-interfaces --no-resolv \
-  --local=/site.test/ --domain=site.test \
-  --host-record=bmc-host1.site.test,10.10.0.50 \
-  --dhcp-range=10.10.0.100,10.10.0.200,255.255.255.0,1h \
-  --dhcp-host=c4:5a:b1:c8:38:0d,10.10.0.50,bmc-host1 \
-  --dhcp-option=option:router,10.10.0.1 \
-  --dhcp-option=option:dns-server,10.20.0.10 \
-  --dhcp-option=option:ntp-server,10.20.0.10 \
-  --dhcp-leasefile=/tmp/ctrl.leases --pid-file=/tmp/ctrl-dnsmasq.pid \
-  --log-facility=- --log-dhcp > /tmp/ctrl-dnsmasq.log 2>&1 &
-
-cat > /tmp/chrony-ctrl.conf <<'EOF'
+`chrony.conf` (an NTP server that serves its own clock; `-x` at startup stops it from touching the clock):
+```text
 local stratum 8
 allow 10.0.0.0/8
-pidfile /tmp/chronyd-ctrl.pid
-driftfile /tmp/chronyd-ctrl.drift
+bindaddress 10.20.0.10
 cmdport 0
-bindcmdaddress /
-EOF
-ip netns exec ctrl chronyd -x -d -f /tmp/chrony-ctrl.conf > /tmp/chrony.log 2>&1 &
+pidfile /lab/run/chronyd.pid
 ```
-`-x` tells chronyd to serve time without trying to set the container's clock. `local stratum 8` makes it serve its own clock as a stratum 8 source, which is a lab shortcut; a real site points at real upstream servers. Note that the `--dhcp-range` covers 10.10.0.0/24 even though the controller has no interface on that subnet. Relayed requests (giaddr 10.10.0.1) are matched against it.
+
+`pxe/user-data` (served like NICo's PXE Service would):
+```yaml
+#cloud-config
+hostname: lab-host-01
+ntp:
+  enabled: true
+  servers: [ntp.oob.lab]
+runcmd:
+  - [sh, -c, 'echo "provisioned at $(date -u)" > /etc/motd']
+```
 
 </details>
 
 <details>
-<summary>Step 4: Start the DHCP relay on the router</summary>
+<summary>Step 2: Write the DHCP client hook, topology script and verifier</summary>
 
-```bash
-ip netns exec relay dnsmasq --conf-file=/dev/null --no-daemon --user=root --port=0 \
-  --dhcp-relay=10.10.0.1,10.20.0.10 \
-  --pid-file=/tmp/relay.pid --log-facility=- --log-dhcp > /tmp/relay.log 2>&1 &
-```
-This is the role your OOB switches play in a NICo site: they relay requests and don't allocate any addresses.
-
-</details>
-
-<details>
-<summary>Step 5: Power on the BMC: DHCP through the relay, then start Redfish</summary>
-
-```bash
-cat > /tmp/bmc-dhcp.sh <<'EOF'
+`udhcpc.sh` (busybox udhcpc runs this to apply the lease; it also writes the BMC namespace's resolv.conf from the DNS option):
+```sh
 #!/bin/sh
 case "$1" in
+  deconfig)
+    ip addr flush dev "$interface"
+    ip link set "$interface" up
+    ;;
   bound|renew)
-    ip addr add "$ip/$subnet" dev "$interface" 2>/dev/null
-    [ -n "$router" ] && ip route replace default via "${router%% *}"
-    echo "lease: ip=$ip router=$router dns=$dns ntp=$ntpsrv" | tee /tmp/bmc-lease.txt
+    ip addr flush dev "$interface"
+    ip addr add "$ip/$mask" dev "$interface"
+    ip route replace default via "$router" dev "$interface"
+    mkdir -p /etc/netns/bmc
+    : > /etc/netns/bmc/resolv.conf
+    for d in $dns; do echo "nameserver $d" >> /etc/netns/bmc/resolv.conf; done
+    echo "ip=$ip mask=$mask router=$router dns=$dns domain=$domain ntp=$ntpsrv server=$serverid" > /lab/run/lease.txt
     ;;
 esac
-EOF
-chmod +x /tmp/bmc-dhcp.sh
-ip netns exec bmc busybox udhcpc -i bmc0 -f -q -n -O ntpsrv -s /tmp/bmc-dhcp.sh
-# expect: lease: ip=10.10.0.50 router=10.10.0.1 dns=10.20.0.10 ntp=10.20.0.10
-
-ip netns exec bmc python3 /lab/mockbmc.py 10.10.0.50 8000 > /tmp/bmc.log 2>&1 &
 ```
-Check both logs: `grep -i c4:5a /tmp/ctrl-dnsmasq.log` should show DHCPDISCOVER, OFFER, REQUEST and ACK lines, and `cat /tmp/relay.log` shows the relay's own output.
+
+`setup-net.sh`:
+```sh
+#!/bin/sh
+set -e
+for ns in bmc oob svc; do ip netns add $ns; done
+# BMC <-> OOB switch
+ip link add bmc0 type veth peer name oob-bmc netns oob
+ip link set bmc0 netns bmc
+# OOB switch <-> site controller
+ip link add svc0 type veth peer name oob-svc netns oob
+ip link set svc0 netns svc
+ip -n bmc link set bmc0 address 02:00:00:00:00:50
+ip -n oob addr add 10.30.0.1/24 dev oob-bmc
+ip -n oob addr add 10.20.0.1/24 dev oob-svc
+ip -n svc addr add 10.20.0.10/24 dev svc0
+for ns in bmc oob svc; do ip -n $ns link set lo up; done
+ip -n bmc link set bmc0 up
+ip -n oob link set oob-bmc up
+ip -n oob link set oob-svc up
+ip -n svc link set svc0 up
+ip -n svc route add default via 10.20.0.1
+ip netns exec oob sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'
+# Give oob and svc a reachable resolver, so tools don't hang on reverse lookups
+for ns in oob svc; do mkdir -p /etc/netns/$ns; echo "nameserver 10.20.0.10" > /etc/netns/$ns/resolv.conf; done
+mkdir -p /lab/run
+echo "topology ready"
+```
+The BMC namespace deliberately has no address: it has to get one through the relay.
+
+`verify.sh`:
+```sh
+#!/bin/sh
+B="ip netns exec bmc"
+S="ip netns exec svc"
+SYS=http://10.30.0.50:8000/redfish/v1/Systems/1
+pass=0; fail=0
+check() {
+  name=$1; shift
+  if sh -c "$*" >/dev/null 2>&1; then echo "PASS  $name"; pass=$((pass+1))
+  else echo "FAIL  $name"; fail=$((fail+1)); fi
+}
+check "DHCP: BMC leased 10.30.0.50 from 10.20.0.10 via relay" \
+  "grep -q 'ip=10.30.0.50 .*server=10.20.0.10' /lab/run/lease.txt"
+check "DNS: bmc-01.oob.lab resolves to 10.30.0.50" \
+  "$B dig +short bmc-01.oob.lab | grep -qx 10.30.0.50"
+check "NTP: time server answers the BMC" \
+  "$B python3 /lab/sntp.py 10.20.0.10"
+check "PXE: user-data served by name, starts with #cloud-config" \
+  "$B curl -sf http://pxe.oob.lab:8080/user-data | head -n 1 | grep -qx '#cloud-config'"
+check "BIOS: staged SriovGlobalEnable applied after reset" \
+  "$S curl -sf $SYS/Bios | grep -q '\"SriovGlobalEnable\": \"Enabled\"'"
+check "Boot: one-time PXE override used and consumed" \
+  "$S curl -sf $SYS | grep -q '\"LastBootSource\": \"Pxe\"' && $S curl -sf $SYS | grep -q '\"BootSourceOverrideEnabled\": \"Disabled\"'"
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ]
+```
+
+Make the scripts executable on the host: `chmod +x udhcpc.sh setup-net.sh verify.sh`.
 
 </details>
 
 <details>
-<summary>Step 6: Pre-ingestion checks: name, time, Redfish reachability</summary>
+<summary>Step 3: Start the lab container and build the topology</summary>
 
 ```bash
-BMC=$(ip netns exec ctrl dig +short @10.20.0.10 bmc-host1.site.test); echo "BMC is $BMC"
-ip netns exec bmc python3 /lab/sntp.py 10.20.0.10      # the BMC checks the NTP server it got by DHCP
-rf() { ip netns exec ctrl curl -s -H 'Content-Type: application/json' "$@"; }
-B="http://$BMC:8000/redfish/v1/Systems/1"
-rf "$B"
+cd ~/nico-ch8-lab
+docker run --rm -it --privileged --name nico-ch8 -v "$PWD:/lab" python:3.12-slim bash
 ```
-The SNTP output should show `stratum=8` and an offset near 0. In chrony, the `local stratum` value is exactly the stratum clients see. (ntpd's local-clock driver works differently, which is why you may see "+1" rules of thumb elsewhere.) The Redfish GET goes from ctrl, through the relay, to the BMC.
+Inside the container:
+```bash
+# Stop package install scripts from auto-starting daemons
+printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
+apt-get update && apt-get install -y --no-install-recommends \
+  iproute2 dnsmasq-base chrony busybox curl bind9-dnsutils procps
+sh /lab/setup-net.sh
+ip -n oob -br addr          # oob-bmc 10.30.0.1/24, oob-svc 10.20.0.1/24
+ip -n bmc -br addr          # bmc0 UP, no IPv4 yet
+```
+`procps` provides `pkill`, which the slim image lacks and later steps use. Everything stays in one container on purpose. Routing between separate Docker networks through a router container is blocked on Docker 28+.
 
 </details>
 
 <details>
-<summary>Step 7: Provision: example BIOS change, PXE once, reboot, lock down</summary>
+<summary>Step 4: Start the site controller services</summary>
 
 ```bash
-rf -X PATCH -d '{"Attributes": {"SriovGlobalEnable": "Enabled"}}' "$B/Bios/Settings"
-rf -X PATCH -d '{"Boot": {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": "Pxe"}}' "$B"
-rf -X POST -d '{"ResetType": "ForceRestart"}' "$B/Actions/ComputerSystem.Reset"   # BootedFrom Boot0002
-rf -X PATCH -d '{"Oem": {"Mock": {"Lockdown": true}}}' "$B"
+ip netns exec svc dnsmasq --conf-file=/lab/dnsmasq-server.conf --keep-in-foreground &
+sleep 1
+ip netns exec svc chronyd -d -x -u root -f /lab/chrony.conf > /lab/run/chrony.log 2>&1 &
+ip netns exec svc python3 -m http.server 8080 --bind 10.20.0.10 --directory /lab/pxe \
+  > /lab/run/pxe.log 2>&1 &
+for i in $(seq 1 20); do ip netns exec svc curl -sf http://10.20.0.10:8080/user-data >/dev/null && break; sleep 0.5; done
+ip netns exec svc dig +short @10.20.0.10 pxe.oob.lab     # 10.20.0.10
 ```
-This is the same order as in Lessons 1–3: finish every firmware change, then lock the host before a tenant would get it. The SR-IOV attribute is just the mock's example setting.
+dnsmasq starts first, so the HTTP server's reverse lookup of its own address gets a fast answer.
 
 </details>
 
-**Check it works:** Run these inside the container. Each check should give the expected result:
+<details>
+<summary>Step 5: Turn on the relay and let the BMC request an address</summary>
+
 ```bash
-grep -i c4:5a:b1:c8:38:0d /tmp/ctrl.leases                       # a lease line with 10.10.0.50 bmc-host1
-rf "$B/Bios" | grep Sriov                                         # "SriovGlobalEnable": "Enabled"
-rf "$B" | grep -E 'LastBootedFrom|Lockdown|OverrideEnabled'       # "Boot0002", true, "Disabled"
-ip netns exec bmc curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Mock-Inband: 1' "$B"   # 403
+ip netns exec oob dnsmasq --conf-file=/lab/dnsmasq-relay.conf --keep-in-foreground &
+sleep 1
+ip netns exec bmc busybox udhcpc -i bmc0 -f -q -n -t 5 -O ntpsrv -s /lab/udhcpc.sh
+cat /lab/run/lease.txt
+cat /etc/netns/bmc/resolv.conf
+grep -E 'DHCP(DISCOVER|OFFER|REQUEST|ACK)' /lab/run/dnsmasq.log
 ```
-You're done when all four match. That shows a relayed DHCP lease for the expected MAC, an applied BIOS change, a one-time PXE boot that has cleared itself, and lockdown blocking in-band access.
+Expected: `Lease of 10.30.0.50 obtained from 10.20.0.10`. The server log shows DORA for `02:00:00:00:00:50` arriving on `svc0`. The server has no interface on the BMC's segment, so these requests can only have come through the relay.
+
+**Optional: watch an unexpected BMC get refused.** This mimics a BMC missing from `expected_machines.json`. dnsmasq only reads its config at startup, and rerunning udhcpc first flushes bmc0's address, so follow the whole sequence, including the restore:
+```bash
+# 1. Stop only the server dnsmasq (the relay keeps running) and change the known MAC
+pkill -f dnsmasq-server.conf; sleep 1
+sed -i 's/^dhcp-host=02:00:00:00:00:50/dhcp-host=02:00:00:00:00:99/' /lab/dnsmasq-server.conf
+ip netns exec svc dnsmasq --conf-file=/lab/dnsmasq-server.conf --keep-in-foreground &
+sleep 1
+# 2. Ask again: no lease this time, and bmc0 is left with no address
+ip netns exec bmc busybox udhcpc -i bmc0 -f -q -n -t 3 -O ntpsrv -s /lab/udhcpc.sh || echo "no lease (expected)"
+grep ignored /lab/run/dnsmasq.log | tail -2
+ip -n bmc -br addr          # no IPv4
+# 3. Restore the MAC, restart the server, and get 10.30.0.50 back
+pkill -f dnsmasq-server.conf; sleep 1
+sed -i 's/^dhcp-host=02:00:00:00:00:99/dhcp-host=02:00:00:00:00:50/' /lab/dnsmasq-server.conf
+ip netns exec svc dnsmasq --conf-file=/lab/dnsmasq-server.conf --keep-in-foreground &
+sleep 1
+ip netns exec bmc busybox udhcpc -i bmc0 -f -q -n -t 5 -O ntpsrv -s /lab/udhcpc.sh
+ip -n bmc -br addr          # bmc0 10.30.0.50/24 again
+```
+Do not continue until bmc0 has 10.30.0.50 again: the mock BMC in the next step binds that address.
+
+</details>
+
+<details>
+<summary>Step 6: Check DNS and time from the BMC, then start its Redfish service</summary>
+
+```bash
+ip netns exec bmc dig +short bmc-01.oob.lab          # 10.30.0.50 (name registered from DHCP)
+ip netns exec bmc dig example.com | grep status       # REFUSED or SERVFAIL: authoritative-only, no recursion
+sleep 5; ip netns exec bmc python3 /lab/sntp.py 10.20.0.10   # stratum 8 (leap=3 for the first few seconds is OK)
+ip netns exec bmc curl -s http://pxe.oob.lab:8080/user-data | head -3
+
+ip netns exec bmc python3 /lab/mock_bmc.py 10.30.0.50 > /lab/run/bmc.log 2>&1 &
+for i in $(seq 1 20); do ip netns exec svc curl -sf http://10.30.0.50:8000/redfish/v1/Systems/1 >/dev/null && break; sleep 0.5; done
+```
+The last loop runs from `svc`: the controller reaches the BMC by routing across the OOB switch.
+
+</details>
+
+<details>
+<summary>Step 7: Act as the controller: stage BIOS, arm one-time PXE, reboot</summary>
+
+```bash
+RF="ip netns exec svc curl -s -H Content-Type:application/json"
+SYS=http://10.30.0.50:8000/redfish/v1/Systems/1
+$RF -X PATCH -d '{"Attributes":{"SriovGlobalEnable":"Enabled"}}' $SYS/Bios/Settings
+$RF -X PATCH -d '{"Boot":{"BootSourceOverrideEnabled":"Once","BootSourceOverrideTarget":"Pxe"}}' $SYS
+$RF $SYS/Bios | grep Sriov                    # still Disabled: pending only
+$RF -X POST -d '{"ResetType":"ForceRestart"}' -w '%{http_code}\n' $SYS/Actions/ComputerSystem.Reset   # 204
+$RF $SYS/Bios | grep Sriov                    # Enabled
+$RF $SYS | grep -E 'LastBootSource|OverrideEnabled'   # Pxe, Disabled
+```
+Then run `sh /lab/verify.sh`.
+
+</details>
+
+**Check it works:** Inside the container, run `sh /lab/verify.sh`. It must print six `PASS` lines (DHCP via relay, DNS, NTP, PXE user-data, BIOS applied, one-time PXE consumed) and end with `6 passed, 0 failed`, with exit status 0 (`echo $?` prints `0`).
 
 <details>
 <summary>If you get stuck</summary>
 
-- udhcpc says `no lease, failing`: check `/tmp/relay.log` for errors and `/tmp/ctrl-dnsmasq.log` for a DHCPDISCOVER. If the server sees nothing, the relay isn't running or `--dhcp-relay` has its two addresses swapped (relay's local address first). If the server logs 'no address range available', the `--dhcp-range` doesn't cover 10.10.0.0/24 or is missing its netmask.
-- The server sees the request but the BMC never gets the reply: the controller needs `ip -n ctrl route add 10.10.0.0/24 via 10.20.0.1` so it can reach giaddr 10.10.0.1.
-- `busybox: applet not found` for udhcpc: run `apt-get install -y udhcpc` and use `udhcpc` instead of `busybox udhcpc`.
-- sntp.py shows `stratum=0` or `leap=3`, or times out: chronyd can take a few seconds to enable its local reference. Wait 10–20 s and retry, and check `/tmp/chrony.log`. Once it's ready you should see `stratum=8`.
-- `dig` returns nothing: dnsmasq may have failed to start. `cat /tmp/ctrl-dnsmasq.log` and look for 'address already in use' or a typo. Public names won't resolve, because `--no-resolv` makes this server answer only for `site.test`, like an authoritative-only server.
-- curl gets 'connection refused' from the BMC: `mockbmc.py` must start *after* the lease, because it binds to 10.10.0.50. Check `/tmp/bmc.log` and confirm `ip -n bmc addr` shows the address.
-- The mock keeps state only in memory. If you restart `mockbmc.py`, re-run step 7 before verifying.
+- `File exists` or `Cannot find device` when re-running setup-net.sh: the namespaces are left over. Run `pkill dnsmasq; pkill chronyd; pkill -f mock_bmc; pkill -f http.server; ip -all netns delete; rm -rf /etc/netns /lab/run`, then run it again, or just exit and start a fresh container.
+- udhcpc keeps sending discovers with no lease: check `/lab/run/relay.log` and `/lab/run/dnsmasq.log`. Nothing in the server log means the relay isn't forwarding (is the relay dnsmasq running in `oob`? is `ip_forward` 1?). `no address range available for DHCP request via 10.30.0.1` means the server's `dhcp-range` doesn't cover the relay's subnet. A log line saying the MAC was `ignored` means it doesn't match `dhcp-host` (check you restored it after the optional refusal exercise, and restarted the server dnsmasq).
+- `dnsmasq: failed to create listening socket ... Address in use`: an earlier dnsmasq is still running in that namespace. `pkill dnsmasq` and start again (server first, then relay).
+- curl to the mock BMC gives `connection refused`: give the server time to start; the wait loops exist for this reason. Check the mock's output with `cat /lab/run/bmc.log`. The mock must start *after* DHCP, because 10.30.0.50 doesn't exist before the lease; `ip -n bmc -br addr` should show it.
+- NTP check fails: make sure `cat /lab/run/chrony.log` shows no fatal error, and wait a few seconds after starting chronyd. Any reply passes the check; `leap=3` just means chrony hasn't picked its local reference yet.
+- `udhcpc.sh: Permission denied`: the executable bit was lost. Run `chmod +x /lab/udhcpc.sh` (Windows-style line endings cause similar errors).
 
 </details>
 
-**Stretch goal:** Add a second BMC segment (10.10.1.0/24) on the relay with a second veth pair and a second `--dhcp-relay=10.10.1.1,10.20.0.10` line. Add a matching `--dhcp-range` on the controller, and give the new BMC a MAC that is *not* in any `dhcp-host` line, so it gets a dynamic address. Then write a small Python 'site explorer' that reads `/tmp/ctrl.leases`, cross-references an `expected_machines.json` in the format from the NICo docs, and only sends Redfish requests to BMCs whose MAC is listed. Have it log and skip unknown MACs, just as NICo ingests only the machines in its manifest.
+**Stretch goal:** Add a lab-only lockdown to the mock and a controller script that respects it. Give `mock_bmc.py` a `state["locked"]` flag, exposed and toggled through a mock-only `PATCH /redfish/v1/Systems/1` body `{"Oem": {"Lab": {"Locked": true}}}`. While it is locked, `PATCH .../Bios/Settings` should return 403. Then write `apply_bios.sh`, run from `svc`. It should refuse to run if a marker file `/lab/run/assigned` exists (standing in for "a tenant has the host"); otherwise unlock, stage, reset, verify the live value, and re-lock, exiting non-zero if any step fails. This follows the lockdown model from Lesson 2, not a documented NICo procedure. Add two checks to `verify.sh`: a PATCH while locked returns 403, and the host is locked again at the end.
 
 ## Review notes
 
 The draft was rewritten once using review issues; the notes below are from the last review.
 
-This chapter was written with 5 finding(s) from testing earlier versions (`topics/<topic>/feedback.yaml`).
+This chapter was written with 6 finding(s) from testing earlier versions (`topics/<topic>/feedback.yaml`).
 
 Automated review: **minor-issues**. Issues to fix before relying on this chapter:
 
-- **minor** (cloud-init): Optional step 4 says that on Apple silicon you can use the arm64 image with qemu-system-aarch64 and -accel hvf, keeping the rest of the command. qemu-system-aarch64 stops with 'No machine specified' unless you pass -machine virt. It also needs -cpu host with hvf and UEFI firmware (-bios edk2-aarch64-code.fd). Followed as written, the macOS/arm64 variant does not boot. *Fix:* Give the full Apple-silicon command, e.g. `qemu-system-aarch64 -machine virt,accel=hvf -cpu host -m 1024 -nographic -bios $(brew --prefix qemu)/share/qemu/edk2-aarch64-code.fd -drive file=node01.qcow2,if=virtio -nic user,model=virtio-net-pci,hostfwd=tcp::2222-:22 -smbios 'type=1,serial=ds=nocloud;s=http://10.0.2.2:8080/'`, or state that the optional step is only tested on x86_64 Linux with KVM.
+- **minor** (DNS (authoritative and recursive)): The explanation and the third check question give 'so the parent zone can delegate to several stable server addresses' as the reason each nico-dns replica has its own VIP. The quick start only says that each replica gets its own VIP (use perPodAnnotations); it gives no reason. The NTP lesson labels its equivalent per-replica-VIP reasoning as general reasoning, but this lesson does not. *Fix:* Add a short qualifier in the explanation and in the check's explanation, e.g. '(general DNS reasoning; the docs state the per-replica VIP design but not the reason)', matching how the NTP lesson handles it.
 
 ---
 

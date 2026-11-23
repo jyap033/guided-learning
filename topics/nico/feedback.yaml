@@ -86,16 +86,16 @@ chapters:
       IP). Keep it.
   8:
     - >-
-      Tested 2026-11-21: DHCP through the relay, DNS and SNTP steps work as
-      written. BUG: Python's HTTPServer does a reverse-DNS lookup of its bind
-      address before it starts listening. In the bmc namespace no resolver is
-      reachable, so the mock BMC takes ~10 s or more to accept connections and
-      step 6/7 curls fail with "connection refused". Fix in the lab: before
-      starting the mock, write the DNS server the BMC got from DHCP to
-      /etc/netns/bmc/resolv.conf (`mkdir -p /etc/netns/bmc && echo "nameserver
-      10.20.0.10" > /etc/netns/bmc/resolv.conf`); tested: the mock then answers
-      at once and all four verify checks pass. Also add a short wait loop
-      (curl until it answers) after starting background servers.
+      Tested 2026-11-23: the rewritten mini OOB site lab (bmc/oob/svc
+      namespaces in one python:3.12-slim container, dnsmasq DHCP server and
+      relay, chrony, PXE user-data over HTTP, mock_bmc.py from lesson 1)
+      works as written, including the optional unknown-MAC exercise:
+      verify.sh prints 6 PASS and exits 0. Keep it.
+    - >-
+      Background: Python's HTTPServer does a reverse-DNS lookup of its bind
+      address before listening. In a namespace with no reachable resolver
+      that delays startup by ~10 s, so give every namespace a reachable
+      resolv.conf (the rewritten lab does) and wait for servers to answer.
   9:
     - >-
       Tested 2026-11-23: the FRR eBGP lab works as written (PfxRcd 1, leaked

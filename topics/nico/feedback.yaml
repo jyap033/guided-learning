@@ -104,3 +104,28 @@ chapters:
       also prints "Can't open configuration file /etc/frr/vtysh.conf" and
       "Configuration file[/etc/frr/frr.conf] processing failure: 11". They are
       harmless; tell the learner, or mount an empty vtysh.conf.
+  10:
+    - >-
+      Tested 2026-11-23: the pool planner (both site.json and the 1,112-rack
+      site-big.json) matches the expected output exactly, and lab.sh prints the
+      four PASS lines on a standard Debian kernel. On kernels built without
+      CONFIG_BRIDGE_VLAN_FILTERING (some minimal cloud or CI VMs), `ip link add
+      br0 type bridge vlan_filtering 1` fails with "RTNETLINK answers:
+      Operation not supported". Add that to the hints: the fix is a standard
+      distro kernel or Docker Desktop, not a change to the lab.
+  11:
+    - >-
+      Tested 2026-11-23 on a standard Debian kernel: VXLAN + VRF lab works as
+      written (verify.sh PASS; tcpdump shows vni 1000 and vni 2000 for the
+      same inner 10.10.0.1 > 10.10.0.2 pings; VNI mismatch breaks only blue).
+      Needs the vrf and vxlan kernel modules; minimal kernels without VRF fail
+      with "Error: Unknown device type". Mention that in the hints.
+  12:
+    - >-
+      Tested 2026-11-23 with QEMU 8.2 (no KVM): the toy PXE + pool server and
+      the network-booted VM work as written; the VM chains to
+      /host?mac=52-54-00-aa-bb-01 within ~10 s and gets loopback 10.99.0.3;
+      VNI pool exhaustion returns 409; the empty-pool config exits 1. With
+      user-mode networking the VM's requests appear in the access log as
+      127.0.0.1, and iPXE's echo lines usually do show on the -nographic
+      console.

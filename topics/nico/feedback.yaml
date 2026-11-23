@@ -78,3 +78,29 @@ chapters:
       Tested 2026-11-21: the mock BMC and Redfish client build task works as
       written (401 except the service root, ForceOff/409/On/not offered
       sequence, vendor-specific BIOS paths for Lenovo, HPE and Dell). Keep it.
+  7:
+    - >-
+      Tested 2026-11-21: the mock DPU explorer on an internal Docker network
+      works as written (paired False before the TODO, PASS after; OEM rshim
+      POST once then skipped; data-net probe fails by name and times out by
+      IP). Keep it.
+  8:
+    - >-
+      Tested 2026-11-21: DHCP through the relay, DNS and SNTP steps work as
+      written. BUG: Python's HTTPServer does a reverse-DNS lookup of its bind
+      address before it starts listening. In the bmc namespace no resolver is
+      reachable, so the mock BMC takes ~10 s or more to accept connections and
+      step 6/7 curls fail with "connection refused". Fix in the lab: before
+      starting the mock, write the DNS server the BMC got from DHCP to
+      /etc/netns/bmc/resolv.conf (`mkdir -p /etc/netns/bmc && echo "nameserver
+      10.20.0.10" > /etc/netns/bmc/resolv.conf`); tested: the mock then answers
+      at once and all four verify checks pass. Also add a short wait loop
+      (curl until it answers) after starting background servers.
+  9:
+    - >-
+      Tested 2026-11-23: the FRR eBGP lab works as written (PfxRcd 1, leaked
+      /24 filtered, loopback ping, 8972 passes and 8973 refused at MTU 9000,
+      link down withdraws the route, link up restores it). Every vtysh command
+      also prints "Can't open configuration file /etc/frr/vtysh.conf" and
+      "Configuration file[/etc/frr/frr.conf] processing failure: 11". They are
+      harmless; tell the learner, or mount an empty vtysh.conf.

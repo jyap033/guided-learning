@@ -1,0 +1,521 @@
+{
+  "kind": "revise",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Chapter 8 covered how a machine gets an address (DHCP) and how firmware picks what to boot (boot order, boot source override). Chapters 9–11 built the network: an underlay that BGP routes over, IP pools, and a VXLAN/EVPN overlay in which each tenant network gets a VNI. This chapter connects those pieces to the services NICo uses to boot and connect the machines it manages.\n\nThe chapter has five ideas. First, **PXE/iPXE boot**: how a machine with an empty disk loads a program over the network, and what NICo's PXE Service sends it. Second, **resource pools**: the ranges of loopback IPs, VLAN IDs and VNIs that NICo hands out. NICo's docs require all three ranges to be non-empty. Leaving one empty is a misconfiguration that can make setup fail, or leave you with a deployment that is hard to fix afterward. Third, the two physical **network segment types**, `Underlay` and `HostInband`. They decide which network a BMC, a DPU's management port or a host's OS interface sits on. Fourth, the **VNI pool** as a capacity question: how its size limits the number of overlay networks a site can create, and how to add room safely. Fifth, **DPU mode vs NIC mode**. This decides whether a host's DHCP is answered by a server on its own DPU or by the central `nico-dhcp` service.\n\nWhy NICo needs all of this: NICo promises that a racked machine reaches the ready state without anyone touching it. That only works if every machine can boot from the network, every endpoint is on the right segment, every allocation comes from a pool that isn't empty, and every DHCP request reaches the right server. If any one of these is wrong, hosts sit there unprovisioned. The build task at the end combines all five ideas into one small server that runs on a laptop, and a QEMU VM network-boots from it.",
+    "objectives": [
+      "Trace a network boot from firmware DHCP, through an iPXE script, to the artifact NICo's PXE Service serves to a DPU or an x86 host",
+      "Size and check the three NICo resource pools (lo-ip, vlan-id, vni), and explain why each one must be non-empty",
+      "Assign BMCs, DPU OOB interfaces and host OS interfaces to the correct segment type, Underlay or HostInband",
+      "Estimate how many VPCs a VNI pool supports (assuming one VNI per VPC), and plan an added range that avoids VNIs already in use on the fabric",
+      "Predict which DHCP server answers a host, based on whether its BlueField is in DPU mode, in NIC mode or absent"
+    ],
+    "lessons": [
+      {
+        "concept": "pxe-ipxe-boot",
+        "prequestions": [
+          {
+            "question": "A brand-new server has an empty disk. When it powers on, what is the very first thing it must get from the network before it can download anything?",
+            "answer": "An IP address, plus directions to a boot file. DHCP provides both. Without an address, the machine can't talk to any server."
+          },
+          {
+            "question": "Guess: why would a system load a small network bootloader (iPXE) first, instead of having the firmware download the OS directly?",
+            "answer": "The network boot built into firmware is limited. Classic PXE uses slow TFTP and can't run scripts. iPXE adds HTTP, scripting and variables (such as the machine's MAC address), so the server can give each machine its own instructions and deliver large images efficiently."
+          }
+        ],
+        "explanation": "**Network booting** means the firmware loads its first program from the network instead of from a local disk.\n\n**Classic PXE** (Preboot eXecution Environment) works like this:\n1. The firmware sends a DHCP request. The reply contains an IP address, a *next-server* and a *boot filename*.\n2. The firmware downloads that file, a small *network bootstrap program*. It usually uses TFTP, a very simple and slow file-transfer protocol.\n3. The program runs and continues the boot.\n\n**UEFI HTTP boot** lets UEFI firmware fetch a boot URL over HTTP directly. If Secure Boot is on (ch. 5), the firmware only runs EFI binaries that have valid signatures.\n\n**iPXE** is an open-source network bootloader, and it is often the program loaded in step 2. It runs **iPXE scripts**: plain text files that start with `#!ipxe`. In a script, `${net0/mac}` expands to the NIC's MAC address and `${buildarch}` expands to the CPU architecture. `chain URL` downloads the next script or binary and runs it. The client fills in the variables before making the request, so the server can return a different script for each machine.\n\n**What NICo does.** The **PXE Service** (`nico-pxe`) serves boot artifacts over HTTP: iPXE scripts, cloud-init user-data and OS images. It is **stateless**. For each request, it asks the API Service (NICo Core) over mTLS/gRPC which artifact this host should get. The Redfish workflow describes these cases:\n- A **DPU** is set to boot via *HTTP IPv4 UEFI* and power-cycled through Redfish. It fetches `nico.efi` and cloud-init user-data containing its `machine_id` and `server_uri`, then installs `dpu-agent`.\n- An **x86 host** gets `scout.efi` with `cli_cmd=auto-detect` for discovery.\n- The host's UEFI boot order puts the **DPU's PF MAC first** (ch. 10), so the host network-boots through the DPU.\n\nManaged hosts are configured to always boot from PXE. If PXE finds a local bootable device, the host boots that device. NICo supports any OS that can be installed via iPXE. After it hands off the boot, NICo manages nothing inside the OS.\n\nOne current caveat: DPF is now the default for *DPU* provisioning. Setting `\"dpf_enabled\": false` for a host keeps it on the *deprecated* iPXE path. Hosts are still booted with PXE/iPXE.",
+        "analogy": "Think of checking in at a conference. The front desk (DHCP) gives you a badge (your IP address) and a slip that says \"go to booth 4\" (the boot filename). At booth 4 (the PXE Service), a clerk looks up your badge number with head office (the API Service) and hands you a personal agenda (an iPXE script) that sends you to the right sessions (kernel, image, cloud-init). Where the analogy breaks down: a real attendee remembers who they are. A booting machine remembers nothing, so its whole identity comes from what it sends (MAC, architecture) and what the server sends back.",
+        "workedExample": {
+          "title": "Serve and fetch an iPXE script on your laptop",
+          "steps": [
+            {
+              "subgoal": "Write an iPXE script",
+              "detail": "```bash\nmkdir -p ~/pxe-lab && cd ~/pxe-lab\ncat > boot.ipxe <<'EOF'\n#!ipxe\ndhcp\necho Booting ${net0/mac} on ${buildarch}\nchain http://10.0.2.2:8000/next.ipxe?mac=${net0/mac:hexhyp}\nEOF\n```\nThe `#!ipxe` line marks the file as an iPXE script. `${net0/mac:hexhyp}` writes the MAC with hyphens instead of colons, which is safe to put in a URL."
+            },
+            {
+              "subgoal": "Serve it over HTTP",
+              "detail": "```bash\npython3 -m http.server 8000\n```\nThis plain HTTP file server plays the role of NICo's PXE Service. Leave it running."
+            },
+            {
+              "subgoal": "Fetch it the way iPXE would",
+              "detail": "In a second terminal:\n```bash\ncurl -i http://localhost:8000/boot.ipxe\n```\nYou get `200 OK` and the script exactly as you wrote it. The `${...}` placeholders are still there because **iPXE expands them on the client**, not on the server. The request also appears in the server's terminal, because Python's http.server logs to stderr."
+            },
+            {
+              "subgoal": "Map it to the full chain",
+              "detail": "The real flow: firmware DHCP provides an address and a boot file or URL → the firmware loads iPXE (or, with UEFI HTTP boot, an EFI binary directly) → iPXE runs this script → `chain` fetches the next artifact. In NICo, the server answering that request is `nico-pxe`. It asks NICo Core which artifact this machine should get: `nico.efi` plus cloud-init (`machine_id`, `server_uri`) for a DPU, or `scout.efi` for an x86 host."
+            },
+            {
+              "subgoal": "(Optional) Boot a real VM",
+              "detail": "If you have QEMU installed, `qemu-system-x86_64 -m 256 -nographic -boot n -netdev user,id=n0,bootfile=http://10.0.2.2:8000/boot.ipxe -device e1000,netdev=n0` network-boots a VM. QEMU's built-in DHCP gives the VM the URL, and the emulated NIC's boot ROM is iPXE. The server log shows the VM fetch `boot.ipxe` and then request `next.ipxe`, which returns 404 because that file doesn't exist yet. Quit QEMU with Ctrl-a then x."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the two blanks so this iPXE script is valid and hands off to a per-host URL on the toy server.",
+          "partialSolution": "___\necho Fetching per-host script for ${net0/mac}\n___ http://10.0.2.2:8080/host?mac=${net0/mac:hexhyp}",
+          "answer": "Line 1 is `#!ipxe`, the header every iPXE script needs. Line 3 starts with `chain`, the command that downloads the URL and runs it as the next script or binary."
+        },
+        "independentProblem": {
+          "prompt": "Write a small Python HTTP server on 127.0.0.1:8081. A request like `GET /boot?arch=arm64` should get an iPXE script saying it would chain `nico.efi` (the DPU case). `arch=x86_64` should get one saying it would chain `scout.efi` (the host case). Anything else gets a 404. An iPXE client would call it with `chain http://SERVER:8081/boot?arch=${buildarch}`. Test it with curl. (This is a toy, not NICo's real API.)",
+          "hints": [
+            "Use `http.server.BaseHTTPRequestHandler` and override `do_GET`.",
+            "Pass `urllib.parse.urlparse(self.path).query` to `parse_qs` to get the `arch` value.",
+            "Keep a dict like `{\"arm64\": \"#!ipxe\\necho would chain nico.efi (DPU)\\n\", \"x86_64\": ...}`. Send the matching body with `send_response`, a `Content-Length` header, `end_headers()` and `wfile.write()`."
+          ],
+          "answer": "```python\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nfrom urllib.parse import urlparse, parse_qs\n\nSCRIPTS = {\n    \"arm64\": \"#!ipxe\\necho would chain nico.efi (DPU)\\n\",\n    \"x86_64\": \"#!ipxe\\necho would chain scout.efi (host)\\n\",\n}\n\nclass H(BaseHTTPRequestHandler):\n    def do_GET(self):\n        arch = parse_qs(urlparse(self.path).query).get(\"arch\", [\"\"])[0]\n        body = SCRIPTS.get(arch, \"#!ipxe\\necho unknown arch\\n\").encode()\n        self.send_response(200 if arch in SCRIPTS else 404)\n        self.send_header(\"Content-Type\", \"text/plain\")\n        self.send_header(\"Content-Length\", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\nHTTPServer((\"127.0.0.1\", 8081), H).serve_forever()\n```\nTo test: `curl -i 'http://127.0.0.1:8081/boot?arch=arm64'` returns 200 with the nico.efi line, `arch=x86_64` returns the scout.efi line, and `arch=riscv64` returns 404."
+        },
+        "selfExplanation": "Why does NICo keep the PXE Service stateless and have it ask the API Service for each host's artifact, instead of giving it its own list of which host boots what?",
+        "checks": [
+          {
+            "question": "Which statement about NICo's PXE Service is correct?",
+            "options": [
+              "It keeps its own database of which image each host should boot",
+              "It serves iPXE scripts, cloud-init user-data and OS images over HTTP, and asks the API Service which artifact each host gets",
+              "It hands out IP addresses to hosts while they boot",
+              "It sets the host boot order on the BMC over Redfish"
+            ],
+            "answer": "It serves iPXE scripts, cloud-init user-data and OS images over HTTP, and asks the API Service which artifact each host gets",
+            "explanation": "nico-pxe is stateless, and only the API Service reads and writes PostgreSQL. IP addresses come from DHCP (nico-dhcp or the DPU-local server), not from PXE. The boot order is set over Redfish in a separate step of the workflow."
+          },
+          {
+            "question": "A BlueField DPU is set to boot via HTTP IPv4 UEFI and power-cycled. What does the PXE server give it?",
+            "options": [
+              "scout.efi with cli_cmd=auto-detect",
+              "nico.efi with cloud-init user-data containing machine_id and server_uri",
+              "A TFTP-only pxelinux.0 and nothing else",
+              "The tenant's chosen OS image"
+            ],
+            "answer": "nico.efi with cloud-init user-data containing machine_id and server_uri",
+            "explanation": "The PXE server chooses the artifact by architecture. ARM DPUs get nico.efi plus cloud-init, which leads to dpu-agent being installed. scout.efi is for x86 hosts during discovery. The tenant OS is installed on the host later, not on the DPU."
+          },
+          {
+            "question": "Why does NICo put the DPU's PF MAC first in the host's UEFI boot order?",
+            "options": [],
+            "answer": "So the host network-boots through the DPU's network path. That path leads to NICo's PXE Service, which returns the artifact NICo has chosen for the host.",
+            "explanation": "The docs say `set_boot_order_dpu_first` prioritises the DPU's PF MAC, \"ensuring the host boots through the DPU's network path.\" If the boot order started with a local disk or a different NIC, the host would bypass NICo's control of the boot."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md",
+          "overview/operational-principles.md",
+          "overview/scope-and-boundaries.md",
+          "overview/lifecycle.md",
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "nico-resource-pools",
+        "prequestions": [
+          {
+            "question": "If two DPUs got the same loopback IP, what would go wrong on a BGP/EVPN fabric?",
+            "answer": "Each DPU uses its loopback as its unique identity on the fabric: as its BGP router ID or its VXLAN tunnel endpoint. With a duplicate, routes and tunnels meant for one DPU would reach the other, or be rejected. That's why one central allocator hands loopbacks out from a pool."
+          },
+          {
+            "question": "Guess: what would happen if an operator left the VNI range empty in the site config?",
+            "answer": "NICo would have nothing to hand out when it needs a VNI. NICo's docs require all three ranges (lo-ip, vlan-id, vni) to be non-empty. An empty range is a misconfiguration. The Quick Start warns that missing required values can make setup fail, or leave a deployment that is hard to fix afterward."
+          }
+        ],
+        "explanation": "A **resource pool** is a range of identifiers that NICo owns and hands out one value at a time. A single allocator, NICo Core backed by PostgreSQL, gives out every value, so no two objects get the same one. When a value is no longer needed, it goes back into the pool.\n\nThe site configuration (the `siteConfig` TOML in `helm-prereqs/values/nico-core.yaml`) defines three pools:\n\n| Pool | Quick Start description | Related idea |\n|---|---|---|\n| `[pools.lo-ip]` | Loopback IP range allocated to bare-metal hosts | Device loopbacks (the docs also mention DPU-loopback allocations) |\n| `[pools.vlan-id]` | VLAN ID allocation range | VLANs (ch. 10) |\n| `[pools.vni]` | VXLAN Network Identifier range | VNIs in the overlay (ch. 11) |\n\nThe Quick Start states that **the `[pools.lo-ip]`, `[pools.vlan-id]` and `[pools.vni]` ranges must be non-empty**. It also warns that missing required values can make setup fail, or produce an incorrectly configured deployment that is hard to fix afterward. The exact field syntax is documented in inline comments in that values file, so read it there instead of guessing.\n\nA **loopback** address is a single address (a `/32`) that belongs to the device itself, not to any one link. On a routed fabric, it is the device's stable identity: BGP uses it, and so does VXLAN as the tunnel endpoint. Compare this with the `/31` point-to-point subnets from ch. 3. A `/31` holds two addresses and addresses the *link* between two routers. A loopback holds one address and addresses the *device*. So a lo-ip range written as `10.99.0.0/24` has room for at most 256 loopbacks. The docs also say to keep DPU loopbacks and VXLAN tunnel endpoints on IPv4, even on sites that use IPv6 elsewhere.\n\nPools come up at several points in the lifecycle:\n- **Day 0 ingestion**: NICo allocates and configures IP address pools for BGP, loopback and the host OS.\n- **Tenant release (Day 2)**: when a tenant VRF is torn down, NICo returns the tenant IP, VNI and DPU-loopback allocations to their pools.\n\nWhen planning a pool, check two things. **Capacity**: is the range big enough for the fleet plus growth? **Overlap**: does the range collide with something the network team already uses, such as the admin network or the OOB network? Python's `ipaddress` module can answer both.",
+        "analogy": "Think of the ticket rolls at a deli counter, with one roll for each kind of ticket. Each customer takes the next ticket, so no two people hold the same number. If one roll is empty, that part of the counter can't serve anyone, which is why all three rolls must be loaded before opening. Where the analogy breaks down: deli tickets get thrown away. NICo's values go back into the pool when a tenant leaves and are handed out again later.",
+        "workedExample": {
+          "title": "Size and sanity-check three pools with Python",
+          "steps": [
+            {
+              "subgoal": "Write the planned ranges down",
+              "detail": "```python\n# pools_check.py: toy planning script, not NICo's config format\nimport ipaddress\n\nlo_ip   = ipaddress.ip_network(\"10.99.0.0/24\")\nvlan_id = (100, 1099)\nvni     = (10000, 10999)\nadmin   = ipaddress.ip_network(\"10.98.0.0/22\")   # existing admin network\n```"
+            },
+            {
+              "subgoal": "Compute capacity",
+              "detail": "```python\nprint(\"lo-ip  :\", lo_ip.num_addresses)            # 256\nprint(\"vlan-id:\", vlan_id[1] - vlan_id[0] + 1)    # 1000\nprint(\"vni    :\", vni[1] - vni[0] + 1)            # 1000\n```\nEach loopback is a /32, so the usual LAN rule of losing two addresses per subnet (network and broadcast) doesn't apply."
+            },
+            {
+              "subgoal": "Check value limits",
+              "detail": "```python\nassert 1 <= vlan_id[0] <= vlan_id[1] <= 4094, \"VLAN IDs are 1-4094\"\nassert 1 <= vni[0] <= vni[1] <= 2**24 - 1, \"VNIs are 24-bit\"\n```"
+            },
+            {
+              "subgoal": "Check for overlaps",
+              "detail": "```python\nassert not lo_ip.overlaps(admin), \"lo-ip overlaps the admin network\"\nprint(\"ok\")\n```\nRun `python3 pools_check.py`. Then change `admin` to `10.99.0.0/16` and run it again: the overlap assertion fails. It's better to find that collision now than after ingestion."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the validator so it rejects a config in which any of NICo's three required pools is missing or empty. `pools` maps a pool name to a list of ranges.",
+          "partialSolution": "REQUIRED = (\"lo-ip\", \"vlan-id\", \"___\")\n\ndef check(pools):\n    for name in REQUIRED:\n        if ___:\n            raise ValueError(f\"pool {name} must be non-empty\")\n\ncheck({\"lo-ip\": [(\"10.99.0.1\", \"10.99.0.254\")], \"vlan-id\": [(100, 199)], \"vni\": []})",
+          "answer": "The first blank is `vni`, which gives `REQUIRED = (\"lo-ip\", \"vlan-id\", \"vni\")`. The second blank is `not pools.get(name)`. With both filled in, the sample call raises `ValueError: pool vni must be non-empty`: an empty list is falsy, and a missing key returns None."
+        },
+        "independentProblem": {
+          "prompt": "Your site will have 150 managed hosts, each with one DPU. Assume each DPU needs one loopback from lo-ip. What is the smallest single CIDR block that fits them? Would that block also fit a planned expansion to 300 DPUs? Show the arithmetic and a one-line Python check.",
+          "hints": [
+            "A loopback is one /32, so a block holds 2^(32 − prefix length) loopbacks.",
+            "A /25 holds 128 and a /24 holds 256.",
+            "150 > 128, so a /25 is too small. 300 > 256, so the expansion needs a /23 (512) or a second range."
+          ],
+          "answer": "The smallest block for 150 DPUs is a /24 (256 addresses), because a /25 holds only 128. A /24 won't fit 300 DPUs. For that you need a /23 (512) or a second range added to the pool. Python check: `import ipaddress; print(ipaddress.ip_network('10.99.0.0/24').num_addresses >= 150, ipaddress.ip_network('10.99.0.0/24').num_addresses >= 300)` prints `True False`."
+        },
+        "selfExplanation": "Why do NICo's docs require all three pools to be filled in up front, instead of letting an operator leave one empty and fill it in when it's first needed?",
+        "checks": [
+          {
+            "question": "A site config leaves the VNI range empty but defines lo-ip and vlan-id. How should you treat this?",
+            "options": [
+              "Fine: NICo generates VNIs automatically from the VLAN IDs",
+              "Fine: it's a supported setup for sites that don't plan to use VPCs",
+              "A misconfiguration: the docs require all three pool ranges to be non-empty",
+              "Fine, as long as the VLAN pool is large"
+            ],
+            "answer": "A misconfiguration: the docs require all three pool ranges to be non-empty",
+            "explanation": "The Quick Start says the lo-ip, vlan-id and vni ranges must be non-empty, and warns that missing required values can make setup fail or leave a deployment that is hard to fix. The docs don't describe any VNI-free mode, and they don't say NICo derives VNIs from VLANs. VLAN IDs and VNIs are separate identifier spaces (12-bit vs 24-bit)."
+          },
+          {
+            "question": "When a tenant releases a host and NICo tears down the tenant VRF, what happens to the tenant IP, VNI and DPU-loopback allocations?",
+            "options": [
+              "They stay reserved for that tenant forever",
+              "They are returned to their pools",
+              "They are deleted, permanently shrinking the pools",
+              "The network team has to reclaim them by hand on the leaf switches"
+            ],
+            "answer": "They are returned to their pools",
+            "explanation": "The Day 2 cleanup section says NICo returns tenant IP, VNI and DPU-loopback allocations to their pools. The fabric stays static, so nobody reconfigures the leaf switches."
+          },
+          {
+            "question": "Which of these is NOT one of the three resource pools the NICo site config requires?",
+            "options": [
+              "lo-ip",
+              "vlan-id",
+              "vni",
+              "bmc-mac"
+            ],
+            "answer": "bmc-mac",
+            "explanation": "BMC MAC addresses are burned into the hardware and listed in expected_machines.json. NICo doesn't allocate them. The three required pools are lo-ip, vlan-id and vni."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "concept": "underlay-and-hostinband-network-segments",
+        "prequestions": [
+          {
+            "question": "A host has a BlueField DPU. Its host BMC, DPU BMC and DPU OOB port all need IP addresses before NICo can do anything. Which network do you think they sit on: the tenant overlay, or something else?",
+            "answer": "Something else: the physical management network. NICo calls this the Underlay segment type, and it is normally a dedicated OOB network. These ports need addresses before any tenant overlay exists, and their DHCP requests are relayed to the central nico-dhcp."
+          },
+          {
+            "question": "A host has no DPU at all. Where does its operating system's NIC get a DHCP address from?",
+            "answer": "With no DPU, there's no local DHCP server. The request goes through a relay to the central nico-dhcp, on a physical segment of type HostInband."
+          }
+        ],
+        "explanation": "A **network segment** in NICo is a network (a subnet/VLAN) that NICo knows about and allocates addresses on. NICo runs a state machine for segments (ch. 4). This lesson covers two *physical* segment types. Both are served by the central `nico-dhcp` service, which receives requests through DHCP relays on the switches and forwards them to NICo Core for IP address management.\n\n**Underlay** is the conventional management segment. It carries:\n- host BMCs\n- DPU BMCs\n- DPU OOB (out-of-band) interfaces\n\nUnderlay is normally a dedicated OOB network (ch. 7), with a DHCP relay on every BMC-facing network pointing at the `nico-dhcp` VIP. Site Explorer probes the BMCs it finds here over Redfish. NICo's `Underlay` segment type is *not* the same thing as the BGP underlay fabric from ch. 9, even though both are physical networks rather than overlays.\n\n**HostInband** is a physical segment for **zero-DPU hosts**: hosts that have no DPU, or whose DPU policy is `nic` (lesson 5). It carries:\n- the host OS interface, whose DHCP requests go to the central `nico-dhcp`\n- optionally, that same host's BMC, sharing one subnet/VLAN with the host OS NIC\n\nTwo rules apply:\n1. The sharing exception covers **host BMCs only**. A **DPU BMC or DPU OOB interface always stays on Underlay**.\n2. On HostInband, Site Explorer treats only **BMC-typed interfaces** as Redfish endpoints. Ordinary host data interfaces are not Redfish targets.\n\nWhat about a host whose DPU runs in DPU mode? A **DHCP server on the DPU itself** answers its OS DHCP requests. Those requests never reach the physical underlay, so that host's OS interface isn't on HostInband. The host's BMC and the DPU's BMC and OOB port are still on Underlay.\n\nSharing HostInband with a BMC comes with its own requirements for allocation, relay, DNS subdomain and isolation. A later chapter (ch. 29) covers them.",
+        "analogy": "Think of an office building. The Underlay is a locked service corridor that only facilities staff use to reach the electrical panels (the BMCs and DPU management ports). HostInband is an ordinary hallway, shared by a tenant office that has no reception desk of its own (a zero-DPU host). That office's own panel may also be reached from the hallway, but the building's main panels (DPU BMCs) never are. Where the analogy breaks down: anyone can walk down a real hallway. Sharing HostInband comes with specific isolation requirements, and only BMC-typed doors get knocked on (probed over Redfish).",
+        "workedExample": {
+          "title": "Place every interface in a two-host rack",
+          "steps": [
+            {
+              "subgoal": "List the endpoints",
+              "detail": "Host A has one BlueField in DPU mode. Host B has no DPU. The endpoints are A-host-BMC, A-DPU-BMC, A-DPU-OOB, A-host-OS, B-host-BMC and B-host-OS."
+            },
+            {
+              "subgoal": "Put management ports on Underlay first",
+              "detail": "A-host-BMC, A-DPU-BMC and A-DPU-OOB go on **Underlay**. The DPU BMC and DPU OOB *must* be there. The host BMC is there in the conventional layout."
+            },
+            {
+              "subgoal": "Handle the DPU-mode host OS",
+              "detail": "A-host-OS gets DHCP from the **DHCP server running on A's DPU**. The request stays local and never reaches the physical underlay, so A-host-OS isn't on any physical NICo segment."
+            },
+            {
+              "subgoal": "Handle the zero-DPU host",
+              "detail": "B-host-OS goes on **HostInband**, with its DHCP relayed to the central `nico-dhcp`. B-host-BMC goes on **Underlay**, or it can optionally share the HostInband subnet with B-host-OS."
+            },
+            {
+              "subgoal": "Check what Site Explorer will probe",
+              "detail": "The Redfish targets are every BMC on Underlay, plus B-host-BMC if it sits on HostInband as a BMC-typed interface. B-host-OS is not a target, because ordinary data interfaces on HostInband are not Redfish targets."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blank segment types in this toy Python mapping for host C. Its DPU policy is `nic`, so it is treated as a zero-DPU host, and its BMC shares the host OS subnet.",
+          "partialSolution": "placement = {\n    \"C-host-OS\":  \"___\",\n    \"C-host-BMC\": \"HostInband\",\n    \"C-DPU-BMC\":  \"___\",\n}\nprint(placement)",
+          "answer": "`\"C-host-OS\": \"HostInband\"` and `\"C-DPU-BMC\": \"Underlay\"`. The shared-HostInband exception covers the host BMC and host OS of a zero-DPU (or `nic`-policy) host. It never covers a DPU BMC or DPU OOB interface."
+        },
+        "independentProblem": {
+          "prompt": "To reduce the number of VLANs, an operator puts the DPU BMCs of several DPU-mode hosts on the same HostInband subnet as some zero-DPU hosts' OS NICs. Explain which rule this breaks and what the correct layout is.",
+          "hints": [
+            "Which endpoint types does the HostInband sharing exception allow?",
+            "The docs say the exception \"does not apply to a DPU BMC or DPU OOB interface\".",
+            "Move the DPU BMCs back to Underlay. Only zero-DPU hosts' OS NICs and, optionally, their own host BMCs belong on HostInband."
+          ],
+          "answer": "HostInband is for zero-DPU host OS interfaces and, optionally, those hosts' own BMCs. DPU BMCs and DPU OOB interfaces must be on Underlay, which is normally the dedicated OOB network with a DHCP relay to nico-dhcp. The correct layout: DPU BMCs and DPU OOB ports on Underlay; the zero-DPU hosts' OS NICs (and optionally their host BMCs) on HostInband; the DPU-mode hosts' OS DHCP handled locally by their DPUs."
+        },
+        "selfExplanation": "Why does it make sense that a DPU-mode host's OS DHCP never reaches the physical underlay, while a zero-DPU host's OS DHCP has to travel over HostInband to the central nico-dhcp?",
+        "checks": [
+          {
+            "question": "Which interface may NOT be placed on a HostInband segment?",
+            "options": [
+              "The OS NIC of a zero-DPU host",
+              "The host BMC of a zero-DPU host",
+              "A DPU OOB interface",
+              "The host BMC of a host whose DPU policy is nic"
+            ],
+            "answer": "A DPU OOB interface",
+            "explanation": "The shared-HostInband exception covers zero-DPU hosts, including hosts with DPU policy nic: their OS NIC and, optionally, their host BMC. DPU BMCs and DPU OOB interfaces always need Underlay."
+          },
+          {
+            "question": "On a HostInband segment, which interfaces does Site Explorer probe over Redfish?",
+            "options": [
+              "Every address on the segment",
+              "Only BMC-typed interfaces",
+              "None, because Site Explorer only scans Underlay",
+              "Only host OS interfaces"
+            ],
+            "answer": "Only BMC-typed interfaces",
+            "explanation": "Site Explorer scans Underlay BMCs, plus BMC-typed interfaces in the supported shared-HostInband topology. Ordinary host data interfaces on HostInband are not Redfish targets."
+          },
+          {
+            "question": "Does the central nico-dhcp serve the host OS of a host whose DPU is managed in DPU mode?",
+            "options": [],
+            "answer": "No. A DHCP server on the DPU, configured by dpu-agent, handles that host's requests locally, so they never reach the physical underlay.",
+            "explanation": "The docs say nico-dhcp \"does not serve the local overlay DHCP of a host with a managed DPU.\" It serves endpoints on Underlay and HostInband."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "architecture/overview.md",
+          "getting-started/prerequisites/bmc-oob-setup.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "concept": "vni-resource-pool",
+        "prequestions": [
+          {
+            "question": "In ch. 11, each tenant network (VPC/VRF) got its own VNI. Suppose a site's VNI pool holds exactly 500 values and each VPC takes one VNI. What's the most VPCs that can exist at once?",
+            "answer": "500, under that assumption. Once every VNI is handed out, a new VPC can't get one until an allocation goes back to the pool or more values are added."
+          },
+          {
+            "question": "Guess: what would go wrong if two tenant VPCs were given the same VNI?",
+            "answer": "VXLAN/EVPN uses the VNI to tell overlay networks apart on the wire. If two tenants shared a VNI, the fabric couldn't keep their traffic separate, so isolation would break. That's why VNIs come from a single allocator."
+          }
+        ],
+        "explanation": "The **VNI resource pool** is the `[pools.vni]` range from lesson 2, looked at as a capacity question. The Quick Start describes it as the site's \"VXLAN Network Identifier range\". Operators fill it in in `siteConfig`, it must be non-empty, and NICo allocates VNIs for the overlay from it. Ch. 11 showed that VXLAN/EVPN uses the VNI to tell overlay networks apart on the wire, so two tenant networks must never share one.\n\n**A working assumption.** In ch. 11, each tenant VPC (VRF) had its own L3VNI. This lesson carries that model forward and *assumes* each VPC needs one VNI from the pool. The docs pages for this chapter don't say exactly how many VNIs NICo allocates per VPC. Treat the arithmetic below as planning under that assumption, and check it against your release's VPC documentation before you size a real site.\n\n**Under that assumption, the pool caps the VPC count.** The number of free VNIs is the number of new VPCs you can still create. Once the pool is empty, new overlay networks can't get a VNI. When a tenant VRF is torn down during Day 2 cleanup, NICo returns its VNI allocation to the pool.\n\n**Plan capacity.** Size the pool for the VPCs you expect, with room to grow. A range from `lo` to `hi` inclusive holds `hi - lo + 1` VNIs, and multiple ranges add together.\n\n**Respect the identifier space.** A VNI is a 24-bit field, so the largest valid value is 16,777,215. That's far more than VLAN IDs (12-bit, 1–4094), and the small VLAN space is one reason VXLAN exists.\n\n**Avoid collisions.** Pick ranges that don't overlap VNIs the network team already uses on the fabric for other purposes. NICo doesn't touch the leaf switches (\"the network fabric stays static\"), but the fabric's own VNIs share the same EVPN space as NICo's.\n\n**Growing a pool on a live site.** The pages for this chapter don't document how to grow an established pool. Before changing anything, look up the supported procedure for your release in the NICo operations docs or the `nico-admin-cli` reference, and don't guess commands. Whatever the procedure is, plan the change the same way: add a *new, non-overlapping* range alongside the existing one. Shrinking or rewriting a range that is in use could strand VNIs that live tenant networks depend on.",
+        "analogy": "Think of a phone company that owns a block of numbers. It can sign up as many subscribers as the block has numbers. When the block runs out, it gets an extra block instead of renumbering everyone, and a cancelled line's number goes back into stock. Where the analogy breaks down: people dial phone numbers, but a VNI is a label inside a packet. And if two carriers held overlapping blocks, the result wouldn't just be a wrong number: tenant traffic would leak across isolation boundaries.",
+        "workedExample": {
+          "title": "Simulate VNI exhaustion and an added range",
+          "steps": [
+            {
+              "subgoal": "Model a small pool",
+              "detail": "```python\n# vni_sim.py: toy model assuming one VNI per VPC; not NICo code\nfree = list(range(10000, 10003))   # 3 VNIs\nvpcs = {}\n\ndef create(name):\n    if not free:\n        print(f\"{name}: FAILED, VNI pool exhausted\")\n        return\n    vpcs[name] = free.pop(0)\n    print(f\"{name}: vni {vpcs[name]}\")\n```"
+            },
+            {
+              "subgoal": "Fill it up",
+              "detail": "```python\nfor n in [\"vpc-a\", \"vpc-b\", \"vpc-c\", \"vpc-d\"]:\n    create(n)\n```\nThe first three VPCs get 10000–10002, and vpc-d fails. Under the one-VNI-per-VPC assumption, the pool size capped the VPC count at 3."
+            },
+            {
+              "subgoal": "Teardown returns capacity",
+              "detail": "```python\nfree.append(vpcs.pop(\"vpc-b\"))   # like a tenant VRF being torn down\ncreate(\"vpc-d\")                  # gets 10001\n```"
+            },
+            {
+              "subgoal": "Add a non-overlapping range",
+              "detail": "```python\nfree.extend(range(11000, 11002))   # stand-in for adding a new range to the pool\ncreate(\"vpc-e\"); create(\"vpc-f\")\n```\nRun `python3 vni_sim.py`. The existing VPCs keep their VNIs. Only the new ones draw from the added range."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the expression so `capacity` is the total number of VNIs across all configured ranges (bounds are inclusive). With the ranges shown, it should print 1500.",
+          "partialSolution": "ranges = [(10000, 10999), (20000, 20499)]\ncapacity = sum(___ for lo, hi in ranges)\nprint(capacity)",
+          "answer": "`hi - lo + 1`. The bounds are inclusive, so 10000–10999 holds 1000 VNIs and 20000–20499 holds 500, for a total of 1500."
+        },
+        "independentProblem": {
+          "prompt": "The site's VNI pool is 10000–10999. Assume each VPC uses one VNI. There are 950 VPCs now, and the business expects 1,400 within a year. The network team already uses VNIs 11000–11199 on the fabric. Propose a range to add, state how many VPCs the pool will support in total, and list the checks you'd run before applying it.",
+          "hints": [
+            "Current capacity is 1000, so you need at least 400 more, plus some margin.",
+            "The obvious next block, starting at 11000, collides with the network team's VNIs.",
+            "Something like 11200–11799 (600 VNIs) brings the total to 1600. Check that it overlaps nothing, that every value is at most 16,777,215, and that you add it alongside the existing range instead of rewriting that range."
+          ],
+          "answer": "Example: add 11200–11799 (600 VNIs). Total capacity becomes 1000 + 600 = 1600, which covers 1,400 with 200 to spare. Checks: (1) The new range doesn't overlap 10000–10999 or the fabric's 11000–11199. (2) Every value is at most 2^24−1 = 16,777,215. (3) The new range is added alongside the existing one, and the in-use 10000–10999 range is left untouched. (4) The one-VNI-per-VPC assumption holds according to your release's docs. (5) You apply it with the pool-growth procedure your NICo release documents, then confirm that a new VPC can be created."
+        },
+        "selfExplanation": "Why is adding a new, separate VNI range safer than rewriting the existing range into a bigger one somewhere else?",
+        "checks": [
+          {
+            "question": "Assume each VPC uses one VNI. A VNI pool holds 3 VNIs and 3 VPCs exist. A tenant asks for a 4th VPC. What happens?",
+            "options": [
+              "NICo reuses one of the existing VPCs' VNIs",
+              "NICo falls back to a VLAN ID from the vlan-id pool",
+              "The VPC can't get a VNI until one is returned to the pool or the pool gets more values",
+              "NICo reconfigures the leaf switches to create more VNIs"
+            ],
+            "answer": "The VPC can't get a VNI until one is returned to the pool or the pool gets more values",
+            "explanation": "Under that assumption, the pool size caps the VPC count. Sharing a VNI would break isolation, VLAN IDs come from a separate pool, and NICo doesn't reconfigure leaf switches because the fabric stays static."
+          },
+          {
+            "question": "Before NICo can allocate a VNI for a new overlay network, which siteConfig pool must still have free values?",
+            "options": [
+              "[pools.lo-ip]",
+              "[pools.vlan-id]",
+              "[pools.vni]",
+              "The expected_machines.json manifest"
+            ],
+            "answer": "[pools.vni]",
+            "explanation": "VNIs come only from the VXLAN Network Identifier range in [pools.vni]. lo-ip holds loopback IP addresses and vlan-id holds 12-bit VLAN IDs, and neither can stand in for a VNI. expected_machines.json lists the hardware to ingest and isn't a pool."
+          },
+          {
+            "question": "Roughly how many distinct VNI values does the VXLAN header allow?",
+            "options": [
+              "4,094 (12-bit)",
+              "About 16.7 million (24-bit)",
+              "About 4.3 billion (32-bit)"
+            ],
+            "answer": "About 16.7 million (24-bit)",
+            "explanation": "A VNI is 24 bits, so the largest value is 16,777,215. 4,094 is the usable VLAN ID range (12-bit), which is a common mix-up."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md",
+          "overview/lifecycle.md",
+          "overview/operational-principles.md"
+        ]
+      },
+      {
+        "concept": "dpu-mode-vs-nic-mode",
+        "prequestions": [
+          {
+            "question": "A BlueField has its own ARM CPU and OS. If that OS isn't running a networking stack, what is the card still useful for?",
+            "answer": "It can still pass traffic as an ordinary high-speed NIC. That's NIC mode: the host sees a network card, and nothing on the card's ARM cores manages the traffic."
+          },
+          {
+            "question": "If a host's BlueField is in NIC mode, who answers the host OS's DHCP request?",
+            "answer": "The central nico-dhcp, through a DHCP relay on a HostInband segment. There is no DPU-local DHCP server, because that server only exists when the DPU runs in DPU mode under NICo's management."
+          }
+        ],
+        "explanation": "A BlueField can run in one of two **operating modes**, set at the firmware level:\n\n- **DPU mode**: the card's ARM OS sits in the data path and manages networking. In this mode, NICo runs `dpu-agent`, HBN (containerised Cumulus) for VXLAN/EVPN isolation, the metadata service and a **per-host DHCP server** on the card. The DPU is NICo's enforcement boundary, as the \"machine is untrustworthy\" principle requires.\n- **NIC mode**: the card behaves like a plain NIC. Nothing on the ARM side manages the host's traffic, so that host has no NICo agent, no HBN and no local DHCP server.\n\n**Effect on DHCP:**\n\n| Host type | Who answers host OS DHCP | Segment |\n|---|---|---|\n| BlueField in DPU mode (managed) | DHCP server on the DPU (requests stay off the physical underlay) | n/a (local) |\n| BlueField in NIC mode (DPU policy `nic`) | central `nico-dhcp` via relay | HostInband |\n| No DPU (zero-DPU host) | central `nico-dhcp` via relay | HostInband |\n\nNICo treats a NIC-mode host like a zero-DPU host. For example, its host BMC may share the HostInband subnet.\n\n**Effect on ingestion.** Site Explorer works out a target mode from the host's **DPU policy** and the device's **part number**. Mode changes need a **host power cycle**, and ingestion waits until they take effect. A device that reports NIC mode counts toward pairing completeness but **is not attached as a managed DPU**. Hosts with `dpu_policy = \"ignore\"` skip DPU matching entirely. A missing Redfish mode doesn't block attachment by itself.\n\n**Site controller nodes are different.** If those nodes have BlueField-3s, the docs require them to be in DPU mode and fully provisioned before the Kubernetes cluster is built. NICo does not manage those DPUs.\n\nIn practice, a host's DPU mode tells you three things: which DHCP server it uses, which segment its OS NIC sits on, and whether NICo can enforce isolation on its DPU.",
+        "analogy": "Think of a building entrance. In DPU mode, a security guard stands at the door, checks who comes in and out (isolation) and hands out visitor passes on the spot (local DHCP). In NIC mode, people still walk through the doorway, but no guard is posted, so visitors must get a pass from the central reception desk (nico-dhcp on HostInband). Where the analogy breaks down: a building can post a guard in seconds. Switching a BlueField's mode is a firmware change that needs a host power cycle.",
+        "workedExample": {
+          "title": "Decide the DHCP path for three hosts",
+          "steps": [
+            {
+              "subgoal": "Write the decision as code",
+              "detail": "```python\n# mode_path.py: toy decision table, not NICo code\ndef dhcp_path(mode):\n    if mode == \"dpu\":\n        return \"DPU-local DHCP server (stays off the underlay)\"\n    if mode in (\"nic\", \"none\"):\n        return \"central nico-dhcp via relay on HostInband\"\n    raise ValueError(mode)\n```"
+            },
+            {
+              "subgoal": "Apply it to an inventory",
+              "detail": "```python\nfor host, mode in [(\"h1\", \"dpu\"), (\"h2\", \"nic\"), (\"h3\", \"none\")]:\n    print(host, mode, \"->\", dhcp_path(mode))\n```\nRun `python3 mode_path.py`. Only h1 uses a DPU-local server. Both h2 and h3 depend on a working HostInband segment and relay."
+            },
+            {
+              "subgoal": "Predict ingestion behaviour",
+              "detail": "h1: its DPU is paired and attached as a managed DPU, and dpu-agent and HBN run on it. h2: the NIC-mode device counts toward pairing completeness but isn't attached as a managed DPU. h3: there's no DPU to pair."
+            },
+            {
+              "subgoal": "Note the isolation consequence",
+              "detail": "Only h1 has a NICo-managed enforcement point in the host's own data path. For h2 and h3, getting an address depends on the HostInband segment's allocation, relay, DNS and isolation setup (covered in ch. 29)."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the function so it returns the network segment type that carries a host's OS DHCP, or None when DHCP is handled locally on the DPU.",
+          "partialSolution": "def os_segment(mode):\n    if mode == \"___\":\n        return None\n    return \"___\"\n\nprint(os_segment(\"nic\"), os_segment(\"dpu\"))",
+          "answer": "Compare with `dpu` (`if mode == \"dpu\":`) and return `\"HostInband\"`. The script then prints `HostInband None`."
+        },
+        "independentProblem": {
+          "prompt": "After a policy change, a host's BlueField was switched to NIC mode and the host was power-cycled. Now the host OS never gets an IP address, although the host BMC is still reachable on the OOB network. Before the change, the host OS got its address without problems. Explain the likely cause and what to check.",
+          "hints": [
+            "Before the change, which DHCP server answered the host OS?",
+            "In NIC mode, the DPU-local DHCP server no longer exists.",
+            "Check that the host OS NIC is on a HostInband segment with a DHCP relay pointing to the nico-dhcp VIP, and that the HostInband segment is configured in NICo."
+          ],
+          "answer": "In DPU mode, the DHCP server on the host's DPU answered the host OS, so no relay on the physical network was ever needed. In NIC mode that server no longer exists, and the host OS's DHCP must go through a relay to the central nico-dhcp on a HostInband segment. Most likely the host OS NIC's VLAN/subnet isn't set up as HostInband, or it has no relay to the nico-dhcp VIP. Check the switch relay configuration, confirm that NICo has the HostInband segment configured, and watch `kubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp --tail=20` for the host's requests."
+        },
+        "selfExplanation": "Why can NICo enforce tenant isolation on a host whose BlueField is in DPU mode, but not through the BlueField of a host in NIC mode?",
+        "checks": [
+          {
+            "question": "A host's BlueField runs in NIC mode. Who answers its host OS DHCP request?",
+            "options": [
+              "A DHCP server on the BlueField",
+              "Central nico-dhcp via relay on HostInband",
+              "Nobody, because NIC-mode hosts must use static IPs",
+              "The top-of-rack switch's built-in DHCP server"
+            ],
+            "answer": "Central nico-dhcp via relay on HostInband",
+            "explanation": "Zero-DPU hosts and DPU-NIC-mode hosts use the central nico-dhcp on HostInband. The DPU-local server exists only in DPU mode. The ToR only relays requests and doesn't assign addresses."
+          },
+          {
+            "question": "During pairing, Site Explorer finds a BlueField reporting NIC mode. What does it do?",
+            "options": [
+              "Blocks ingestion until the device is replaced",
+              "Counts it toward pairing completeness but doesn't attach it as a managed DPU",
+              "Attaches it as a managed DPU and installs dpu-agent",
+              "Removes the host from expected machines"
+            ],
+            "answer": "Counts it toward pairing completeness but doesn't attach it as a managed DPU",
+            "explanation": "The validation step says this about NIC-mode devices. They don't run NICo's DPU software, so they aren't managed DPUs, but they don't make the pairing incomplete either."
+          },
+          {
+            "question": "What does changing a BlueField's mode require before ingestion can continue?",
+            "options": [],
+            "answer": "A host power cycle. Ingestion waits until the mode change has taken effect.",
+            "explanation": "Site Explorer resolves the target mode from the DPU policy and part number. A successful mode-change request defers ingestion to a later pass, after the power cycle has applied the change."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "architecture/overview.md",
+          "architecture/redfish_workflow.md",
+          "getting-started/prerequisites/bmc-oob-setup.md",
+          "getting-started/prerequisites/hardware.md",
+          "getting-started/quick-start.md",
+          "overview/operational-principles.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Toy boot-and-network controller: network-boot a QEMU VM from your own PXE + pool server",
+      "goal": "Build a small Python server that plays two roles, a PXE Service and a pool allocator. It serves iPXE scripts, works out each machine's DHCP path and segment from its DPU mode, and hands out loopback IPs and VNIs from pools that must be non-empty. It refuses new VPCs once the VNI pool is empty (the toy assumes one VNI per VPC). Then you network-boot a real (emulated) machine against it.",
+      "whyItMatters": "This is a laptop-sized model of what NICo has to get right before a racked host can provision itself. The firmware chains through iPXE to a per-host script from a stateless server. Every identifier comes from a pool that must be filled in. Each machine's DPU mode decides whether its DHCP is answered on the DPU or by the central nico-dhcp on HostInband. When nico-pxe, nico-dhcp or a pool misbehaves on a real site, you debug it by asking these same questions.",
+      "setup": [
+        "Linux or macOS with Python 3.11+ (the script uses `tomllib`). Check with `python3 --version`",
+        "curl",
+        "QEMU with x86 system emulation: `sudo apt install qemu-system-x86` (Debian/Ubuntu), `sudo dnf install qemu-system-x86` (Fedora), or `brew install qemu` (macOS; Apple Silicon runs it emulated, which is slower but works)",
+        "Port 8080 free on your machine",
+        "A working directory, e.g. `mkdir -p ~/ch12-lab && cd ~/ch12-lab`"
+      ],
+      "steps": [
+        {
+          "subgoal": "Write the toy site config",
+          "detail": "This file uses a format made up for the lab (`toy_pools`). It is **not** NICo's `siteConfig` schema.\n```bash\ncat > toy-site.toml <<'EOF'\n# Toy site config for this lab. NOT NICo's siteConfig schema.\n[toy_pools.lo-ip]\nkind = \"ipv4\"\nranges = [[\"10.99.0.1\", \"10.99.0.4\"]]\n\n[toy_pools.vlan-id]\nkind = \"int\"\nranges = [[100, 199]]\n\n[toy_pools.vni]\nkind = \"int\"\nranges = [[5001, 5003]]\n\n[[machines]]\nname = \"vm-host-1\"\nmac = \"52:54:00:aa:bb:01\"\ndpu = \"none\"\n\n[[machines]]\nname = \"rack-host-2\"\nmac = \"52:54:00:aa:bb:02\"\ndpu = \"dpu\"\n\n[[machines]]\nname = \"rack-host-3\"\nmac = \"52:54:00:aa:bb:03\"\ndpu = \"nic\"\nEOF\n```"
+        },
+        {
+          "subgoal": "Write the server",
+          "detail": "```bash\ncat > toy_pxe.py <<'EOF'\n#!/usr/bin/env python3\n\"\"\"Toy PXE + pool server for the Chapter 12 lab. Not NICo code.\"\"\"\nimport ipaddress\nimport json\nimport sys\nimport tomllib\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nfrom urllib.parse import parse_qs, urlparse\n\nwith open(sys.argv[1], \"rb\") as f:\n    CFG = tomllib.load(f)\n\n\ndef expand(pool):\n    items = []\n    for lo, hi in pool[\"ranges\"]:\n        if pool[\"kind\"] == \"ipv4\":\n            a = int(ipaddress.IPv4Address(lo))\n            b = int(ipaddress.IPv4Address(hi))\n            items += [str(ipaddress.IPv4Address(i)) for i in range(a, b + 1)]\n        else:\n            items += list(range(lo, hi + 1))\n    return items\n\n\nFREE = {}\nfor name in (\"lo-ip\", \"vlan-id\", \"vni\"):\n    FREE[name] = expand(CFG[\"toy_pools\"][name])\n    if not FREE[name]:\n        sys.exit(f\"config error: pool '{name}' is empty; all three pools must be non-empty\")\n\nMACHINES = {m[\"mac\"].lower(): m for m in CFG[\"machines\"]}\nLOOPBACKS = {}\nVPCS = {}\n\nBOOT = \"\"\"#!ipxe\necho toy-pxe: booting ${net0/mac}\nchain http://10.0.2.2:8080/host?mac=${net0/mac:hexhyp}\n\"\"\"\n\n\ndef plan(m):\n    if m[\"dpu\"] == \"dpu\":\n        return {\"host_os_dhcp\": \"local DHCP server on the DPU\",\n                \"host_os_segment\": \"overlay via the DPU\",\n                \"bmc_segment\": \"Underlay (host BMC, DPU BMC, DPU OOB)\"}\n    return {\"host_os_dhcp\": \"central nico-dhcp via DHCP relay\",\n            \"host_os_segment\": \"HostInband\",\n            \"bmc_segment\": \"Underlay, or HostInband if shared\"}\n\n\ndef alloc_loopback(mac):\n    if mac not in LOOPBACKS:\n        if not FREE[\"lo-ip\"]:\n            return None\n        LOOPBACKS[mac] = FREE[\"lo-ip\"].pop(0)\n    return LOOPBACKS[mac]\n\n\nclass Handler(BaseHTTPRequestHandler):\n    def reply(self, code, body, ctype=\"text/plain\"):\n        data = body.encode()\n        self.send_response(code)\n        self.send_header(\"Content-Type\", ctype)\n        self.send_header(\"Content-Length\", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\n    def do_GET(self):\n        url = urlparse(self.path)\n        query = parse_qs(url.query)\n        if url.path == \"/boot.ipxe\":\n            self.reply(200, BOOT)\n        elif url.path == \"/host\":\n            mac = query.get(\"mac\", [\"\"])[0].lower().replace(\"-\", \":\")\n            m = MACHINES.get(mac)\n            if m is None:\n                print(f\"UNKNOWN mac={mac}\", flush=True)\n                self.reply(404, f\"#!ipxe\\necho unknown MAC {mac}\\n\")\n                return\n            lo = alloc_loopback(mac)\n            p = plan(m)\n            print(f\"BOOT {m['name']} mac={mac} loopback={lo} dhcp={p['host_os_dhcp']}\", flush=True)\n            script = \"#!ipxe\\n\"\n            script += f\"echo host {m['name']} dpu-mode={m['dpu']}\\n\"\n            script += f\"echo loopback {lo}\\n\"\n            script += f\"echo host OS DHCP: {p['host_os_dhcp']}\\n\"\n            script += f\"echo host OS segment: {p['host_os_segment']}\\n\"\n            script += \"shell\\n\"\n            self.reply(200, script)\n        elif url.path == \"/state\":\n            state = {\"free\": {k: len(v) for k, v in FREE.items()},\n                     \"loopbacks\": LOOPBACKS, \"vpcs\": VPCS,\n                     \"plans\": {m[\"name\"]: plan(m) for m in MACHINES.values()}}\n            self.reply(200, json.dumps(state, indent=2) + \"\\n\", \"application/json\")\n        else:\n            self.reply(404, \"not found\\n\")\n\n    def do_POST(self):\n        url = urlparse(self.path)\n        name = parse_qs(url.query).get(\"name\", [\"\"])[0]\n        if url.path != \"/vpc\" or not name:\n            self.reply(400, \"use POST /vpc?name=NAME\\n\")\n            return\n        if name not in VPCS:\n            if not FREE[\"vni\"]:\n                print(f\"VNI pool exhausted; cannot create VPC {name}\", flush=True)\n                self.reply(409, \"vni pool exhausted\\n\")\n                return\n            VPCS[name] = FREE[\"vni\"].pop(0)\n        self.reply(201, f\"vpc {name} vni {VPCS[name]}\\n\")\n\n\nprint(\"toy-pxe listening on :8080\", flush=True)\nHTTPServer((\"0.0.0.0\", 8080), Handler).serve_forever()\nEOF\n```\nStart it in terminal 1 and leave it running: `python3 toy_pxe.py toy-site.toml`. The server's own `BOOT ...` lines go to stdout and the per-request access log goes to stderr. Both show up in the terminal."
+        },
+        {
+          "subgoal": "Act as iPXE with curl",
+          "detail": "In terminal 2:\n```bash\ncurl -s localhost:8080/boot.ipxe\ncurl -s 'localhost:8080/host?mac=52-54-00-aa-bb-02'\ncurl -s 'localhost:8080/host?mac=52-54-00-aa-bb-03'\ncurl -s 'localhost:8080/host?mac=52-54-00-aa-bb-02'   # again: same loopback (idempotent)\ncurl -s localhost:8080/state\n```\nrack-host-2 (DPU mode) prints `host OS DHCP: local DHCP server on the DPU` and `host OS segment: overlay via the DPU`. rack-host-3 (NIC mode) prints `host OS DHCP: central nico-dhcp via DHCP relay` and `host OS segment: HostInband`. In this order, rack-host-2 gets loopback 10.99.0.1 and rack-host-3 gets 10.99.0.2. The second request for host-2 returns 10.99.0.1 again instead of taking a new address. The `/state` JSON shows the same per-machine plans that the `/host` scripts printed: rack-host-2 differs from vm-host-1 and rack-host-3."
+        },
+        {
+          "subgoal": "Prove empty pools are rejected",
+          "detail": "```bash\nsed 's/ranges = \\[\\[5001, 5003\\]\\]/ranges = []/' toy-site.toml > empty-vni.toml\npython3 toy_pxe.py empty-vni.toml; echo \"exit=$?\"\n```\nExpect `config error: pool 'vni' is empty; all three pools must be non-empty` and `exit=1`. The process exits before it binds the port, so it doesn't clash with the server still running in terminal 1."
+        },
+        {
+          "subgoal": "Network-boot a real VM",
+          "detail": "In terminal 3:\n```bash\nqemu-system-x86_64 -m 256 -nographic -boot n \\\n  -netdev user,id=n0,bootfile=http://10.0.2.2:8080/boot.ipxe \\\n  -device e1000,netdev=n0,mac=52:54:00:aa:bb:01\n```\nQEMU's built-in DHCP gives the VM an address and the boot URL. The NIC's boot ROM is iPXE, which fetches `boot.ipxe` and chains to `/host?mac=52-54-00-aa-bb-01`. Inside the VM, `10.0.2.2` is your laptop. With `-nographic` the VM console may stay blank. That's fine: **terminal 1 is your evidence**. Wait up to a minute (longer on Apple Silicon), then quit QEMU with Ctrl-a then x. If you ran the curl step first, vm-host-1 gets the next free loopback, 10.99.0.3."
+        },
+        {
+          "subgoal": "Exhaust the VNI pool",
+          "detail": "```bash\nfor v in red green blue purple; do\n  curl -s -o /dev/null -w \"$v %{http_code}\\n\" -X POST \"localhost:8080/vpc?name=$v\"\ndone\ncurl -s localhost:8080/state\n```\nThe pool holds 3 VNIs (5001–5003), and the toy gives each VPC one VNI. You get three `201`s, then `purple 409`. Terminal 1 prints `VNI pool exhausted; cannot create VPC purple`."
+        }
+      ],
+      "verify": "You're done when all four of these are true. (1) Terminal 1 shows a `GET /boot.ipxe` request from the QEMU VM, followed by `BOOT vm-host-1 mac=52:54:00:aa:bb:01 loopback=10.99.0.3 dhcp=central nico-dhcp via DHCP relay`. The address is 10.99.0.3 if you ran the curl step first; otherwise it is whichever loopback was free next. (2) `curl -s localhost:8080/state` lists a loopback for `52:54:00:aa:bb:01`, shows VNIs 5001–5003 assigned to red/green/blue with `\"vni\": 0` free, and shows `\"host_os_segment\": \"HostInband\"` for vm-host-1 and rack-host-3. (3) The fourth VPC POST returned 409. (4) Starting the server with `empty-vni.toml` prints the 'pool vni is empty' message and exits with code 1.",
+      "hints": [
+        "`ModuleNotFoundError: tomllib` means your Python is older than 3.11. Install a newer Python, or run the server in a container: `docker run --rm -it -p 8080:8080 -v \"$PWD\":/lab -w /lab python:3.12-slim python3 toy_pxe.py toy-site.toml`. QEMU on the host still reaches it at 10.0.2.2:8080.",
+        "`Address already in use` means an earlier server is still running. Stop it with Ctrl-C, or find it with `lsof -i :8080`.",
+        "If the server prints `UNKNOWN mac=...`, the VM's MAC doesn't match the config. Make sure the `-device ... mac=` value is exactly `52:54:00:aa:bb:01`.",
+        "If QEMU never reaches the server, check that the bootfile URL uses 10.0.2.2 (QEMU user-mode networking's address for the host), not localhost. `localhost` works in your curl commands only because curl runs on the host.",
+        "On macOS, if the firewall asks whether Python may accept incoming connections, allow it. Otherwise the VM's requests are dropped.",
+        "No text in the QEMU console is normal with `-nographic`. Rely on the server log, or remove `-nographic` to get a graphical window if you have a display.",
+        "Restarting the server resets all allocations, because state lives only in memory. Loopback numbers in later steps then depend on the order of requests after the restart."
+      ],
+      "stretch": "Add a `DELETE /vpc?name=NAME` endpoint that returns the VPC's VNI to the free list. Add an `/extend-vni?lo=6001&hi=6002` endpoint that adds a new range only if it overlaps neither the existing pool nor a `reserved_vnis` list you add to the config (standing in for VNIs the network team uses). Confirm that `purple` can be created after either a delete or an extension. Then boot a second QEMU VM with MAC `52:54:00:aa:bb:03` (rack-host-3, NIC mode). Terminal 1 should show it getting the *same* loopback rack-host-3 received in the curl step (10.99.0.2), not a new one, with `dhcp=central nico-dhcp via DHCP relay`. This shows allocation is idempotent per machine no matter who makes the request. Its script (`curl -s 'localhost:8080/host?mac=52-54-00-aa-bb-03'`) should print `host OS segment: HostInband`. To see the lo-ip pool run out, add two more `[[machines]]` entries, restart the server, and request five different MACs. The fifth gets `loopback None`."
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "vni-resource-pool",
+        "severity": "major",
+        "problem": "The lesson states as fact that an established VNI pool can be extended with nico-admin-cli. A prequestion answer, the independent-problem answer and the check question 'How do you grow an established VNI pool?' (answer: 'Extend it with nico-admin-cli') all depend on this. None of the provided pages support it: the Quick Start lists nico-admin-cli only for host ingestion, credentials, expected machines and TPM approval. The wording 'this chapter's docs don't show the exact subcommand' wrongly suggests the docs back the claim. The lesson also states as fact that NICo hands out exactly one VNI per VPC from this pool, so the pool caps the VPC count. The pages only describe [pools.vni] as a 'VXLAN Network Identifier range' and say VNI allocations are returned when a tenant VRF is torn down.",
+        "fix": "Cite a docs page that documents pool extension (and the one-VNI-per-VPC allocation), or remove or soften these claims. Rewrite the check question so it doesn't depend on unsupported behaviour, for example ask which pool must hold free values before overlay networks can be created. Present 'each VPC uses one VNI' as a stated assumption carried over from ch. 11, not a documented NICo rule."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "Step 'Act as iPXE with curl' says rack-host-3 'reports central nico-dhcp on HostInband'. The /host script only echoes 'host OS DHCP: central nico-dhcp via DHCP relay'. 'HostInband' appears only in the /state JSON. The stretch goal makes the same claim about the second VM.",
+        "fix": "Add an `echo host OS segment: {p['host_os_segment']}` line to the /host script, or change the text to say that HostInband shows up in the /state output."
+      },
+      {
+        "where": "vni-resource-pool",
+        "severity": "minor",
+        "problem": "'Deleting a VPC ... returns its VNI to the pool, as the Day 2 cleanup section describes.' The Day 2 section only describes returning the VNI when a tenant VRF is torn down during host release. It doesn't mention deleting a VPC.",
+        "fix": "Rephrase as 'when a tenant VRF is torn down (Day 2 cleanup), its VNI allocation returns to the pool'."
+      }
+    ]
+  }
+}

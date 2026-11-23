@@ -1,0 +1,589 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Chapter 9 gave every DPU a BGP session to its top-of-rack switch and a routed underlay to run on. This chapter covers what sits on top of that underlay: how a NIC presents itself to a host as several interfaces, how one physical network is split into isolated segments, and how much address space a site owner has to hand NICo before ingestion starts.\n\nThere are six lessons. **NVOS / NVUE** is the operating system and configuration API on NVIDIA switches, and the same configuration model runs inside HBN on every DPU. **PF and VF (SR-IOV)** and **Scalable Functions** explain how one physical port turns into many host-visible interfaces. That matters because NICo gives each tenant interface its own `/31`. **VLAN** covers classic Layer 2 segmentation and the ID pool NICo allocates from. The last two lessons, **IP address pools** and **BMC network IP addressing**, cover sizing: which pools NICo needs, how big each one has to be, and why a large GB200 site needs more BMC addresses than one `/16` holds.\n\nThis matters in practice. If a pool is too small, ingestion stalls when it runs out. If two pools overlap, routes collide. If you misread PF and VF, you'll undercount tenant addresses by half. By the end you'll have built a small pool planner and a namespace lab that shows VLAN isolation and per-interface `/31` links on your laptop.",
+    "objectives": [
+      "Explain how NVUE's staged (pending) and applied configuration model works, and where NVOS and NVUE appear in a NICo site (switch trays and HBN on DPUs)",
+      "Tell a PF, a VF and a scalable function apart, and count the tenant interfaces and /31 subnets a host uses",
+      "Create and test VLAN segments with Linux network namespaces, and explain why the 12-bit VLAN ID limits scale",
+      "Size each IP pool NICo needs (management, DPU loopback, admin, tenant, service VIPs) from a fleet description",
+      "Calculate how many BMC and management addresses a rack-scale site needs, and choose prefixes larger than a single /16 when required"
+    ],
+    "lessons": [
+      {
+        "concept": "nvos-nvue",
+        "prequestions": [
+          {
+            "question": "You change a switch port's MTU with a configuration command. Should it take effect the moment you press Enter? What could go wrong if it did?",
+            "answer": "With NVUE it doesn't. `nv set` writes the change to a *pending* revision, and nothing changes on the device until you run `nv config apply`. That lets you review a diff first and apply several related changes together, so you never stop halfway between two configurations and lose your own management session."
+          },
+          {
+            "question": "A BlueField DPU isn't a switch. Why would it run a switch operating system's configuration tool?",
+            "answer": "HBN (Host-Based Networking) on the DPU is a containerized Cumulus Linux, NVIDIA's Ethernet switch OS. The DPU acts as a tiny routing switch for its host, and NICo's DPU agent configures it through FRR/NVUE."
+          }
+        ],
+        "explanation": "NVIDIA builds network operating systems for its switches. In NICo you'll meet two of them:\n\n- **NVOS** runs on NVIDIA switches such as the NVLink switch trays inside a GB200 NVL72 rack. The network prerequisites count **3 management IPs per switch tray in an MNNVL rack: one for the BMC and two for NVOS**. NICo's scale simulator also publishes a \"switch NVOS address\" for every simulated tray.\n- **Cumulus Linux** is the Ethernet switch OS. NICo provisions **HBN with Containerized Cumulus** on every DPU. Inside HBN, the DPU routes for its host, peers BGP with the ToR, and terminates VXLAN/EVPN.\n\nBoth share one configuration and state model called **NVUE** (NVIDIA User Experience). NVUE treats the whole device configuration as a single tree of objects (`interface`, `router bgp`, `bridge domain`, and so on). You can reach that tree three ways:\n\n- the `nv` CLI, for example `nv set interface swp1 link mtu 9216` or `nv show interface swp1`\n- a REST API with the same object paths\n- a YAML file (`nv config show` prints it)\n\nNVUE's key idea is **revisions**. `nv set` and `nv unset` change a *pending* revision. `nv config diff` shows what would change. `nv config apply` makes the pending revision the *applied* one. Because you declare the whole desired state and let the device work out how to reach it, NVUE suits automation. This is the same desired-state idea as the NICo state machines from chapter 4.\n\nWhere NICo uses it: after provisioning, the DPU agent periodically fetches its desired configuration from NICo over gRPC and reports the applied state back. When route servers are enabled, the agent configures FRR/NVUE on each DPU to peer with them, creating a `routeserver` BGP peer group. You won't usually type `nv` commands on managed DPUs yourself. NICo owns them. Knowing the model still helps you read what the agent did, and later chapters use it for switch reachability and maintenance.",
+        "analogy": "NVUE works like a shopping cart. `nv set` adds items, `nv config diff` reviews the cart, and `nv config apply` is checkout. Nothing ships until checkout. The analogy breaks down because a cart is only a list. NVUE's applied revision is the device's live state, and applying it can reorder and restart services so that all your changes land together.",
+        "workedExample": {
+          "title": "Model NVUE's pending and applied revisions in 30 lines of Python",
+          "steps": [
+            {
+              "subgoal": "Write the toy model",
+              "detail": "You don't have a switch, so model the core idea instead: a config tree, a pending copy, a diff and an apply. Save this as `mini_nvue.py`:\n```python\n# mini_nvue.py - a toy model of NVUE's pending/applied revisions\nimport copy\n\napplied = {\"interface\": {\"swp1\": {\"link\": {\"mtu\": 1500}}}}\npending = copy.deepcopy(applied)\n\n\ndef nv_set(path, value):\n    node = pending\n    *parents, leaf = path.split()\n    for key in parents:\n        node = node.setdefault(key, {})\n    node[leaf] = value\n\n\ndef diff(old, new, prefix=\"\"):\n    for key in sorted(set(old) | set(new)):\n        a, b = old.get(key), new.get(key)\n        here = f\"{prefix} {key}\".strip()\n        if isinstance(a, dict) and isinstance(b, dict):\n            yield from diff(a, b, here)\n        elif a != b:\n            yield f\"{here}: {a} -> {b}\"\n\n\nnv_set(\"interface swp1 link mtu\", 9216)\nnv_set(\"interface swp2 bridge domain br_default access\", 10)\n\nprint(\"pending vs applied:\")\nfor line in diff(applied, pending):\n    print(\"  \", line)\n\napplied = copy.deepcopy(pending)   # \"nv config apply\"\nprint(\"after apply, diff is empty:\", list(diff(applied, pending)) == [])\n```"
+            },
+            {
+              "subgoal": "Stage changes and read the diff",
+              "detail": "Run `python3 mini_nvue.py`:\n```text\npending vs applied:\n   interface swp1 link mtu: 1500 -> 9216\n   interface swp2: None -> {'bridge': {'domain': {'br_default': {'access': 10}}}}\nafter apply, diff is empty: True\n```\nThe two `nv_set` calls only touched `pending`. The diff shows one changed leaf (the MTU) and one new subtree (swp2 joining VLAN 10). The device would still be running MTU 1500 at this point."
+            },
+            {
+              "subgoal": "Apply",
+              "detail": "Copying `pending` over `applied` is this model's version of `nv config apply`. Afterwards the diff is empty, which means the desired and running states agree."
+            },
+            {
+              "subgoal": "Map it to the real CLI",
+              "detail": "On a real Cumulus Linux or NVOS device, the same session looks like this. It doesn't run on a laptop:\n```text\nnv set interface swp1 link mtu 9216\nnv set interface swp2 bridge domain br_default access 10\nnv config diff      # review the pending revision\nnv config apply     # make it live\nnv show interface swp1\n```\nOn a NICo-managed DPU, the DPU agent drives HBN's FRR/NVUE configuration for you. Use `show` commands to inspect, and leave changes to NICo."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the two blanks so that `diff` recurses into nested dictionaries and the last line performs the \"apply\".",
+          "partialSolution": "def diff(old, new, prefix=\"\"):\n    for key in sorted(set(old) | set(new)):\n        a, b = old.get(key), new.get(key)\n        here = f\"{prefix} {key}\".strip()\n        if isinstance(a, dict) and isinstance(b, dict):\n            yield from ___(a, b, here)\n        elif a != b:\n            yield f\"{here}: {a} -> {b}\"\n\napplied = ___(pending)",
+          "answer": "First blank: `diff`. The function calls itself on the two sub-trees. Second blank: `copy.deepcopy`. A deep copy matters here: with `applied = pending`, both names would point at the same dict, and every later `nv_set` would silently change the \"applied\" state too."
+        },
+        "independentProblem": {
+          "prompt": "NICo's DPU agent fetches a desired configuration and reports what is actually applied. Using `mini_nvue.py`, write a function `drift(desired, reported)` that returns the changes needed to bring the device in line with what NICo wants. Test it with desired MTU 9216 and reported MTU 1500 on swp1.",
+          "hints": [
+            "You've already written a function that compares two trees.",
+            "Argument order matters: `diff(old, new)` describes how to get from `old` to `new`. Which one is the starting point here?",
+            "`def drift(desired, reported): return list(diff(reported, desired))`. Starting from what the device reports, these are the edits that reach what NICo wants."
+          ],
+          "answer": "```python\ndef drift(desired, reported):\n    return list(diff(reported, desired))\n\nprint(drift({\"interface\": {\"swp1\": {\"link\": {\"mtu\": 9216}}}},\n            {\"interface\": {\"swp1\": {\"link\": {\"mtu\": 1500}}}}))\n# ['interface swp1 link mtu: 1500 -> 9216']\n```\nAn empty list means the device has converged. A non-empty list is exactly what a reconciler needs to set and apply."
+        },
+        "selfExplanation": "Why does a staged-then-apply model (pending vs applied revisions) suit an automated controller like NICo's DPU agent better than commands that take effect one at a time?",
+        "checks": [
+          {
+            "question": "On a Cumulus Linux or NVOS device you run `nv set interface swp1 link mtu 9216` and nothing else. What is swp1's MTU now?",
+            "options": [
+              "9216, because `nv set` changes the running device immediately",
+              "Unchanged. The value sits in the pending revision until `nv config apply`",
+              "Unchanged until the switch reboots and reads its startup file",
+              "Rejected, because MTU can only be set through the REST API"
+            ],
+            "answer": "Unchanged. The value sits in the pending revision until `nv config apply`",
+            "explanation": "NVUE separates pending from applied state. It isn't a reboot-to-load model, and the CLI and REST API reach the same object model, so neither one is the only way to set MTU."
+          },
+          {
+            "question": "Why does each NVLink switch tray in an MNNVL rack need 3 management IP addresses?",
+            "options": [
+              "One per NVLink port group",
+              "One for the BMC and two for NVOS",
+              "One each for the host BMC, DPU BMC and DPU Arm OS",
+              "Three for redundant DHCP leases"
+            ],
+            "answer": "One for the BMC and two for NVOS",
+            "explanation": "The network prerequisites list \"3 per switch (BMC + 2 NVOS)\". The host-BMC/DPU-BMC/Arm-OS split is the count for a node with a DPU, which is a different device type."
+          },
+          {
+            "question": "Where does NVUE run on a NICo-managed compute host?",
+            "options": [
+              "On the host's x86 OS, installed by cloud-init",
+              "Inside HBN (containerized Cumulus) on the BlueField DPU",
+              "Only on the site controller's Kubernetes nodes",
+              "Nowhere. NICo configures DPUs only through Redfish"
+            ],
+            "answer": "Inside HBN (containerized Cumulus) on the BlueField DPU",
+            "explanation": "NICo provisions HBN with Containerized Cumulus on the DPU, and the DPU agent configures FRR/NVUE there. Redfish manages the BMC, not the DPU's data-path routing. NICo doesn't manage software on the tenant's host OS."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "overview/lifecycle.md",
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "concept": "pf-and-vf",
+        "prequestions": [
+          {
+            "question": "One physical 200 GbE port, many virtual machines. Without a software switch in the host, how could each VM get its own \"real\" NIC?",
+            "answer": "With SR-IOV. The NIC exposes extra lightweight PCIe functions (virtual functions), each with its own PCI address, queues and MAC address. Each VM or workload gets one directly."
+          },
+          {
+            "question": "A host uses its DPU's PF plus one VF on a tenant network. How many /31 subnets does it use on that network?",
+            "answer": "Two: one /31 per interface (PF and VF)."
+          }
+        ],
+        "explanation": "In chapter 1 you saw that a PCIe device is addressed as `domain:bus:device.function`, for example `0000:3b:00.0`. The last digit, the **function**, is the important part here.\n\n**SR-IOV** (Single Root I/O Virtualization) is a PCIe standard that lets one device appear as several functions:\n\n- The **physical function (PF)** is the full-featured function. Its driver configures the whole device and can create VFs. A dual-port NIC usually has one PF per port (`...:00.0`, `...:00.1`).\n- A **virtual function (VF)** is a lightweight PCIe function created by the PF. Each VF has its own PCI address, MAC address and transmit/receive queues, so it can be handed straight to a VM or container. It has only a limited set of configuration registers, though, and depends on the PF's driver for anything device-wide.\n\nOn Linux you control VFs through sysfs: `sriov_totalvfs` is the hardware maximum, and writing a number to `sriov_numvfs` creates that many. The count is fixed while VFs exist, so to change it you write `0` first. The platform also has to allow it, which is why NICo's BIOS/UEFI guidance says to enable **SR-IOV** if you use NIC VFs and leave it off otherwise.\n\nOn a BlueField DPU in DPU mode, every PF or VF the host sees has a **representor** netdev on the DPU's Arm side. Traffic from the host interface appears on the representor, where HBN routes it. That is why NICo's addressing is per interface:\n\n- **Tenant networks:** each PF or VF a host uses gets its own `/31`, a point-to-point link between the host interface and its DPU gateway. A host using the PF and one VF uses two `/31`s per tenant network.\n- **Site controller:** each node uses a `/31` between the host OS and the DPU PF representor.\n\nInterfaces from the same VPC prefix are not on a shared L2 segment. They're routed through the DPUs.",
+        "analogy": "A PF is like the main account holder on a phone plan, who can add, remove and configure lines. VFs are the extra lines, each with its own number (its PCI address and MAC) that friends can call directly. The analogy breaks down because a phone plan lets you add lines one at a time. With SR-IOV you set the VF count all at once, and to change it you drop back to zero first.",
+        "workedExample": {
+          "title": "Find SR-IOV hardware and map PF/VF to /31s",
+          "steps": [
+            {
+              "subgoal": "Look for SR-IOV-capable devices",
+              "detail": "This runs on any Linux machine without root:\n```bash\nfor d in /sys/bus/pci/devices/*; do\n  if [ -f \"$d/sriov_totalvfs\" ]; then\n    echo \"$(basename \"$d\"): max $(cat \"$d/sriov_totalvfs\") VFs, $(cat \"$d/sriov_numvfs\") enabled\"\n  fi\ndone\n```\nOn most laptops this prints nothing, because consumer NICs rarely support SR-IOV. On a server with a ConnectX or BlueField device you'd see lines such as `0000:3b:00.0: max 16 VFs, 0 enabled`. That address is a PF."
+            },
+            {
+              "subgoal": "Confirm the capability in PCI config space",
+              "detail": "`sudo lspci -vvv -s 0000:3b:00.0 | grep -i 'SR-IOV'` shows a `Single Root I/O Virtualization (SR-IOV)` capability on a PF. Without root, `lspci` hides most capability details."
+            },
+            {
+              "subgoal": "Enable VFs (on a server)",
+              "detail": "```bash\necho 2 | sudo tee /sys/class/net/ens1f0np0/device/sriov_numvfs\nls -l /sys/class/net/ens1f0np0/device/ | grep virtfn\nlspci | grep -i 'virtual function'\n```\nEach `virtfnN` symlink points to a new PCI address (the VF). `lspci` now lists entries that contain `Virtual Function`. The interface name `ens1f0np0` is only an example, so use your PF's name."
+            },
+            {
+              "subgoal": "Give each interface its own /31",
+              "detail": "Carve per-interface subnets from a tenant pool with Python's standard library:\n```python\nimport ipaddress, itertools\npool = ipaddress.ip_network(\"10.50.0.0/24\")\nfor name, net in zip([\"PF\", \"VF1\"], itertools.islice(pool.subnets(new_prefix=31), 2)):\n    print(name, net, \"->\", net[0], net[1])\n# PF 10.50.0.0/31 -> 10.50.0.0 10.50.0.1\n# VF1 10.50.0.2/31 -> 10.50.0.2 10.50.0.3\n```\nOne address of each pair sits on the host interface and the other is the DPU-side gateway."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "A PF named `ens1f0np0` currently has 2 VFs and you need 4. Writing a new nonzero value directly fails with \"Device or resource busy\". Fill in the blanks.",
+          "partialSolution": "cat /sys/class/net/ens1f0np0/device/sriov_totalvfs   # check the hardware maximum is >= 4\necho ___ | sudo tee /sys/class/net/ens1f0np0/device/sriov_numvfs\necho 4 | sudo tee /sys/class/net/ens1f0np0/device/___",
+          "answer": "First blank: `0`, which removes the existing VFs. Second blank: `sriov_numvfs`. The kernel won't change the VF count from one nonzero value to another, so you go through zero. That destroys the existing VFs, so anything using them loses its interface."
+        },
+        "independentProblem": {
+          "prompt": "A host has one DPU. Its tenant uses the PF plus 3 VFs, and the host is attached to 2 tenant networks. How many /31 subnets and how many IPv4 addresses does this host use across tenant pools? And how big must each tenant pool be for 200 such hosts?",
+          "hints": [
+            "Count interfaces first, then remember the rule: one /31 per interface per tenant network.",
+            "4 interfaces × 2 networks = 8 /31s. Each /31 is 2 addresses.",
+            "Per network: 200 hosts × 4 interfaces × 2 addresses = 1,600 addresses. Find the smallest power of two that is at least 1,600."
+          ],
+          "answer": "8 /31s and 16 addresses per host. Each tenant network needs its own pool of at least 1,600 addresses, so a /21 (2,048). The docs say to provide a separate pool per tenant network, each sized for all servers."
+        },
+        "selfExplanation": "Why does NICo give every PF and VF its own /31 instead of putting all of a host's interfaces on one shared subnet?",
+        "checks": [
+          {
+            "question": "Which statement about a VF is correct?",
+            "options": [
+              "A VF is a software-only interface with no PCI address",
+              "A VF is a lightweight PCIe function with its own PCI address, MAC and queues, created and governed by the PF",
+              "A VF is a second physical port on the NIC",
+              "A VF can be created at any time without enabling SR-IOV in BIOS/UEFI"
+            ],
+            "answer": "A VF is a lightweight PCIe function with its own PCI address, MAC and queues, created and governed by the PF",
+            "explanation": "A VF really does appear on the PCIe bus, which is why it can be passed to a VM. It isn't a physical port. It also needs SR-IOV enabled on the platform, which NICo's BIOS guidance mentions."
+          },
+          {
+            "question": "A host with 1 DPU uses the PF and one VF on one tenant network. What does it use from that tenant pool?",
+            "options": [
+              "One /31 shared by PF and VF",
+              "Two /31s, one per interface",
+              "One /30 so PF and VF share a broadcast domain",
+              "One /32 loopback"
+            ],
+            "answer": "Two /31s, one per interface",
+            "explanation": "The network prerequisites say that two host IPs per managed host per tenant network (PF + VF) are provisioned as one /31 per interface. /32 loopbacks come from the separate DPU loopback pool."
+          },
+          {
+            "question": "On a BlueField in DPU mode, where does traffic from a host-side VF show up for HBN to route?",
+            "options": [
+              "On the VF's representor netdev on the DPU Arm side",
+              "On the host BMC's OOB port",
+              "On the ToR switch's management VLAN",
+              "Nowhere. VFs bypass the DPU entirely"
+            ],
+            "answer": "On the VF's representor netdev on the DPU Arm side",
+            "explanation": "Each host-visible PF or VF has a representor on the DPU. That is how the DPU acts as the enforcement boundary. The site controller's /31 to the DPU PF representor is the same idea."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "getting-started/prerequisites/hardware.md"
+        ]
+      },
+      {
+        "concept": "scalable-functions",
+        "prequestions": [
+          {
+            "question": "You've used up a NIC's VF limit, and adding more would mean tearing down every VF. What would a better design look like?",
+            "answer": "Functions that are carved out of the PF dynamically, with no new PCIe function each, so they can be added and removed one at a time and in much larger numbers. Mellanox/NVIDIA devices call these scalable functions (SFs)."
+          }
+        ],
+        "explanation": "A **scalable function (SF)** is a lightweight network function carved from a PF on NVIDIA ConnectX and BlueField devices. Like a VF, an SF has its own queues, MAC address and netdev. Unlike a VF:\n\n- **It has no PCI function of its own.** An SF doesn't appear as a new `bus:device.function`. The Linux kernel exposes it as a device on the **auxiliary bus** (for example `mlx5_core.sf.4`), backed by a slice of its parent PF's resources.\n- **It's created one at a time.** SFs are added and removed individually with `devlink port add` and `devlink port del`. You don't set a total count, so there's no \"write 0 first\" reset.\n- **It scales further.** A device can usually host many more SFs than VFs, because each one costs less hardware.\n- **It doesn't need SR-IOV.** SFs hang off the PF. VFs and SFs can coexist.\n\nEach SF also gets a **representor** port on the device's embedded switch (eswitch). On a BlueField, the eswitch is managed from the Arm side, so HBN can route SF traffic exactly like PF and VF traffic. The eswitch must be in `switchdev` mode, which is the mode where every function has a representor.\n\nSo when should you use which? VFs are the standard way to give a VM or container a hardware NIC, because a VF is a PCI device and can be passed through with VFIO. SFs suit software on the device or host that needs many cheap, dynamic interfaces.\n\n**In NICo**, SFs are reserved on the DPU for HBN service-VPC interfaces and for extra capacity. You won't create them by hand. When you look at a DPU and see SF ports next to the PF and VF representors, you'll know what they are and that NICo put them there for a reason.",
+        "analogy": "VFs are like separate apartments built into a building's floor plan. Each has its own street address (its PCI address), and the number is fixed by the plan. SFs are like rooms partitioned off inside one big flat. They share its street address, and you can put up or take down partitions whenever you like. The analogy breaks down because SFs aren't second-class: each still gets its own hardware queues and its own switch port (representor).",
+        "workedExample": {
+          "title": "Walk through creating an SF on a BlueField or ConnectX device",
+          "steps": [
+            {
+              "subgoal": "See where SFs would live on your machine",
+              "detail": "On Linux kernel 5.11 or later, the auxiliary bus exists even on a laptop:\n```bash\nls /sys/bus/auxiliary/devices/ 2>/dev/null || echo \"no auxiliary bus\"\n```\nYou may see unrelated devices such as audio or GPU sub-functions. On an mlx5 device with SFs you'd see entries like `mlx5_core.sf.4`. Note that SFs are *not* in `/sys/bus/pci/devices`."
+            },
+            {
+              "subgoal": "Put the eswitch in switchdev mode (on the device)",
+              "detail": "```bash\ndevlink dev eswitch set pci/0000:03:00.0 mode switchdev\n```\nIn switchdev mode, every function (PF, VF or SF) gets a representor port. On a BlueField, the eswitch manager is the Arm side."
+            },
+            {
+              "subgoal": "Add an SF and give it a MAC",
+              "detail": "```bash\ndevlink port add pci/0000:03:00.0 flavour pcisf pfnum 0 sfnum 88\n# devlink prints the new port index, e.g. pci/0000:03:00.0/32768\ndevlink port function set pci/0000:03:00.0/32768 hw_addr 00:00:00:00:88:88\ndevlink port function set pci/0000:03:00.0/32768 state active\n```\n`flavour pcisf` means \"a scalable function on this PF\". `sfnum` is your chosen identifier. Setting `state active` makes the SF appear as an auxiliary device with its own netdev."
+            },
+            {
+              "subgoal": "Compare with the VF path",
+              "detail": "A VF needed `sriov_numvfs` set on the PF, all at once, and produced new PCI addresses. The SF needed a single `devlink port add`, touched no other function and produced no PCI address. On a NICo-managed DPU you only observe this (`devlink port show`). NICo reserves the SFs."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the commands that add scalable function 7 on PF 0 of the device at `pci/0000:03:00.0` and bring it up. Assume devlink reported the new port as index 32769.",
+          "partialSolution": "devlink port add pci/0000:03:00.0 flavour ___ pfnum 0 sfnum 7\ndevlink port function set pci/0000:03:00.0/32769 hw_addr 00:00:00:00:00:07\ndevlink port function set pci/0000:03:00.0/32769 state ___",
+          "answer": "`pcisf` and `active`. The flavour tells devlink to make a PCI-backed scalable function. Setting the state to `active` attaches it, and until then the SF exists but isn't usable."
+        },
+        "independentProblem": {
+          "prompt": "For each need, choose VF or SF and give one reason. (a) Pass a hardware NIC straight into a KVM virtual machine with VFIO. (b) Add a dozen more on-device interfaces one at a time, without disturbing interfaces already in use. (c) A tenant workload on the host expects to see an extra NIC in `lspci`.",
+          "hints": [
+            "Ask whether the thing consuming the interface needs a PCI device.",
+            "VFIO passthrough and `lspci` both work at the PCI level. SFs live on the auxiliary bus.",
+            "VFs: (a) and (c). SF: (b), because the VF count can only change by going back to zero."
+          ],
+          "answer": "(a) VF. VFIO assigns PCI devices, and a VF has its own PCI address. (b) SF. SFs are added individually with `devlink port add` and scale further, while changing the VF count means resetting to 0 and tearing down existing VFs. (c) VF. Only PCI functions appear in `lspci`, and an SF is an auxiliary device on its parent PF."
+        },
+        "selfExplanation": "Why would a platform like NICo reserve SFs, rather than VFs, for interfaces that HBN uses internally (such as service-VPC interfaces) and for extra capacity?",
+        "checks": [
+          {
+            "question": "How does an SF appear to the Linux kernel?",
+            "options": [
+              "As a new PCI function with its own bus:device.function address",
+              "As an auxiliary-bus device backed by its parent PF",
+              "As a VLAN subinterface of the PF",
+              "As a separate BMC endpoint"
+            ],
+            "answer": "As an auxiliary-bus device backed by its parent PF",
+            "explanation": "Having no PCI function of its own is the defining difference from a VF. It isn't a VLAN subinterface either, because it has real hardware queues."
+          },
+          {
+            "question": "Which is true of SFs compared with VFs?",
+            "options": [
+              "SFs need SR-IOV enabled in BIOS",
+              "SFs can be added and removed one at a time with devlink, without resetting the others",
+              "SFs can only be created from the host x86 side",
+              "An SF is just another name for a VF"
+            ],
+            "answer": "SFs can be added and removed one at a time with devlink, without resetting the others",
+            "explanation": "SFs are carved from the PF and don't depend on SR-IOV. On a BlueField, the eswitch manager is the Arm side. They're a different mechanism from VFs."
+          }
+        ],
+        "sources": []
+      },
+      {
+        "concept": "vlan",
+        "prequestions": [
+          {
+            "question": "Two machines plug into the same physical switch and have addresses in the same subnet, yet they can't ping each other. What Layer 2 mechanism could cause this on purpose?",
+            "answer": "Their switch ports are in different VLANs. Each VLAN is a separate broadcast domain, so ARP and frames never cross from one to the other, even though the IP subnets look identical."
+          },
+          {
+            "question": "How many distinct VLAN IDs exist on one Ethernet network?",
+            "answer": "The 802.1Q tag has a 12-bit ID, so 4,096 values. IDs 0 and 4095 are reserved, which leaves 1–4094 usable."
+          }
+        ],
+        "explanation": "In chapter 3 you saw that a Layer 2 network is one **broadcast domain**: an ARP request or broadcast frame reaches every port. A **VLAN** (virtual LAN) splits one physical Layer 2 network into several isolated broadcast domains.\n\nIt works with **IEEE 802.1Q tagging**. A 4-byte tag is inserted into the Ethernet frame after the source MAC, and it carries a 12-bit **VLAN ID** (VID). A switch forwards a frame only to ports that are members of its VID. Two port roles matter:\n\n- An **access port** belongs to one VLAN. The device behind it sends untagged frames, and the switch assigns them the port's VLAN (the PVID).\n- A **trunk port** carries several VLANs at once, with each frame tagged so the other end can tell them apart. Switch-to-switch links and server uplinks are typically trunks.\n\nOn Linux, a tagged interface is a subinterface: `ip link add link eth0 name eth0.10 type vlan id 10`. A Linux bridge with `vlan_filtering 1` behaves like a VLAN-aware switch.\n\nVLANs isolate at Layer 2 only. A router that has interfaces in both VLANs can still route between them, and that is deliberate. You add firewall rules or VRFs when you need more separation.\n\nThe 12-bit ID is a hard ceiling of 4,094 segments per Layer 2 domain. That's fine for a rack or a management network, but not for thousands of tenants across a data centre. That limit is why NICo isolates tenant Ethernet with VXLAN/EVPN, which has 24-bit VNIs and is covered in the next chapter.\n\nWhere VLANs show up in NICo:\n- The siteConfig has a `[pools.vlan-id]` range. NICo allocates VLAN IDs from it, and the range must not be empty.\n- A site controller on a single uplink separates traffic logically, for example with a management VLAN. The dual-homed reference design isolates with VLANs/VRFs and policy.\n- A zero-DPU host's BMC may share a `HostInband` subnet/VLAN with the host OS NIC.",
+        "analogy": "VLANs are like colour-coded radio channels on one set of walkie-talkies. Everyone shares the airwaves (the cable), but you only hear people on your channel. The analogy breaks down because anyone can retune a radio, while a VLAN's membership is set on the switch port. A host on an access port can't simply choose to join another VLAN.",
+        "workedExample": {
+          "title": "Build a VLAN trunk between two network namespaces",
+          "steps": [
+            {
+              "subgoal": "Start a disposable lab",
+              "detail": "```bash\ndocker run --rm -it --privileged debian:stable-slim bash\napt-get update && apt-get install -y iproute2 iputils-ping\n```\n`--privileged` is needed so the container can create namespaces and links."
+            },
+            {
+              "subgoal": "Create two namespaces joined by one \"trunk\" cable",
+              "detail": "```bash\nip netns add a; ip netns add b\nip -n a link add trunk type veth peer name trunk netns b\nip -n a link set trunk up; ip -n b link set trunk up\n```\nThe veth pair is your physical cable. Both ends are called `trunk`, which is fine because they're in different namespaces."
+            },
+            {
+              "subgoal": "Put VLAN 10 on both ends and test",
+              "detail": "```bash\nfor n in a b; do ip -n $n link add link trunk name trunk.10 type vlan id 10; done\nip -n a addr add 172.16.10.1/24 dev trunk.10\nip -n b addr add 172.16.10.2/24 dev trunk.10\nip -n a link set trunk.10 up; ip -n b link set trunk.10 up\nip netns exec a ping -c 2 172.16.10.2      # replies\nip -n a -d link show trunk.10 | grep vlan  # vlan protocol 802.1Q id 10\n```"
+            },
+            {
+              "subgoal": "Show isolation: same subnet, different VLANs",
+              "detail": "```bash\nip -n a link add link trunk name trunk.30 type vlan id 30\nip -n b link add link trunk name trunk.31 type vlan id 31\nip -n a addr add 192.168.30.1/24 dev trunk.30\nip -n b addr add 192.168.30.2/24 dev trunk.31\nip -n a link set trunk.30 up; ip -n b link set trunk.31 up\nip netns exec a ping -c 2 -W 1 192.168.30.2   # 100% packet loss\n```\nThe IPs share a subnet and the cable is the same, but frames tagged 30 never reach the VLAN-31 interface. Layer 2 isolation works even though Layer 3 \"looks\" connected."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Continuing the lab, make 192.168.30.2 reachable from namespace `a` by adding a matching VLAN interface in `b` (keep the existing ones). Fill in the blanks.",
+          "partialSolution": "ip -n b link add link trunk name trunk.30 type vlan id ___\nip -n b addr add 192.168.30.3/24 dev ___\nip -n b link set trunk.30 up\nip netns exec a ping -c 2 192.168.30.3",
+          "answer": "`30` and `trunk.30`. Only an interface tagged with the same VID (30) shares a broadcast domain with `a`'s `trunk.30`. This answer uses a new address, .3, because .2 is still on `trunk.31` in the same namespace."
+        },
+        "independentProblem": {
+          "prompt": "An operator plans to give each of 5,000 tenant segments its own VLAN on one Layer 2 fabric. Is that possible? What limits it, and what does NICo use for tenant Ethernet isolation instead?",
+          "hints": [
+            "How many bits is the VLAN ID?",
+            "2^12 = 4,096, minus the reserved IDs 0 and 4095.",
+            "Look at chapter 5's Day 1 description of Ethernet isolation: BlueField HBN enforces L3 ___/EVPN boundaries."
+          ],
+          "answer": "No. The 802.1Q VID is 12 bits, so only 4,094 usable VLANs exist per Layer 2 domain, fewer than 5,000. For tenant Ethernet, NICo uses L3 VXLAN/EVPN with per-tenant VRFs enforced by BlueField HBN, with no leaf switch changes needed. VXLAN's 24-bit VNI allows about 16 million segments. VLAN IDs still come from NICo's `[pools.vlan-id]` range wherever VLANs are needed."
+        },
+        "selfExplanation": "Why does putting two hosts in different VLANs stop them pinging each other even when their IP addresses are in the same /24? What would you need to add for them to talk?",
+        "checks": [
+          {
+            "question": "How many usable VLAN IDs does 802.1Q provide?",
+            "options": [
+              "256",
+              "4,094",
+              "65,534",
+              "About 16 million"
+            ],
+            "answer": "4,094",
+            "explanation": "The VID is 12 bits (4,096 values), and 0 and 4095 are reserved. About 16 million is the 24-bit VXLAN VNI space. 65,534 is the number of usable hosts in a /16."
+          },
+          {
+            "question": "A host on an access port in VLAN 10 sends an untagged frame. What happens at the switch?",
+            "options": [
+              "The switch drops it because it has no tag",
+              "The switch assigns it to VLAN 10 (the port's PVID) and forwards it only to VLAN 10 members",
+              "The switch floods it to every VLAN",
+              "The switch routes it to the default gateway"
+            ],
+            "answer": "The switch assigns it to VLAN 10 (the port's PVID) and forwards it only to VLAN 10 members",
+            "explanation": "Access ports expect untagged traffic and tag it internally. Flooding across VLANs would defeat their purpose, and routing is a Layer 3 job that switching doesn't do."
+          },
+          {
+            "question": "What does NICo need from the site configuration to allocate VLAN IDs?",
+            "options": [
+              "Nothing. VLAN IDs are hard-coded",
+              "A non-empty `[pools.vlan-id]` range in the siteConfig",
+              "One VLAN per BMC in expected_machines.json",
+              "A VLAN ID equal to each DPU's ASN"
+            ],
+            "answer": "A non-empty `[pools.vlan-id]` range in the siteConfig",
+            "explanation": "The quick start lists `[pools.vlan-id]` ranges among the siteConfig fields and says they must be non-empty. expected_machines.json holds BMC MACs, serials and credentials, not VLANs."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md",
+          "getting-started/prerequisites/network.md",
+          "getting-started/prerequisites/bmc-oob-setup.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "concept": "ip-address-pools",
+        "prequestions": [
+          {
+            "question": "NICo hands out addresses to BMCs, DPU loopbacks, idle hosts and tenant interfaces. Who chooses the subnets it hands them out from?",
+            "answer": "The site owner. NICo allocates from pools you give it, and the docs say explicitly that you supply your own subnets and VLANs and should not use NICo's default subnets."
+          },
+          {
+            "question": "Why does a pool of /32 loopbacks not lose addresses to \"network\" and \"broadcast\", while an admin subnet does?",
+            "answer": "Each loopback is its own /32 host route, so there's no shared subnet with a network or broadcast address. The admin network is a real subnet with hosts on it, so you add the network and broadcast addresses on top of one IP per server."
+          }
+        ],
+        "explanation": "An **IP address pool** is a range the site owner gives NICo so it can allocate addresses itself. NICo allocates these pools during ingestion (for BGP, loopbacks and the host OS) and returns tenant IPs, VNIs and DPU-loopback allocations to their pools when a tenant releases a host. The pools from the network prerequisites are:\n\n| Pool | Size rule | Managed by |\n|---|---|---|\n| Control-plane management | 3 IPs per site controller node with a DPU (host BMC, DPU Arm OS, DPU BMC), 1 without | Parent datacenter DHCP |\n| Control-plane network | one `/31` per site controller node (host OS ↔ DPU PF representor), static | You, at OS install |\n| Control-plane service VIPs | typically a `/27` (MetalLB VIPs for API, DHCP, DNS, PXE…) | You assign stable VIPs |\n| Managed-host management | 1 (host BMC) + 2 per DPU (Arm OS + DPU BMC). MNNVL racks add 3 per switch and 1 per power-shelf PMC | NICo, and it can be split across pools |\n| DPU loopback (`[pools.lo-ip]`) | 1 per DPU | NICo |\n| Admin network | 1 per managed server, plus network and broadcast | NICo |\n| Tenant networks | one `/31` per interface (PF, VF), with a separate pool per tenant network, each sized for all servers | NICo |\n\nThe page also gives the overall IPv4 prefix totals the site should provide: one prefix of `(servers + DPUs) × 2 + 2` addresses and more prefixes totalling `DPUs × 2`, with `/31` as the minimum prefix size.\n\nTo size a CIDR block, find the smallest power of two that is at least the count you need. Then the prefix length is `32 - bits`. In Python, `(need - 1).bit_length()` gives you `bits`. Blocks must be aligned to their own size, so a `/24` starts on a multiple of 256, and they must never overlap. The deny lists (`deny_prefixes`) and fabric prefixes (`site_fabric_prefixes`) in the siteConfig refer to these same ranges. So plan everything on paper, or in a script, before setup.",
+        "analogy": "Pools are like blocks of numbered parking permits that the building owner gives the car-park attendant. The attendant (NICo) hands them out and takes them back, but can't print new ones, and two blocks with the same numbers cause fights. The analogy breaks down because CIDR blocks only come in power-of-two sizes and must be aligned. You can't ask for exactly 300 permits. You get 512.",
+        "workedExample": {
+          "title": "Size the pools for 100 hosts with one DPU each",
+          "steps": [
+            {
+              "subgoal": "Write down the counts",
+              "detail": "100 hosts, 100 DPUs. Each host uses the PF plus one VF on one tenant network. The site controller is 3 nodes with DPUs."
+            },
+            {
+              "subgoal": "Turn rules into address counts",
+              "detail": "- Management: 100 × (1 + 2) = 300, plus network and broadcast = 302\n- DPU loopback: 100 (each a /32, no overhead)\n- Admin: 100 + 2 = 102\n- Tenant-1: 100 hosts × 2 interfaces × 2 addresses = 400\n- Service VIPs: a /27 (32)\n- Control-plane network: 3 × /31"
+            },
+            {
+              "subgoal": "Convert counts to prefixes",
+              "detail": "```python\ndef block_for(need):\n    \"\"\"Smallest prefix length whose block holds `need` addresses.\"\"\"\n    return 32 - (need - 1).bit_length()\n\npools = {\"management\": 302, \"dpu-loopback\": 100, \"admin\": 102, \"tenant-1\": 400}\nfor name, need in pools.items():\n    plen = block_for(need)\n    print(f\"{name:13} need {need:>4} -> /{plen} ({2 ** (32 - plen)} addrs)\")\n```\nOutput:\n```text\nmanagement    need  302 -> /23 (512 addrs)\ndpu-loopback  need  100 -> /25 (128 addrs)\nadmin         need  102 -> /25 (128 addrs)\ntenant-1      need  400 -> /23 (512 addrs)\n```"
+            },
+            {
+              "subgoal": "Place them without overlaps",
+              "detail": "Allocate the largest blocks first so that alignment wastes nothing: management `10.20.0.0/23`, tenant-1 `10.20.2.0/23`, loopback `10.20.4.0/25`, admin `10.20.4.128/25`, VIPs `10.20.5.0/27`. Check with `ipaddress.ip_network(a).overlaps(ipaddress.ip_network(b))`. Every pair should return `False`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so this script sizes a tenant pool for hosts that use a PF and one VF.",
+          "partialSolution": "def block_for(need):\n    return 32 - (need - 1).___()\n\nhosts = 100\ninterfaces_per_host = 2\ntenant_need = hosts * ___ * 2\nprint(f\"tenant pool: /{block_for(tenant_need)}\")",
+          "answer": "`bit_length` and `interfaces_per_host`. With 100 × 2 × 2 = 400 addresses, `(399).bit_length()` is 9, so the result is `/23`."
+        },
+        "independentProblem": {
+          "prompt": "500 hosts each have 2 DPUs, and each host uses 4 tenant interfaces (a PF and VF on each DPU). The site needs 3 tenant networks. Size the DPU loopback pool, the admin pool and the tenant pools.",
+          "hints": [
+            "Loopbacks are per DPU, not per host. Admin is per server plus 2.",
+            "DPUs = 1,000. Admin = 502. Tenant per network = 500 × 4 × 2.",
+            "4,000 per tenant network fits in 4,096 (/20). The docs want a separate pool per tenant network."
+          ],
+          "answer": "DPU loopback: 1,000 → /22 (1,024). Admin: 502 → /23 (512). Tenant: 4,000 addresses each → one /20 (4,096) per network, so three separate /20s."
+        },
+        "selfExplanation": "Why does NICo want the site owner to supply pools up front, rather than discovering free addresses on the network as hosts appear?",
+        "checks": [
+          {
+            "question": "Which pool grows by exactly one address per DPU?",
+            "options": [
+              "Admin network",
+              "DPU loopback pool",
+              "Control-plane service VIP pool",
+              "Tenant network pool"
+            ],
+            "answer": "DPU loopback pool",
+            "explanation": "Each DPU uses one loopback, which it advertises as a /32 VTEP address. Admin is per server, VIPs are a fixed /27-ish pool, and tenant pools grow per interface (two addresses per /31)."
+          },
+          {
+            "question": "A host uses PF + VF and is on 2 tenant networks. How should the tenant pools be provided?",
+            "options": [
+              "One pool sized for 2 addresses per host, shared by both networks",
+              "Separate pools per tenant network, each sized for all servers",
+              "One /31 per host, shared by PF and VF",
+              "Tenant addresses come from the admin network"
+            ],
+            "answer": "Separate pools per tenant network, each sized for all servers",
+            "explanation": "The docs say so directly: for multiple tenant networks, provide separate pools, each sized for all servers. A shared /31 can't serve two interfaces, and the admin network is for hosts with no tenant."
+          },
+          {
+            "question": "Who assigns addresses on the control-plane management network (the site controller nodes' BMCs and DPUs)?",
+            "options": [
+              "NICo's DHCP service",
+              "The parent datacenter via DHCP",
+              "The DPU agent",
+              "The ToR switch via BGP"
+            ],
+            "answer": "The parent datacenter via DHCP",
+            "explanation": "The control-plane management network is managed by the parent datacenter. The management network for *managed hosts* is the one NICo manages."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/network.md",
+          "getting-started/quick-start.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "concept": "bmc-network-ip-addressing",
+        "prequestions": [
+          {
+            "question": "A GB200 NVL72 rack with 2 DPUs per compute tray has 18 compute trays, 9 switch trays and 8 power shelves. How many BMC endpoints is that?",
+            "answer": "71: 18 host BMCs + 36 DPU BMCs + 9 switch-tray BMCs + 8 power-shelf BMCs."
+          },
+          {
+            "question": "Will 1,112 such racks fit in one /16?",
+            "answer": "No. 1,112 × 71 = 78,952 addresses, and a /16 holds 65,536."
+          }
+        ],
+        "explanation": "From chapter 6 you know NICo talks to every **BMC** over Redfish on the OOB network. Discovery depends on addressing: a BMC sends a DHCP request, a **DHCP relay** on every BMC-facing network forwards it to the NICo DHCP service, and NICo allocates the lease and starts exploring. The OOB switches only relay. They don't assign addresses. So the BMC address plan is yours to give NICo, and it has to be big enough.\n\nThe rule is simple: **every BMC endpoint needs one IP**. The sizing guide says to size by endpoints and then convert to racks for the profile you use:\n\n| Rack profile | BMC endpoints per rack |\n|---|---|\n| GB200 NVL72, 2 DPUs per tray | 71 (18 host + 36 DPU + 9 switch + 8 power shelf) |\n| GB200 NVL72, 1 DPU per tray | 53 |\n| GB300 NVL72, 1 DPU per tray | 51 |\n\nAt 2 DPUs per tray: 250 racks need **17,750** addresses, 556 racks need **39,476**, and 1,112 racks need **78,952**. That's more than a `/16` holds (65,536, and fewer usable once you take out network, broadcast and gateway). NICo's 1,112-rack simulation split its BMC leases between two `/16` segments. The management pool for managed hosts can be split across multiple pools.\n\nThe Redfish-probed BMC count isn't the whole management network, though. The prerequisites count management IPs as 1 per host (host BMC) + 2 per DPU (DPU Arm OS **and** DPU BMC), plus, in MNNVL racks, 3 per switch (BMC + 2 NVOS) and 1 per power-shelf PMC. Plan the management pool from that fuller count, and use the endpoint count for the explorer's workload.\n\nTwo more requirements: BMCs must support IPv6, which NICo uses for BMC communication, and NICo only ingests hosts whose BMC MAC appears in `expected_machines.json`.",
+        "analogy": "Think of a hotel switchboard. Every room phone (BMC) needs an extension, and the front desk (NICo's DHCP behind the relay) hands them out. A 4-digit plan works for a small hotel. Build a much bigger one and you need longer extensions or a second exchange. The analogy breaks down because a hotel can renumber at will, while IP blocks must be power-of-two sized and aligned, so \"a bit more than 65,536\" really means \"double it\" or \"add a second block\".",
+        "workedExample": {
+          "title": "Plan BMC address space for three site sizes",
+          "steps": [
+            {
+              "subgoal": "Count endpoints per rack",
+              "detail": "For GB200 NVL72 with 2 DPUs per tray: 18 host BMCs + 18 × 2 = 36 DPU BMCs + 9 switch-tray BMCs + 8 power-shelf BMCs = **71**."
+            },
+            {
+              "subgoal": "Multiply out and compare with a /16",
+              "detail": "```python\nper_rack = 18 + 36 + 9 + 8          # host, DPU, switch-tray, power-shelf BMCs\nfor racks in (250, 556, 1112):\n    n = racks * per_rack\n    plen = 32 - (n - 1).bit_length()\n    verdict = \"fits in one /16\" if n <= 65536 else \"needs more than one /16\"\n    print(f\"{racks:>5} racks: {n:>6} BMCs -> single block /{plen}, {verdict}\")\n```\nOutput:\n```text\n  250 racks:  17750 BMCs -> single block /17, fits in one /16\n  556 racks:  39476 BMCs -> single block /16, fits in one /16\n 1112 racks:  78952 BMCs -> single block /15, needs more than one /16\n```"
+            },
+            {
+              "subgoal": "Choose a layout",
+              "detail": "For 1,112 racks, either allocate one `/15` (131,072) or, like the NICo simulation, split leases across two `/16` segments, each with its own DHCP relay pointing at the NICo DHCP VIP. Splitting also lets each segment follow a data hall or row."
+            },
+            {
+              "subgoal": "Check usable addresses, not raw size",
+              "detail": "Each DHCP subnet loses its network address, broadcast address and gateway. For 556 racks, 39,476 fits comfortably in a /16's 65,533 usable addresses. A plan that lands within a few addresses of a boundary would need the next size up."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blank to compute BMC endpoints for a GB200 NVL72 rack with only 1 DPU per compute tray, and check that it matches the documented 53.",
+          "partialSolution": "per_rack = 18 + ___ + 9 + 8   # host, DPU, switch-tray, power-shelf BMCs\nassert per_rack == 53\nprint(1112 * per_rack)",
+          "answer": "`18`: one DPU BMC per tray × 18 trays. The script prints 58,936, which would fit in one /16, unlike the 2-DPU profile."
+        },
+        "independentProblem": {
+          "prompt": "Using the network prerequisites' management-network rules (1 per host BMC, 2 per DPU for Arm OS + DPU BMC, 3 per switch tray for BMC + 2 NVOS, 1 per power-shelf PMC), how many management IPs does one GB200 NVL72 rack with 2 DPUs per tray need? How many for 1,112 racks, and what single prefix would hold them?",
+          "hints": [
+            "This count is bigger than 71, because DPUs and switches use more than one address each.",
+            "Per rack: 18 + (36 × 2) + (9 × 3) + 8.",
+            "That's 125 per rack and 139,000 total. A /15 is 131,072, so is that enough?"
+          ],
+          "answer": "125 per rack: 18 + 72 + 27 + 8. For 1,112 racks that's 139,000, which is more than a /15 (131,072), so a single block needs a /14 (262,144). Alternatively, split it across several pools, for example a /15 plus a /18 (16,384), giving 147,456. The docs allow the managed-host management network to be split across multiple pools."
+        },
+        "selfExplanation": "Why do the docs say to size a site by BMC endpoints and machines first and only then convert to racks, instead of planning per rack from the start?",
+        "checks": [
+          {
+            "question": "A 1,112-rack GB200 site (2 DPUs per tray) needs 78,952 BMC addresses. Which plan works?",
+            "options": [
+              "One /16, because 78,952 is close to 65,536",
+              "Two /16 segments (or a /15), each with a DHCP relay to NICo",
+              "One /17 per data hall, with no relay needed",
+              "Static addresses typed into expected_machines.json"
+            ],
+            "answer": "Two /16 segments (or a /15), each with a DHCP relay to NICo",
+            "explanation": "A /16 holds 65,536 addresses, fewer than you need. Every BMC-facing network needs a DHCP relay to the NICo DHCP service. expected_machines.json lists BMC MACs and credentials, not IP addresses."
+          },
+          {
+            "question": "Who assigns a managed host's BMC address?",
+            "options": [
+              "The OOB switch's built-in DHCP server",
+              "NICo, through DHCP requests relayed from the OOB network",
+              "The BMC itself, using a link-local address",
+              "The tenant's cloud-init"
+            ],
+            "answer": "NICo, through DHCP requests relayed from the OOB network",
+            "explanation": "The BMC/OOB setup page says that NICo manages IP allocation for the management network and that OOB switches only relay DHCP traffic."
+          },
+          {
+            "question": "Why is the management-network IP count per GB200 rack (125) higher than the BMC endpoint count (71)?",
+            "options": [
+              "NICo reserves spare addresses for rollback",
+              "Each DPU also needs an address for its Arm OS, and each switch tray needs two NVOS addresses",
+              "Every BMC needs both IPv4 and IPv6 addresses counted separately",
+              "Power shelves need three addresses each"
+            ],
+            "answer": "Each DPU also needs an address for its Arm OS, and each switch tray needs two NVOS addresses",
+            "explanation": "The network prerequisites count 2 per DPU (Arm OS + DPU BMC) and 3 per switch (BMC + 2 NVOS). Power shelves use 1 address each (the PMC), and there's no rule about reserving spares or counting IPv4 and IPv6 separately."
+          }
+        ],
+        "sources": [
+          "getting-started/sizing-and-scale.md",
+          "getting-started/prerequisites/bmc-oob-setup.md",
+          "getting-started/prerequisites/network.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Plan a NICo-style site's address pools, then prove VLAN and per-interface /31 isolation in a namespace lab",
+      "goal": "Write a small Python planner that turns a rack-scale fleet description into non-overlapping pools (management, DPU loopback, admin, tenant, service VIPs) and flags pools bigger than a /16. Then build a Linux-namespace lab where a VLAN-aware bridge isolates hosts, and a host reaches a \"DPU\" over one /31 per interface (PF and VF), using the addresses the planner produced.",
+      "whyItMatters": "Before `setup.sh`, a NICo operator has to hand over correctly sized, non-overlapping pools and VLAN ranges in the siteConfig, plus BMC subnets with DHCP relays. Getting this wrong only shows up later, when pools run out or routes collide during ingestion. The lab makes the two isolation mechanisms you'll meet on real hardware tangible: VLANs at Layer 2, and routed /31s between each host PF/VF and its DPU.",
+      "setup": [
+        "Linux or macOS with Python 3.8+ (`python3 --version`)",
+        "Docker or Podman able to run privileged containers (`docker run --rm --privileged debian:stable-slim true`)",
+        "A working directory, e.g. `mkdir -p ~/nico-pools && cd ~/nico-pools`"
+      ],
+      "steps": [
+        {
+          "subgoal": "Describe the fleet",
+          "detail": "Create `site.json` for 2 GB200 NVL72 racks with 2 DPUs per tray:\n```json\n{\n  \"supernet\": \"10.0.0.0/12\",\n  \"racks\": 2,\n  \"rack_profile\": {\"compute_trays\": 18, \"dpus_per_tray\": 2, \"switch_trays\": 9, \"power_shelves\": 8},\n  \"tenant_networks\": 2,\n  \"tenant_interfaces_per_host\": 2,\n  \"service_vips\": 32\n}\n```\nUse your own supernet on a real site. NICo's defaults are not for production."
+        },
+        {
+          "subgoal": "Write the planner",
+          "detail": "Save as `planner.py`. This is a learning tool, not a NICo command:\n```python\n#!/usr/bin/env python3\n\"\"\"Toy address-pool planner for a NICo-style site. Not a NICo tool.\"\"\"\nimport ipaddress\nimport itertools\nimport json\nimport sys\n\n\ndef block_for(need):\n    \"\"\"Smallest prefix length whose block holds `need` addresses.\"\"\"\n    return 32 - (max(need, 1) - 1).bit_length()\n\n\ndef main(path):\n    with open(path) as f:\n        site = json.load(f)\n    p = site[\"rack_profile\"]\n    racks = site[\"racks\"]\n    hosts = racks * p[\"compute_trays\"]\n    dpus = hosts * p[\"dpus_per_tray\"]\n    switches = racks * p[\"switch_trays\"]\n    shelves = racks * p[\"power_shelves\"]\n\n    bmcs = hosts + dpus + switches + shelves\n    print(f\"hosts={hosts} dpus={dpus} switches={switches} shelves={shelves}\")\n    verdict = \"more than one /16 holds\" if bmcs > 65536 else \"fits in one /16\"\n    print(f\"BMC endpoints: {bmcs} -> {verdict}\")\n\n    # (pool name, addresses needed, extra addresses for network/broadcast)\n    reqs = [\n        (\"management\", hosts + 2 * dpus + 3 * switches + shelves, 2),\n        (\"dpu-loopback\", dpus, 0),\n        (\"admin\", hosts, 2),\n    ]\n    for n in range(1, site[\"tenant_networks\"] + 1):\n        reqs.append((f\"tenant-{n}\", hosts * site[\"tenant_interfaces_per_host\"] * 2, 0))\n    reqs.append((\"service-vips\", site[\"service_vips\"], 0))\n\n    sized = [(name, need, block_for(need + extra)) for name, need, extra in reqs]\n    sized.sort(key=lambda r: r[2])  # biggest blocks first, so alignment wastes nothing\n\n    supernet = ipaddress.ip_network(site[\"supernet\"])\n    end = int(supernet.broadcast_address) + 1\n    cursor = int(supernet.network_address)\n    plan = {}\n    for name, need, plen in sized:\n        size = 2 ** (32 - plen)\n        cursor = -(-cursor // size) * size  # align to the block size\n        if cursor + size > end:\n            sys.exit(f\"ERROR: {name} ({need} addresses) does not fit in {supernet}\")\n        net = ipaddress.ip_network((cursor, plen))\n        plan[name] = net\n        flag = \"  <-- bigger than a /16\" if plen < 16 else \"\"\n        print(f\"{name:13} need {need:>7} -> {str(net):18} ({net.num_addresses} addrs){flag}\")\n        cursor += size\n\n    for a, b in itertools.combinations(plan.values(), 2):\n        assert not a.overlaps(b), f\"{a} overlaps {b}\"\n    print(\"no overlaps\")\n\n    count = site[\"tenant_interfaces_per_host\"]\n    for i, s in enumerate(itertools.islice(plan[\"tenant-1\"].subnets(new_prefix=31), count)):\n        label = \"PF\" if i == 0 else f\"VF{i}\"\n        print(f\"host-0 {label}: {s} ({s[0]}, {s[1]})\")\n\n\nif __name__ == \"__main__\":\n    main(sys.argv[1])\n```"
+        },
+        {
+          "subgoal": "Run it and check by hand",
+          "detail": "`python3 planner.py site.json` should print:\n```text\nhosts=36 dpus=72 switches=18 shelves=16\nBMC endpoints: 142 -> fits in one /16\nmanagement    need     250 -> 10.0.0.0/24        (256 addrs)\ntenant-1      need     144 -> 10.0.1.0/24        (256 addrs)\ntenant-2      need     144 -> 10.0.2.0/24        (256 addrs)\ndpu-loopback  need      72 -> 10.0.3.0/25        (128 addrs)\nadmin         need      36 -> 10.0.3.128/26      (64 addrs)\nservice-vips  need      32 -> 10.0.3.192/27      (32 addrs)\nno overlaps\nhost-0 PF: 10.0.1.0/31 (10.0.1.0, 10.0.1.1)\nhost-0 VF1: 10.0.1.2/31 (10.0.1.2, 10.0.1.3)\n```\nCheck management by hand: 36 + 2×72 + 3×18 + 16 = 250, plus 2 is 252, so a /24."
+        },
+        {
+          "subgoal": "Scale to 1,112 racks",
+          "detail": "```bash\nsed 's/\"racks\": 2/\"racks\": 1112/' site.json > site-big.json\npython3 planner.py site-big.json\n```\nExpect `BMC endpoints: 78952 -> more than one /16 holds`, management `need 139000 -> 10.0.0.0/14`, two tenant /15s, a /16 loopback pool and a /17 admin pool, all flagged where they're bigger than a /16, and still `no overlaps`."
+        },
+        {
+          "subgoal": "Write the namespace lab",
+          "detail": "Save as `lab.sh`. It uses the planner's tenant-1 addresses for the /31s:\n```sh\n#!/bin/sh\nset -e\ncommand -v ping >/dev/null && command -v bridge >/dev/null || {\n  apt-get update -qq && apt-get install -y -qq iproute2 iputils-ping >/dev/null; }\n\n# Part 1: a VLAN-aware bridge (\"switch\") with three hosts on access ports\nip netns add sw\nip -n sw link add br0 type bridge vlan_filtering 1\nip -n sw link set br0 up\ni=1\nfor h in h1 h2 h3; do\n  ip netns add \"$h\"\n  ip -n sw link add \"p-$h\" type veth peer name eth0 netns \"$h\"\n  ip -n sw link set \"p-$h\" master br0\n  ip -n sw link set \"p-$h\" up\n  ip -n \"$h\" link set lo up\n  ip -n \"$h\" link set eth0 up\n  ip -n \"$h\" addr add \"192.168.50.$i/24\" dev eth0\n  i=$((i + 1))\ndone\n\naccess() {  # access <host> <vlan>: untagged member of exactly one VLAN\n  ip netns exec sw bridge vlan del dev \"p-$1\" vid 1\n  ip netns exec sw bridge vlan add dev \"p-$1\" vid \"$2\" pvid untagged\n}\naccess h1 10\naccess h2 10\naccess h3 20\nip netns exec sw bridge vlan show\n\nif ip netns exec h1 ping -c 2 -W 1 192.168.50.2 >/dev/null; then\n  echo \"PASS h1 -> h2 (VLAN 10 -> VLAN 10) reachable\"; else echo \"FAIL h1 -> h2\"; fi\nif ip netns exec h1 ping -c 2 -W 1 192.168.50.3 >/dev/null; then\n  echo \"FAIL h1 -> h3 should be blocked\"; else echo \"PASS h1 -> h3 (VLAN 10 -> VLAN 20) blocked\"; fi\n\n# Part 2: one /31 per interface between h1 and a \"dpu\" namespace\nip netns add dpu\nip -n dpu link set lo up\nn=0\nfor ifc in pf0 vf1; do\n  ip -n h1 link add \"$ifc\" type veth peer name \"${ifc}_rep\" netns dpu\n  ip -n dpu addr add \"10.0.1.$n/31\" dev \"${ifc}_rep\"\n  ip -n h1 addr add \"10.0.1.$((n + 1))/31\" dev \"$ifc\"\n  ip -n dpu link set \"${ifc}_rep\" up\n  ip -n h1 link set \"$ifc\" up\n  if ip netns exec h1 ping -c 2 -W 1 \"10.0.1.$n\" >/dev/null; then\n    echo \"PASS h1 $ifc 10.0.1.$((n + 1))/31 -> dpu 10.0.1.$n\"; else echo \"FAIL $ifc /31\"; fi\n  n=$((n + 2))\ndone\n```\nThe `_rep` names stand in for DPU representors. Here they're just veth ends."
+        },
+        {
+          "subgoal": "Run the lab",
+          "detail": "```bash\ndocker run --rm --privileged -v \"$PWD\":/lab -w /lab debian:stable-slim sh lab.sh\n```\nIn the `bridge vlan show` table, p-h1 and p-h2 show `10 PVID Egress Untagged` and p-h3 shows `20 ...`. Each run starts from a fresh container because of `--rm`."
+        }
+      ],
+      "verify": "Two outputs prove it. (1) `python3 planner.py site-big.json` prints `BMC endpoints: 78952 -> more than one /16 holds`, a management pool of `10.0.0.0/14` and `no overlaps`. (2) The container run ends with exactly four PASS lines and no FAIL lines: `PASS h1 -> h2 (VLAN 10 -> VLAN 10) reachable`, `PASS h1 -> h3 (VLAN 10 -> VLAN 20) blocked`, `PASS h1 pf0 10.0.1.1/31 -> dpu 10.0.1.0` and `PASS h1 vf1 10.0.1.3/31 -> dpu 10.0.1.2`.",
+      "hints": [
+        "`RTNETLINK answers: Operation not permitted` or `mount --make-shared /run/netns failed` means the container isn't privileged. Add `--privileged`. With rootless Podman, use `sudo podman run --rm --privileged ...`.",
+        "`RTNETLINK answers: File exists` means you're re-running `lab.sh` in a container that already has the namespaces. Start a new container (`--rm` does this) or run `ip -all netns delete` first.",
+        "If h1 can reach h3, check that `bridge vlan del ... vid 1` ran for every port. Otherwise all ports share the default VLAN 1.",
+        "`json.decoder.JSONDecodeError` usually means a trailing comma or smart quotes in site.json.",
+        "On macOS, run lab.sh inside Docker Desktop's Linux VM (the docker command above). The `ip`/`bridge` commands don't exist on macOS itself. The planner runs natively."
+      ],
+      "stretch": "Extend the planner in three ways. (1) Split the management pool for 1,112 racks across two /16s (or more), as NICo's simulation split BMC leases, and assert that each segment stays under its usable count. (2) Add a `vlan_range` (e.g. 100–199) to site.json, allocate one VLAN per rack from it, and fail loudly when the range runs out. (3) Print NVUE-style lines such as `nv set interface swp1 bridge domain br_default access 101` for each rack's management VLAN. Then in lab.sh, add a tagged trunk port (`bridge vlan add dev p-h4 vid 10` and `vid 20`, without `untagged`) and show that a host with `eth0.10`/`eth0.20` subinterfaces reaches both VLANs."
+    }
+  }
+}

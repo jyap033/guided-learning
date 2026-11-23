@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "The stretch says booting a second QEMU VM with MAC 52:54:00:aa:bb:03 (rack-host-3) will show it 'getting the next loopback'. But the 'Act as iPXE with curl' step already fetched /host?mac=52-54-00-aa-bb-03, which allocated 10.99.0.2 to rack-host-3. alloc_loopback is idempotent per MAC, so the VM gets the same 10.99.0.2, not a new address. The output differs from what the text says.",
+        "fix": "Say the VM gets the same loopback rack-host-3 received in the curl step (10.99.0.2), which further demonstrates idempotency. Or have the learner add a fourth, never-fetched machine to the config and boot that MAC to see a fresh allocation."
+      },
+      {
+        "where": "nico-resource-pools",
+        "severity": "major",
+        "problem": "The intro ('You must fill in all three before NICo will run') and the lesson-2 prequestion answer ('an empty range is a configuration error, not something that fails later') make claims the docs don't support. The Quick Start only says the ranges 'must be non-empty', and warns that missing required values 'can cause setup to fail or produce an incorrectly configured deployment that is hard to fix afterward'. The docs don't say NICo refuses to run, or that the error can't show up later.",
+        "fix": "Reword both to match the docs, e.g. 'NICo's docs require all three ranges to be non-empty; leaving one empty is a misconfiguration that can make setup fail or leave a deployment that is hard to fix afterward.'"
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "In 'Act as iPXE with curl', 'The /state JSON shows the same plan for every machine' reads as if all machines have identical plans. In fact rack-host-2's plan differs from rack-host-3's and vm-host-1's.",
+        "fix": "Rephrase to 'The /state JSON shows the same per-machine plans that the /host scripts printed.'"
+      }
+    ]
+  }
+}

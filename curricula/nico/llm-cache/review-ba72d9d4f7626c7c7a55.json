@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The troubleshooting hint says that rerunning lab.sh fails with `RTNETLINK answers: File exists`. The first command that fails on a rerun is `ip netns add vtep1`, and iproute2 reports that as `Cannot create namespace file \"/run/netns/vtep1\": File exists`. A learner searching for the quoted message won't find a match.",
+        "fix": "Quote the actual netns error (or both messages) and keep the remedy: `docker rm -f vxlab`, then restart from step 1."
+      },
+      {
+        "where": "vxlan-and-vni",
+        "severity": "minor",
+        "problem": "In the MTU step of the worked example, the code labels the 50 bytes as 'outer Eth + IPv4 + UDP + VXLAN' and adds that to the inner IP MTU to get the 'underlay IP MTU'. The outer Ethernet header isn't part of an IP MTU; the 14 bytes that count are the inner Ethernet header. The 1550 result is correct and the prose after the code explains it, but the code comment contradicts that explanation.",
+        "fix": "Compute it as inner_frame = 1500 + 14, then underlay_ip_mtu = inner_frame + 20 + 8 + 8 = 1550. Say separately that the 50-byte figure is the size on the wire, including the outer Ethernet header."
+      }
+    ]
+  }
+}

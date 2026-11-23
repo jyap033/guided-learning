@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "In lab.sh's segment() function and in the 'Break it on purpose' step, `mtu 1500` comes after `type vxlan ...` (`ip link add vx1000 type vxlan id 1000 local ... remote ... dstport 4789 mtu 1500`). iproute2 passes everything after `type` to the vxlan option parser, which doesn't accept `mtu`, so the command fails with `vxlan: unknown command \"mtu\"?`. Because lab.sh uses `set -e`, it stops at the first segment call and nothing after it works, including verify.sh. The break step's vx2001 command fails the same way.",
+        "fix": "Put mtu before the type (`ip -n \"$1\" link add \"$5\" mtu 1500 type vxlan id \"$6\" local \"$7\" remote \"$8\" dstport 4789`), or set it afterwards with `ip -n \"$1\" link set \"$5\" mtu 1500`. Make the same change in the vx2001 command."
+      },
+      {
+        "where": "vxlan-and-vni",
+        "severity": "major",
+        "problem": "The independent problem's payload begins `08000000000003e8`. Its bytes are 08 00 00 00 00 00 03 e8, so bytes 4–6 (the VNI field) are 00 00 03 and the VNI is 3. The 0xe8 falls in reserved byte 7. The stated answer 'VNI 1000' is wrong, and the answer's own code `int.from_bytes(p[4:7],'big')` returns 3. The hint ('VNI bytes 0003e8 = 1000') also contradicts the byte layout taught in the lesson.",
+        "fix": "Change the header to `080000000003e800` (VNI bytes 00 03 e8 at offsets 4–6, reserved byte 7 = 00) in the prompt and in the Python one-liner, so the payload becomes `080000000003e8000242ac1100020242ac1100030800`. The MAC slices p[8:14] and p[14:20] stay correct."
+      }
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "vlan",
+        "severity": "major",
+        "problem": "The completion problem's answer is very likely to fail when followed exactly. Namespace b already has 192.168.30.2/24 on trunk.31, added in the previous step. The answer adds 192.168.30.3/24 on a new trunk.30 in the same namespace, so b ends up with two connected routes for 192.168.30.0/24. The trunk.31 route was installed first, so the kernel looks up the route back to 192.168.30.1 and picks trunk.31. The echo reply then goes out tagged VLAN 31, where nothing answers ARP, and never reaches a's trunk.30. If rp_filter is strict, the incoming request is dropped as well. So `ip netns exec a ping -c 2 192.168.30.3` will not get replies, which contradicts the answer.",
+        "fix": "Remove the conflicting address before testing, e.g. add `ip -n b link del trunk.31` (or `ip -n b addr del 192.168.30.2/24 dev trunk.31`) to the partial solution before the new trunk.30 lines, and say this in the answer. You could then reuse .2. Alternatively, put the matching VLAN 30 interface in a fresh namespace instead of b."
+      },
+      {
+        "where": "scalable-functions",
+        "severity": "major",
+        "problem": "The lesson states \"In NICo, SFs are reserved on the DPU for HBN service-VPC interfaces and for extra capacity\" and \"NICo reserves the SFs\". The lesson lists no sources, and none of the docs pages mention scalable functions, SF reservation or service-VPC interfaces. The selfExplanation prompt also assumes this claim is true.",
+        "fix": "Cite a docs page that supports how NICo uses SFs, or remove the NICo-specific claims. Present SFs as general ConnectX/BlueField background and reword the selfExplanation prompt so it doesn't assert NICo behaviour that the docs don't cover."
+      },
+      {
+        "where": "ip-address-pools",
+        "severity": "minor",
+        "problem": "The lesson says the siteConfig's deny lists (`deny_prefixes`) and fabric prefixes (`site_fabric_prefixes`) \"refer to these same ranges\". The quick start only describes deny_prefixes as CIDRs that instances must not reach (OOB, control plane, management) and site_fabric_prefixes as CIDRs that are part of the site fabric. Neither is described as a copy of the pool list.",
+        "fix": "Say that these fields have to agree with the pool plan: management and control-plane ranges go in deny_prefixes, and fabric ranges go in site_fabric_prefixes. Don't say they simply restate the pools."
+      }
+    ]
+  }
+}

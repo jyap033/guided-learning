@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "scalable-functions",
+        "severity": "minor",
+        "problem": "The lesson says SFs 'don't need SR-IOV' and gives devlink commands that 'just work' once the eswitch is in switchdev mode. On ConnectX/BlueField, SF support usually has to be enabled in firmware first (for example with mlxconfig PF_BAR2_ENABLE / PER_PF_NUM_SF / PER_PF_TOTAL_SF, then a firmware reset). Without that, `devlink port add ... flavour pcisf` fails, so a learner following the worked example on real hardware may hit an unexplained error.",
+        "fix": "Add one sentence saying that the device firmware must have SF support enabled (see the device's DOCA/mlx5 SF documentation for your release) before `devlink port add` succeeds, and that this is a firmware setting, not SR-IOV."
+      }
+    ]
+  }
+}

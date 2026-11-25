@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "boot-artifacts",
+        "severity": "major",
+        "problem": "The worked-example step 'Serve them like a PXE/HTTP boot server would' runs `busybox httpd -f -p 8080` inside an image built FROM alpine:3.20. Alpine's default busybox doesn't include the httpd applet (it's in the separate busybox-extras package). The command fails with 'applet not found', the container exits, and the curl gets nothing.",
+        "fix": "Serve the extracted files from a busybox:stable container instead, e.g. `docker run --rm -d --name artsrv -p 8080:8080 -v \"$PWD/extracted:/artifacts:ro\" busybox:stable httpd -f -p 8080 -h /artifacts`. Or rebuild the demo with `--build-arg CONTAINER_RUNTIME=busybox:stable`, whose busybox includes httpd."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The verify step says `bash verify.sh` prints 'exactly' five lines, but `docker run --pull always` also shows pull progress ('Pulling from…', 'Status: Downloaded newer image…') in the terminal (on stderr). Learners may think the check failed.",
+        "fix": "Say 'stdout contains exactly these lines (pull progress on stderr is expected)', or add `--quiet` to the docker run calls in verify.sh."
+      },
+      {
+        "where": "build-host-bootstrap",
+        "severity": "minor",
+        "problem": "The verify step uses `git -C ~/infra-controller submodule status`, which assumes the repo was cloned into the home directory. The clone step runs `git clone` from whatever directory you're in.",
+        "fix": "Run `git submodule status` from inside the cloned infra-controller directory, or tell learners to clone into ~ first."
+      }
+    ]
+  }
+}

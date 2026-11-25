@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "Step 2 runs `docker run -d --restart=always -p \"${REG##*:}\":5000 --name lab-registry registry:2`. The container-registry lesson's worked example already started a container with the same name on port 5000 and never removes it, so a learner who did that lesson hits a name conflict or 'port is already allocated'. The expected `{\"repositories\":[]}` output also won't match, because the old registry still holds tools/alpine. On a host that has run `make images`, `nico-build-registry` may also be on port 5000. The only cleanup is in the last hint, after the fact.",
+        "fix": "Add `docker rm -f lab-registry 2>/dev/null || true` before the `docker run` in step 2. Also add a cleanup step to the registry lesson's worked example, and note that a running `nico-build-registry` occupies port 5000 (use REG=localhost:5001 in that case)."
+      },
+      {
+        "where": "docker-buildkit-and-buildx",
+        "severity": "minor",
+        "problem": "The explanation says docker-container builders 'don't see the daemon's images unless you `--load` or push them'. `--load` exports a build result into the daemon. It doesn't make daemon images visible to the builder, so a later docker-container build `FROM` a loaded image still tries to pull it. Only pushing to a registry makes a base image available to such a builder.",
+        "fix": "Rephrase: 'They can't see images in the daemon's image store. `--load` copies their result into the daemon, and a base image for a later build must come from a registry.'"
+      }
+    ]
+  }
+}

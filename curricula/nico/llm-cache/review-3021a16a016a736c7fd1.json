@@ -1,0 +1,52 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "major",
+        "problem": "The final verify line pipes `kubectl run v ... --rm -i ... | wc -l` and expects '2 or more'. `kubectl run --rm` usually prints its own `pod \"v\" deleted` line to stdout, so a single boot line can still produce a count of 2. The check therefore doesn't prove the volume survived the pod restart.",
+        "fix": "Add `--quiet`, as the Quick Start does, or check the file directly: `kubectl -n nico-lab exec fake-api-0 -- wc -l /data/boots.log`, which should print 2 or more."
+      },
+      {
+        "where": "kubernetes-workload-and-config-objects",
+        "severity": "major",
+        "problem": "The lesson ties the site-agent bootstrap Job to `kubectl get jobs -n nico-system`. The Quick Start calls it the `nico-rest-site-agent` bootstrap Job, run in Phase 7g, and only shows site-agent pods in the `nico-rest` namespace. The docs never say that this Job lives in `nico-system`.",
+        "fix": "Remove the namespace claim, or say the Job belongs to the NICo REST site-agent release (Phase 7g) and use `kubectl get jobs -n nico-system` only as the Quick Start's generic health check."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "In 'Prove persistence and reachability', the comment says 'Read through the ClusterIP Service', but the command uses the headless per-pod DNS name. The `fake-api` ClusterIP Service never carries traffic anywhere in the task or the verify step.",
+        "fix": "Either relabel the step as per-pod DNS through the headless Service, or add a request to `http://fake-api.nico-lab.svc.cluster.local/site.toml`."
+      },
+      {
+        "where": "persistent-storage",
+        "severity": "minor",
+        "problem": "The lesson says `clean.sh` removes released PVs *because* deleting a StatefulSet keeps its PVCs. That reasoning doesn't hold: a PV only becomes Released after its PVC is deleted, for example when the namespace is removed, and only if its reclaim policy keeps it.",
+        "fix": "Keep the two facts separate. StatefulSet deletion keeps PVCs. `clean.sh` also deletes namespaces, so their PVCs go, and it then cleans up any PVs left in the Released state."
+      },
+      {
+        "where": "kubernetes-workload-and-config-objects",
+        "severity": "minor",
+        "problem": "The lesson says every StatefulSet replica has 'its own persistent volume'. That's only true when the StatefulSet defines `volumeClaimTemplates`. The lesson's own `ntp` example has none.",
+        "fix": "Change it to 'and, if volumeClaimTemplates are defined, its own PersistentVolumeClaim'."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The setup allows kubectl 1.26 or later, but kind's current node images run Kubernetes versions far beyond 1.26. Kubernetes only supports a kubectl client within one minor version of the server.",
+        "fix": "Ask for a kubectl version within one minor version of the kind node image, and explain that 1.26 is NICo's minimum for its own tools."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "Running `kubectl wait pod/fake-api-0` straight after `kubectl delete pod fake-api-0` can fail with 'not found' if the StatefulSet hasn't recreated the pod yet.",
+        "fix": "Use `kubectl -n nico-lab rollout status statefulset/fake-api` instead, or add a short sleep before the wait."
+      }
+    ]
+  }
+}

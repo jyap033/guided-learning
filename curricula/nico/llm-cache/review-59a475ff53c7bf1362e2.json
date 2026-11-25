@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "build-host-bootstrap",
+        "severity": "major",
+        "problem": "The worked example runs make bootstrap, reboots, and then expects `ls /proc/sys/fs/binfmt_misc/ | grep qemu-aarch64` to show a registered emulator. tonistiigi/binfmt only writes registrations into the running kernel (binfmt_misc). They don't survive a reboot unless something re-registers them at boot, and nothing in the bootstrap's apt list (e.g. qemu-user-static or /etc/binfmt.d entries) appears to do that. So this verify step is likely to print nothing, and later arm64 builds would hit exec format error. The chapter half-admits this in the build-task hint ('on some systems the registration resets after a host reboot'), which contradicts this lesson's expected output.",
+        "fix": "After the reboot, tell the learner to check for the registration and, if it's missing, re-run `sudo docker run --privileged --rm tonistiigi/binfmt --install all` (or install qemu-user-static/binfmt-support so the registration persists). Say plainly that binfmt registrations are runtime kernel state, not persistent configuration."
+      },
+      {
+        "where": "build-host-bootstrap",
+        "severity": "minor",
+        "problem": "The explanation repeats the docs' line that rebooting *or* logging out and back in applies the userns sysctl. The independent-problem answer then says a re-login alone won't guarantee the sysctl is in effect. The two statements contradict each other. Files in /etc/sysctl.d are applied at boot or by `sysctl --system`, not at login.",
+        "fix": "Use one consistent message, e.g. 'log out/in for the group; reboot, or run `sudo sysctl --system`, for the sysctl'."
+      },
+      {
+        "where": "multi-architecture-image-manifest",
+        "severity": "minor",
+        "problem": "A prequestion answer says the amd64-binary-in-arm64-image problem 'happens with the REST Dockerfiles'. The docs only say a combined invocation 'could' copy an amd64 binary into the arm64 image.",
+        "fix": "Change it to 'could happen with the REST Dockerfiles'."
+      }
+    ]
+  }
+}

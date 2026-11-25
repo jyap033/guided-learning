@@ -1,0 +1,40 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "tilt",
+        "severity": "major",
+        "problem": "Completion problem answer `k8s_resource('hello-api', port_forwards=8080)` forwards local 8080 to container port 8080, but the hello-api app from the worked example listens on 8000. Following the answer exactly, `curl localhost:8080` does not reach the app.",
+        "fix": "Make the blank answer `port_forwards='8080:8000'` (and adjust the partial solution to `___='8080:8000'`), or state that the container listens on 8080."
+      },
+      {
+        "where": "calico-networking",
+        "severity": "major",
+        "problem": "The claim that on NICo site controllers nodes carried very many addresses, BIRD probes timed out, and 'the fix was to give the probes longer timeouts' is not supported by any provided docs page (they only list Calico v3.28.1 as validated). The objective and the second check's explanation ('the exact problem NICo hit') rely on this claim.",
+        "fix": "Cite a NICo source that documents the probe-timeout issue, or reword it as a general Calico operational failure mode without saying NICo hit it."
+      },
+      {
+        "where": "calico-networking",
+        "severity": "major",
+        "problem": "The stock Calico v3.28.1 calico.yaml appears to already set `timeoutSeconds: 10` on both the calico-node readiness and liveness probes. If so, the worked example 'raise the readiness timeout' patch to 10 is a no-op, and the Confirm step ('check that timeoutSeconds is now 10') proves nothing. The completion and independent-problem answers that patch to 10 have the same problem.",
+        "fix": "Have learners note the current value in the 'Read the current probes' step, then patch to a clearly higher value (e.g. 30) and confirm it changed. Update the completion/independent answers to match."
+      },
+      {
+        "where": "metallb-loadbalancer-vips",
+        "severity": "major",
+        "problem": "The worked example's Verify step and the `<pending>` check question tell learners to check ToR BGP sessions when EXTERNAL-IP is `<pending>`. But the check's own explanation says, correctly, that EXTERNAL-IP is written by the controller on pool allocation. A down BGP session affects advertisement, not allocation, so it cannot cause `<pending>`. The answer and explanation contradict each other, and the troubleshooting advice is misleading.",
+        "fix": "Separate the two cases. `<pending>` means checking the pool ranges, any pinned IP outside every pool, and the controller logs. An IP that is assigned but unreachable means checking BGP sessions and peer addresses. Note that the Quick Start lists both checks together."
+      },
+      {
+        "where": "calico-networking / layer-2-advertisement",
+        "severity": "minor",
+        "problem": "The worked examples depend on the build-task cluster from the end of the chapter, which the learner has not built yet at that point.",
+        "fix": "Give a short inline cluster setup or tell learners explicitly to complete the build-task steps first."
+      }
+    ]
+  }
+}

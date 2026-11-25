@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "layer-2-advertisement",
+        "severity": "minor",
+        "problem": "The independent problem's answer says to 'Restart the node afterwards with `docker start`' as if the cluster will recover. Kind node containers often don't survive a stop/start: Docker can give the released IP to another container on the kind network while the node is down (for example the `--rm` netshoot clients the exercise has learners run). The node then returns on a different IP and its kubelet and Calico BGP sessions break. Learners who keep using `lab` for the Tilt stretch goal (which also includes this failover test) may end up with a broken cluster.",
+        "fix": "Add a note that a stopped kind node may not rejoin cleanly after `docker start`. Do the failover test as the last step, and if nodes stay NotReady or Mesh sessions don't re-establish, recreate the cluster with `kind delete cluster --name lab` and build-task steps 1–5."
+      }
+    ]
+  }
+}

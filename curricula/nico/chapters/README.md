@@ -1,6 +1,6 @@
 # NVIDIA NICo (NVIDIA Infra Controller): lessons
 
-12 of 49 chapters written. The full plan is in [curriculum.md](../curriculum.md) and the overview in [mindmap.md](../mindmap.md).
+15 of 49 chapters written. The full plan is in [curriculum.md](../curriculum.md) and the overview in [mindmap.md](../mindmap.md).
 
 1. [Hardware Basics · Data & Formats](01-hardware-basics-data-formats.md) (10 concepts) · *Foundations*
 2. [Software & Linux Basics](02-software-linux-basics.md) (6 concepts) · *Foundations*
@@ -14,3 +14,6 @@
 10. [DPU Networking · Addressing & Pools](10-dpu-networking-addressing-pools.md) (6 concepts) · *Networking & Isolation*
 11. [VXLAN/EVPN Overlay](11-vxlan-evpn-overlay.md) (7 concepts) · *Networking & Isolation*
 12. [Boot & Network Services](12-boot-network-services.md) (5 concepts) · *Networking & Isolation*
+13. [Building Images](13-building-images.md) (10 concepts) · *Kubernetes & Deployment*
+14. [Kubernetes Basics](14-kubernetes-basics.md) (8 concepts) · *Kubernetes & Deployment*
+15. [Cluster Networking](15-cluster-networking.md) (5 concepts) · *Kubernetes & Deployment*

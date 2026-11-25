@@ -1,0 +1,804 @@
+{
+  "intro": "NICo isn't a single program you install on a server. As Chapter 5 showed, it is a set of microservices: `nico-api`, `nico-dhcp`, `nico-pxe`, `nico-dns`, the SSH console and others. They run on a **Kubernetes** cluster of at least three nodes in the datacenter, together with prerequisites such as PostgreSQL, Vault, cert-manager, External Secrets and MetalLB. Almost every install step, health check and troubleshooting command in the NICo docs is a `kubectl` command, so you need to be comfortable with Kubernetes before you deploy NICo.\n\nThis chapter covers the parts of Kubernetes the NICo docs rely on. It starts with a networking idea: the **virtual IP address**, a stable address that belongs to a service rather than to a machine. This matters because your DHCP relays and DNS records have to point at NICo before NICo even boots. Next comes Kubernetes itself and the objects you will see all the time: Pods, StatefulSets, Jobs, ConfigMaps, Secrets and Services. Then the extension mechanism, **Custom Resources**, which MetalLB, cert-manager, the Postgres operator and DPF all use. The last four lessons cover Service types, persistent storage, RBAC and Secrets.\n\nEverything here runs on a laptop with `kind` (Kubernetes-in-Docker). You can't run NICo on a laptop, but you can create and inspect the same kinds of objects that NICo's `setup.sh` creates. So when the Quick Start tells you to run `kubectl get svc -n nico-system | grep LoadBalancer` and look for `<pending>`, you'll know what you're looking at.\n\nYou'll use this chapter right away. Chapter 15 builds MetalLB VIPs and L2/BGP advertisement on top of the Service types covered here. Chapter 17 adds Helm, Kustomize and the Postgres operator. Chapters 19–21 cover cert-manager, Vault and ESO, which are all built from CRs, Secrets and RBAC.",
+  "objectives": [
+    "Explain why each NICo Core LoadBalancer service needs a fixed virtual IP from the MetalLB pool, and pick valid, unique VIPs from a CIDR range",
+    "Create a local Kubernetes cluster with kind and use kubectl to inspect nodes, Pods, StatefulSets, Jobs, ConfigMaps, Secrets and Services",
+    "Define a CustomResourceDefinition, create a custom resource and explain what an operator adds",
+    "Choose between ClusterIP, NodePort and LoadBalancer Services, and diagnose a LoadBalancer stuck in <pending>",
+    "Provision durable storage with a StorageClass and PersistentVolumeClaims, and predict the PVC names a StatefulSet creates",
+    "Grant a ServiceAccount least-privilege access with a Role and RoleBinding, consume a Secret from a Pod, and check both with kubectl"
+  ],
+  "lessons": [
+    {
+      "concept": "virtual-ip-address",
+      "prequestions": [
+        {
+          "question": "Your OOB switches relay every BMC DHCP request to one IP address. NICo's DHCP service runs as a container that Kubernetes might restart on a different server tomorrow. Which IP should the relay point at?",
+          "answer": "An address that belongs to the DHCP service itself, not to any one server. That is a virtual IP (VIP). Wherever the service runs, it answers on that same address."
+        },
+        {
+          "question": "Suppose the address of NICo's API changed every time you reinstalled. What would break?",
+          "answer": "Anything configured ahead of time: DNS records for the API hostname, DHCP relay targets, PXE settings and client configs. The docs warn that random IPs on each install mean these \"cannot be pre-configured and will break on redeploy\"."
+        }
+      ],
+      "explanation": "In Chapter 3 every IP address sat on an interface of one machine. A **virtual IP address (VIP)** works differently. It is assigned to a *service*, and whichever machine is currently running that service answers for it. If that machine dies or the service moves, another machine takes over the same address. Clients notice nothing because they only ever knew the VIP.\n\nThis matters a lot for NICo. Its control plane services (`nico-api`, `nico-dhcp`, `nico-dns`, `nico-pxe`, `nico-ssh-console-rs`) run as containers on a Kubernetes cluster of at least three nodes, and Kubernetes can move them to any node. Yet the rest of the datacenter has to reach them at known addresses:\n\n- OOB switches relay BMC DHCP requests to the `nico-dhcp` VIP.\n- External DNS must resolve the `nico-api` hostname to the `nico-api` VIP.\n- Managed hosts fetch boot artifacts from the `nico-pxe` VIP.\n\nIn NICo's reference design, **MetalLB** hands out these VIPs from IP address pools that you define. The example file has an *internal* pool (`10.180.126.160/28`) and an *external* pool (`10.180.126.176/28`). The Quick Start is explicit: each NICo Core LoadBalancer service needs a **specific, stable IP** from the pool. Without explicit assignments, MetalLB picks IPs at random on each install, so relays, DNS and PXE can't be configured in advance. Each VIP must fall inside a pool you defined and must be unique across services. Some services have several replicas that each need their own address, such as the two `nico-dns` instances or the three `nico-ntp` replicas. Those get one VIP per pod through `perPodAnnotations`.\n\nHow does the network learn which node currently holds a VIP? In Layer 2 mode, the holder answers ARP requests for it. In BGP mode, nodes advertise the VIP as a route to the ToR. Chapter 15 covers both. In the reference architecture, MetalLB advertises L3 LoadBalancer VIPs toward the DPU uplinks or the ToR switches.",
+      "analogy": "A VIP is like a company's main phone number. Whoever is on reception duty picks up, and when they go on break a colleague takes over the line, so callers never need a new number. The analogy breaks down at the switchover. A phone system reroutes the call instantly, but on a network the switches and neighbours have to *learn* the new holder (through gratuitous ARP or a BGP update). Until they do, traffic can briefly go to the old machine.",
+      "workedExample": {
+        "title": "Move a VIP between two servers and watch the client keep working",
+        "steps": [
+          {
+            "subgoal": "Start a lab container with network namespaces",
+            "detail": "Each network namespace acts as a separate machine. All of them plug into one bridge, like hosts on one switch.\n```bash\ndocker run --rm -it --privileged debian:stable-slim bash\n# inside the container:\napt-get update && apt-get install -y iproute2 curl python3\nip link add br0 type bridge && ip link set br0 up\nfor n in client srvA srvB; do\n  ip netns add $n\n  ip link add v-$n type veth peer name eth0 netns $n\n  ip link set v-$n master br0 up\n  ip -n $n link set lo up\n  ip -n $n link set eth0 up\ndone\nip -n client addr add 10.0.0.1/24 dev eth0\nip -n srvA addr add 10.0.0.11/24 dev eth0\nip -n srvB addr add 10.0.0.12/24 dev eth0\n```"
+          },
+          {
+            "subgoal": "Run the same service on both servers",
+            "detail": "```bash\nmkdir -p /srv/a /srv/b\necho 'served by srvA' > /srv/a/index.html\necho 'served by srvB' > /srv/b/index.html\nip netns exec srvA python3 -m http.server 80 -d /srv/a 2>/dev/null &\nip netns exec srvB python3 -m http.server 80 -d /srv/b 2>/dev/null &\n```"
+          },
+          {
+            "subgoal": "Give the VIP to srvA and use it from the client",
+            "detail": "```bash\nip -n srvA addr add 10.0.0.100/24 dev eth0\nip netns exec client curl -s http://10.0.0.100/\n# served by srvA\n```\nThe client only knows `10.0.0.100`. It doesn't know srvA's own address, `10.0.0.11`."
+          },
+          {
+            "subgoal": "Fail over: move the VIP to srvB",
+            "detail": "```bash\nip -n srvA addr del 10.0.0.100/24 dev eth0\nip -n srvB addr add 10.0.0.100/24 dev eth0\nip -n client neigh flush all   # forget the old MAC for 10.0.0.100\nip netns exec client curl -s http://10.0.0.100/\n# served by srvB\n```\nThe client's configuration didn't change. Flushing the neighbour (ARP) table here stands in for what MetalLB's L2 mode does in real life, where the new holder announces itself with gratuitous ARP (Chapter 15). Run `ip -n client neigh` before and after the move and you'll see the MAC address behind `10.0.0.100` change."
+          },
+          {
+            "subgoal": "Connect it to NICo",
+            "detail": "Replace `10.0.0.100` with the `nico-dhcp` VIP and \"client\" with your OOB switch's DHCP relay. The relay keeps forwarding to one address, and the node behind that address can change at any time."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Your MetalLB internal pool is `10.180.126.160/28` and your external pool is `10.180.126.176/28`. Following the table in the Quick Start's Step 3h, assign VIPs. Each IP must be inside the right pool and unique. Fill in the blanks.",
+        "partialSolution": "| Service | Values key | Pool | VIP |\n|---|---|---|---|\n| nico-api | nico-api.externalService.annotations | External | 10.180.126.177 |\n| nico-dhcp | nico-dhcp.externalService.annotations | Internal | 10.180.126.161 |\n| nico-dns instance-0 | nico-dns.externalService.perPodAnnotations[0] | Internal | 10.180.126.162 |\n| nico-dns instance-1 | ___ | Internal | 10.180.126.163 |\n| nico-pxe | nico-pxe.externalService.annotations | Internal | ___ |\n| nico-ssh-console-rs | nico-ssh-console-rs.externalService.annotations | Internal | 10.180.126.165 |",
+        "answer": "nico-dns instance-1 uses `nico-dns.externalService.perPodAnnotations[1]`. nico-pxe needs an unused internal address, for example `10.180.126.164`. Any address in 10.180.126.160–175 that isn't already taken works. Also remember that `nico-dhcp` needs `externalService.enabled: true` set explicitly."
+      },
+      "independentProblem": {
+        "prompt": "A colleague suggests leaving all the VIP annotations out of `nico-core.yaml` and letting MetalLB choose, then updating the switch DHCP relay and DNS after each install. Give two concrete reasons this is a bad idea, and say which addresses you must hand to the network team *before* the first install.",
+        "hints": [
+          "Think about what happens on a reinstall or redeploy, not just the first install.",
+          "Which external systems are configured outside Kubernetes and point at NICo services?",
+          "The Quick Start names the DHCP relay, DNS records, PXE config and API hostname. Step 6 configures the relay to forward to the nico-dhcp VIP."
+        ],
+        "answer": "(1) MetalLB may pick different IPs on each install. Every redeploy then silently breaks the DHCP relay targets, DNS A records, PXE settings and the API hostname until someone notices and fixes them by hand. (2) Those external systems have to be configured in advance. BMCs start sending DHCP requests as soon as they are powered, and the `nico-api` hostname must already resolve to its VIP. Before the first install, give the network team the `nico-dhcp` VIP (relay target), the `nico-api` VIP (DNS A record for the API hostname), the `nico-dns` VIPs, the `nico-pxe` VIP and the SSH console VIP. Also give them the pool CIDRs so they can route and advertise them."
+      },
+      "selfExplanation": "In your own words, explain why a stateless service like `nico-dhcp`, which can run on any node, still needs a stable address that the rest of the datacenter knows about. How does a VIP provide that without pinning the service to one machine?",
+      "checks": [
+        {
+          "question": "Why does the Quick Start ask you to assign each NICo Core LoadBalancer service a specific VIP?",
+          "options": [
+            "MetalLB cannot allocate addresses unless you list them per service",
+            "Without explicit VIPs, MetalLB picks IPs randomly on each install, so DHCP relays, DNS and PXE can't be configured in advance",
+            "Kubernetes refuses to create a LoadBalancer Service without an IP annotation",
+            "A fixed VIP makes the service run faster"
+          ],
+          "answer": "Without explicit VIPs, MetalLB picks IPs randomly on each install, so DHCP relays, DNS and PXE can't be configured in advance",
+          "explanation": "MetalLB can allocate addresses automatically, and the docs say existing configs may omit annotations for automatic allocation. The problem is that the address isn't stable across installs. Kubernetes doesn't require the annotation, and the choice of IP has no effect on speed."
+        },
+        {
+          "question": "Which statement about a VIP is correct?",
+          "options": [
+            "It is permanently bound to one physical NIC",
+            "It belongs to a service, and whichever machine currently holds it answers for it",
+            "It is a private address that only works inside a Kubernetes Pod",
+            "It replaces the need for each node to have its own IP"
+          ],
+          "answer": "It belongs to a service, and whichever machine currently holds it answers for it",
+          "explanation": "The point of a VIP is that it isn't tied to one machine. Nodes still keep their own IPs. NICo's VIPs are reachable from the underlay, not just from inside pods."
+        },
+        {
+          "question": "`nico-dns` runs two replicas, and each needs its own VIP. Which values key do you use instead of `annotations`?",
+          "options": [],
+          "answer": "`nico-dns.externalService.perPodAnnotations` (a list: `[0]` and `[1]`)",
+          "explanation": "The Quick Start says to use `perPodAnnotations` because each replica gets its own VIP. A single `annotations` map would give one address for the whole service."
+        }
+      ],
+      "sources": [
+        "getting-started/quick-start.md",
+        "getting-started/prerequisites/hardware.md",
+        "overview/what-is-nico.md"
+      ]
+    },
+    {
+      "concept": "kubernetes",
+      "prequestions": [
+        {
+          "question": "You've run containers with `docker run`. What would you have to build yourself to keep 3 copies of a container running across 3 servers, restarting them when a server dies?",
+          "answer": "A scheduler to place containers on servers, health monitoring, automatic restarts and rescheduling, service discovery and stable networking. Kubernetes provides all of these."
+        },
+        {
+          "question": "Does NICo install the Kubernetes cluster it runs on?",
+          "answer": "No. Operators provision their own cluster (with kubeadm, Kubespray, managed Kubernetes and so on) that meets NICo's requirements: v1.30 or later and at least three schedulable nodes."
+        }
+      ],
+      "explanation": "**Kubernetes** is a container orchestration platform. You describe the *desired state* (\"run 3 copies of this image, reachable on port 443\"), and Kubernetes keeps working to make the cluster's *actual state* match. Nodes die, containers crash and images get upgraded, and through all of it Kubernetes keeps reconciling. If that sounds like NICo's own design, where API handlers record desired state and state machines drive the hardware toward it (Chapters 4–5), that's because it is the same pattern.\n\nKey terms:\n\n- **Cluster**: a set of machines managed together.\n- **Node**: one machine in the cluster. Each node runs a **kubelet** agent and a container runtime such as **containerd**.\n- **Control plane**: the components that store desired state and make decisions. The **API server** is the front door, and everything, including you, talks to it.\n- **kubectl**: the command-line client for the API server. It reads a **kubeconfig** file (`$KUBECONFIG` or `~/.kube/config`) to find the cluster and your credentials.\n- **Namespace**: a named partition of the cluster. NICo uses `nico-system`, `nico-rest`, `temporal`, `postgres`, `metallb-system` and others.\n- **CNI**: the plugin that gives pods networking. The validated choice is Calico (Chapter 15).\n\nNICo needs any conformant **Kubernetes v1.30+**. It is validated on v1.30.4 with containerd 1.7.1 on Ubuntu 24.04. The cluster needs **at least three schedulable nodes** (Ready, and not tainted NoSchedule/NoExecute) for high availability of PostgreSQL and Vault. Every node needs `net.ipv4.ip_forward=1` and `net.bridge.bridge-nf-call-iptables=1`, and must resolve `kubernetes.default.svc.cluster.local`. NICo does **not** provision the cluster; you bring it. `setup.sh` then runs from your workstation using `kubectl`, `helm` and `helmfile`.\n\nFor learning, **kind** runs each Kubernetes \"node\" as a Docker container on your laptop. It is real Kubernetes, with the same API and the same `kubectl`.",
+      "analogy": "Kubernetes is like a building's thermostat. You set the temperature you want, and the system keeps switching the heating on and off to hold it. You don't flip the boiler yourself. Where it breaks down: a thermostat controls one number, while Kubernetes reconciles thousands of objects of many kinds. It also can't fix a problem it has no way to act on. If an image doesn't exist, it will keep retrying and report an error.",
+      "workedExample": {
+        "title": "Create a cluster and watch Kubernetes repair itself",
+        "steps": [
+          {
+            "subgoal": "Install the tools",
+            "detail": "Install Docker (or Podman), `kubectl` and `kind`:\n```bash\n# macOS\nbrew install kubectl kind\n# Linux (amd64)\ncurl -Lo kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64 && chmod +x kind && sudo mv kind /usr/local/bin/\n```\nOn Linux, install `kubectl` the way the Quick Start shows (`snap install kubectl --classic` or the official binary)."
+          },
+          {
+            "subgoal": "Create a multi-node cluster",
+            "detail": "```bash\ncat > kind-3.yaml <<'EOF'\nkind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n  - role: control-plane\n  - role: worker\n  - role: worker\nEOF\nkind create cluster --name lab --config kind-3.yaml\nkubectl get nodes -o wide\n```\nWait until all three nodes show `Ready`. `kubectl version` prints the server version, which must be v1.30 or later for NICo. It also prints your client version. Keep kubectl within one minor version of the server, because that is the version skew Kubernetes supports."
+          },
+          {
+            "subgoal": "Declare desired state",
+            "detail": "```bash\nkubectl create deployment hello --image=nginx --replicas=3\nkubectl get pods -o wide\n```\nYou asked for 3 copies, and the scheduler spreads them across the nodes."
+          },
+          {
+            "subgoal": "Break something and watch it reconcile",
+            "detail": "```bash\nkubectl delete pod $(kubectl get pods -l app=hello -o jsonpath='{.items[0].metadata.name}')\nkubectl get pods -l app=hello\n```\nWithin seconds a new pod with a different name appears. Kubernetes saw 2 running where 3 were desired and fixed it."
+          },
+          {
+            "subgoal": "Look around the namespaces",
+            "detail": "```bash\nkubectl get namespaces\nkubectl get pods -n kube-system\n```\nThe cluster's own components (CoreDNS, kube-proxy, the CNI) run as pods too. On a NICo site you'd run `kubectl get pods -n nico-system` the same way."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete this kind config so the cluster has one control-plane node and two worker nodes, matching the worked example.",
+        "partialSolution": "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n  - role: control-plane\n  - role: ___\n  - role: ___",
+        "answer": "Both blanks are `worker`:\n```yaml\n  - role: worker\n  - role: worker\n```"
+      },
+      "independentProblem": {
+        "prompt": "You've been given a kubeconfig for a cluster and asked whether it meets NICo's basic Kubernetes requirements. Which `kubectl` commands do you run, and what output do you need to see?",
+        "hints": [
+          "There are two headline requirements: a version and a node count.",
+          "One command reports the server version; another lists nodes with their status.",
+          "Also check for NoSchedule/NoExecute taints: `kubectl describe nodes | grep -i taint`."
+        ],
+        "answer": "Run `export KUBECONFIG=/path/to/kubeconfig`, then `kubectl version` (Server Version must be v1.30 or later) and `kubectl get nodes` (at least three nodes with STATUS `Ready`). Then run `kubectl describe nodes | grep -i taints` to confirm that at least three nodes are schedulable, meaning not tainted NoSchedule/NoExecute. NICo's `preflight.sh` checks the same things and more, including kernel parameters and DNS on each node."
+      },
+      "selfExplanation": "Explain why the \"declare desired state, let a controller reconcile\" model suits a control plane like NICo's better than a script that starts containers once. Use the example of a node failing at 3 a.m.",
+      "checks": [
+        {
+          "question": "What is the minimum Kubernetes version NICo supports?",
+          "options": [
+            "v1.26",
+            "v1.30",
+            "v1.28",
+            "Any version, because NICo ships its own Kubernetes"
+          ],
+          "answer": "v1.30",
+          "explanation": "The docs say \"any conformant Kubernetes v1.30+\". 1.26 is the minimum *kubectl* client version in the tools table, which is a common mix-up. NICo does not ship or provision Kubernetes."
+        },
+        {
+          "question": "Why does NICo need at least three schedulable nodes?",
+          "options": [
+            "kubectl only works with three or more nodes",
+            "For high availability of PostgreSQL and (unless --skip-vault) Vault",
+            "Because MetalLB needs exactly three BGP peers",
+            "Kubernetes refuses to start with fewer nodes"
+          ],
+          "answer": "For high availability of PostgreSQL and (unless --skip-vault) Vault",
+          "explanation": "The Quick Start ties the three-node minimum to HA PostgreSQL and Vault. Kubernetes runs fine on one node, which is how kind works by default. The number of MetalLB peers depends on your topology."
+        },
+        {
+          "question": "A pod you never deleted has a new name and a recent start time. What most likely happened?",
+          "options": [
+            "Someone manually recreated it",
+            "A controller replaced it to keep actual state matching desired state",
+            "Kubernetes renames pods every hour",
+            "The container image was rebuilt"
+          ],
+          "answer": "A controller replaced it to keep actual state matching desired state",
+          "explanation": "Controllers such as Deployments replace pods that crashed or were evicted, and the replacements get new names (StatefulSet pods are the exception). Kubernetes doesn't rename pods on a timer, and rebuilding an image doesn't touch running pods."
+        }
+      ],
+      "sources": [
+        "overview/capabilities.md",
+        "getting-started/quick-start.md",
+        "getting-started/prerequisites/software.md",
+        "overview/what-is-nico.md"
+      ]
+    },
+    {
+      "concept": "kubernetes-workload-and-config-objects",
+      "prequestions": [
+        {
+          "question": "NICo's built-in NTP service runs three chrony replicas, and each gets its own VIP. Why would a \"pick any 3 interchangeable copies\" deployment be a poor fit?",
+          "answer": "Each replica needs a stable, distinct identity (name 0, 1, 2) so a specific VIP can stay attached to a specific replica. A StatefulSet provides that. Interchangeable copies get random names."
+        },
+        {
+          "question": "`setup.sh` registers the site by running a bootstrap task once. What kind of object would you use for \"run to completion, then stop\"?",
+          "answer": "A Job."
+        }
+      ],
+      "explanation": "Everything in Kubernetes is an **object**. An object is a YAML document with `apiVersion`, `kind`, `metadata` (name, namespace, labels) and usually `spec` (the desired state). The cluster adds `status` (the actual state). You create objects with `kubectl apply -f file.yaml`. These are the ones the NICo docs mention constantly:\n\n- **Pod**: the smallest unit. It holds one or more containers that share a network identity (one pod IP) and can share volumes. Pods are disposable.\n- **Deployment**: keeps N interchangeable pod replicas running and handles rolling upgrades. `nico-api` runs as one (`kubectl logs deployment/nico-api`).\n- **StatefulSet**: like a Deployment, but each replica has a **stable identity**, with names `name-0`, `name-1` and so on. If the StatefulSet defines `volumeClaimTemplates`, each replica also gets its own PersistentVolumeClaim. StatefulSets are used for replicated stateful apps such as PostgreSQL, Vault, Loki and the site-agent, and for `nico-ntp`, where each of the 3 replicas gets its own VIP.\n- **Job**: runs pods until they finish successfully, for one-off tasks. For example, NICo's REST install (`setup.sh` Phase 7g) uses the `nico-rest-site-agent` bootstrap Job to register the site. The Quick Start's overall health check also lists Jobs with `kubectl get jobs -n nico-system`.\n- **ConfigMap**: non-sensitive configuration, stored as key/value data or whole files. NICo's site TOML is rendered into the `nico-api` ConfigMap.\n- **Secret**: like a ConfigMap but for sensitive data such as passwords, keys and registry credentials. Secrets get their own lesson later in this chapter.\n- **Service**: a stable network name and address in front of a changing set of pods, chosen by **label selector**. Services also get their own lesson.\n\nPods consume ConfigMaps and Secrets as **environment variables** or as **files in a mounted volume**. Labels such as `app: nico-api` are how Services, Deployments and `kubectl -l` find pods. For example, the Quick Start runs `kubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp`.",
+      "analogy": "Think of a restaurant. Pods are the cooks, and you can swap one for another. A Deployment is \"always keep three line cooks on shift\". A StatefulSet is assigned stations: \"station 0 is grill, station 1 is pastry\", and if you set it up that way, each station has its own fridge (volume). A Job is the caterer hired for one event. ConfigMaps are the recipe book, and Secrets are the safe combination. Where it breaks down: real cooks remember what they were doing, but a replaced Pod starts from scratch unless its state lives in a volume.",
+      "workedExample": {
+        "title": "A ConfigMap, a Job that reads it, and a StatefulSet with stable names",
+        "steps": [
+          {
+            "subgoal": "Create a ConfigMap holding a TOML file",
+            "detail": "```bash\ncat > site.toml <<'EOF'\nsitename = \"mysite\"\ninitial_domain_name = \"mysite.example.com\"\nEOF\nkubectl create namespace demo\nkubectl -n demo create configmap site-config --from-file=site.toml\nkubectl -n demo get configmap site-config -o yaml\n```"
+          },
+          {
+            "subgoal": "Run a Job that mounts it",
+            "detail": "```bash\ncat > job.yaml <<'EOF'\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: read-config\n  namespace: demo\nspec:\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n        - name: reader\n          image: busybox:1.36\n          command: [\"sh\", \"-c\", \"cat /config/site.toml\"]\n          volumeMounts:\n            - name: cfg\n              mountPath: /config\n      volumes:\n        - name: cfg\n          configMap:\n            name: site-config\nEOF\nkubectl apply -f job.yaml\nkubectl -n demo wait --for=condition=complete job/read-config --timeout=120s\nkubectl -n demo logs job/read-config\n```\nThe logs print the same file you put into the ConfigMap. `kubectl get jobs -n demo` shows `COMPLETIONS 1/1`."
+          },
+          {
+            "subgoal": "Create a StatefulSet and note the names",
+            "detail": "```bash\ncat > sts.yaml <<'EOF'\napiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: ntp\n  namespace: demo\nspec:\n  serviceName: ntp\n  replicas: 3\n  selector:\n    matchLabels:\n      app: ntp\n  template:\n    metadata:\n      labels:\n        app: ntp\n    spec:\n      containers:\n        - name: c\n          image: busybox:1.36\n          command: [\"sh\", \"-c\", \"sleep 3600\"]\nEOF\nkubectl apply -f sts.yaml\nkubectl -n demo get pods -l app=ntp\n```\nThe pods are named `ntp-0`, `ntp-1` and `ntp-2`, and they are created in order. This StatefulSet has no `volumeClaimTemplates`, so the replicas have stable names but no per-replica storage. The storage lesson adds that."
+          },
+          {
+            "subgoal": "Prove the identity is stable",
+            "detail": "```bash\nkubectl -n demo delete pod ntp-1\nkubectl -n demo get pods -l app=ntp\n```\nThe replacement is named `ntp-1` again. Compare that with the Deployment in the previous lesson, where the replacement got a random name. Stable names are what let `perPodAnnotations[1]` keep the same VIP on the same replica."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete this manifest for a one-off database-seeding task that should run once and not be restarted in place when it finishes.",
+        "partialSolution": "apiVersion: batch/v1\nkind: ___\nmetadata:\n  name: seed-db\nspec:\n  template:\n    spec:\n      restartPolicy: ___\n      containers:\n        - name: seed\n          image: busybox:1.36\n          command: [\"sh\", \"-c\", \"echo seeding; sleep 2; echo done\"]",
+        "answer": "`kind: Job` and `restartPolicy: Never`. `OnFailure` is also valid for Jobs. `Always`, the Pod default, is rejected for Jobs."
+      },
+      "independentProblem": {
+        "prompt": "For each item, name the object type you'd use and say why: (a) NICo's `site.toml`; (b) the PostgreSQL database password; (c) a 3-node PostgreSQL cluster where each member keeps its own data; (d) the API server, where any replica can serve any request; (e) a stable name other pods use to reach the API.",
+        "hints": [
+          "Split the list into config objects and workload objects.",
+          "Ask: is it sensitive? Does it need a stable identity? Does it run to completion?",
+          "(c) needs per-replica identity and storage; (d) needs interchangeable replicas; (e) isn't a workload at all."
+        ],
+        "answer": "(a) ConfigMap: non-sensitive configuration, mounted as a file. (b) Secret: it is sensitive. NICo's DB credentials arrive as Secrets such as `nico-system.nico.nico-pg-cluster.credentials`. (c) StatefulSet with `volumeClaimTemplates`: stable names plus a PVC per replica. (d) Deployment: interchangeable replicas, like `deployment/nico-api`. (e) Service: a stable name and IP in front of pods selected by label."
+      },
+      "selfExplanation": "Why does Kubernetes keep configuration (ConfigMaps and Secrets) separate from workloads (Pods, Deployments, StatefulSets), instead of baking `site.toml` into the container image? Think about how NICo builds one set of images (Chapter 13) and deploys it to many sites.",
+      "checks": [
+        {
+          "question": "The NICo site-agent bootstrap runs once to register the site and then finishes. Which object fits?",
+          "options": [
+            "Deployment",
+            "StatefulSet",
+            "Job",
+            "ConfigMap"
+          ],
+          "answer": "Job",
+          "explanation": "Jobs run to completion. A Deployment or StatefulSet would keep restarting the task after it finished. A ConfigMap holds data and runs nothing."
+        },
+        {
+          "question": "Why is `nico-ntp` a StatefulSet rather than a Deployment?",
+          "options": [
+            "StatefulSets are faster",
+            "Each replica needs a stable identity so a specific VIP stays attached to it",
+            "Deployments can't run chrony",
+            "StatefulSets don't need container images"
+          ],
+          "answer": "Each replica needs a stable identity so a specific VIP stays attached to it",
+          "explanation": "StatefulSet pods keep their names (`-0`, `-1`, `-2`) across restarts, which suits per-pod VIPs. Speed isn't the difference, and both object types run ordinary container images."
+        },
+        {
+          "question": "How does a Service know which pods to send traffic to?",
+          "options": [
+            "By pod name",
+            "By label selector",
+            "By the node the pods run on",
+            "By container image tag"
+          ],
+          "answer": "By label selector",
+          "explanation": "A Service selects the pods whose labels match its selector. Pod names change, and nodes and image tags aren't used for selection."
+        }
+      ],
+      "sources": [
+        "getting-started/quick-start.md",
+        "getting-started/installation-options/day0-machine-identity.md",
+        "getting-started/installation-options/day0-credential-store.md",
+        "architecture/overview.md"
+      ]
+    },
+    {
+      "concept": "kubernetes-custom-resource",
+      "prequestions": [
+        {
+          "question": "The Quick Start runs `kubectl get ipaddresspool,bgppeer -n metallb-system`. Plain Kubernetes has no object called IPAddressPool. Where do you think it comes from?",
+          "answer": "MetalLB installs a CustomResourceDefinition that adds these types to the Kubernetes API, and MetalLB's controller acts on them."
+        },
+        {
+          "question": "If you create one of these custom objects but the software that understands it isn't running, what happens?",
+          "answer": "The object is stored and you can `get` it, but nothing acts on it. Nothing in the real world changes, because no operator is reconciling it."
+        }
+      ],
+      "explanation": "The Kubernetes API can be extended. A **CustomResourceDefinition (CRD)** registers a new object type with a group, a version, a kind and a schema. After that, the API server accepts **Custom Resources (CRs)** of that kind, and you can `kubectl get`, `apply` and `delete` them just like Pods.\n\nA CRD only teaches Kubernetes to *store and validate* the new objects. To make them *do* something you need an **operator** (also called a controller). An operator is a program, usually running as a pod, that watches those CRs and reconciles them into real state. It is the same desired-state loop from the Kubernetes lesson, applied to a new domain.\n\nYou'll meet many CRs on a NICo site:\n\n- **MetalLB**: `IPAddressPool`, `BGPPeer`, `BGPAdvertisement`, `L2Advertisement`. The MetalLB controller turns them into VIP allocation and announcements.\n- **cert-manager**: `ClusterIssuer` (`site-issuer`, `vault-nico-issuer`) and `Certificate`. cert-manager turns these into real TLS certificates stored in Secrets.\n- **External Secrets Operator**: `ClusterSecretStore` and `ExternalSecret`, which copy credentials into Secrets in each namespace.\n- **Zalando Postgres Operator**: a postgres cluster CR (`nico-pg-cluster`) that becomes a StatefulSet, Services and credentials.\n- **DPF** (Chapter 36): `DPUDeployment`, `DPUFlavor` and `BFB`, which describe how DPUs should be provisioned.\n\nCRDs are cluster-scoped and named `<plural>.<group>`, for example `ipaddresspools.metallb.io`. Each CR is either namespaced or cluster-scoped, depending on what its CRD says. `kubectl get crd` lists every extension installed in a cluster, which is a quick way to see which operators are present.",
+      "analogy": "A CRD is like adding a new form type to a government office: \"Form DPU-7, fields: model, firmware\". The clerks will now accept and file it. The operator is the department that actually processes Form DPU-7. Where it breaks down: a real office would probably reject a form nobody handles, but Kubernetes will happily store a CR that no operator handles. That silent inaction is the failure mode to watch for.",
+      "workedExample": {
+        "title": "Define a Rack type, create racks, and see schema validation",
+        "steps": [
+          {
+            "subgoal": "Write and apply the CRD",
+            "detail": "```bash\ncat > rack-crd.yaml <<'EOF'\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: racks.lab.example.com\nspec:\n  group: lab.example.com\n  scope: Namespaced\n  names:\n    plural: racks\n    singular: rack\n    kind: Rack\n  versions:\n    - name: v1\n      served: true\n      storage: true\n      schema:\n        openAPIV3Schema:\n          type: object\n          properties:\n            spec:\n              type: object\n              properties:\n                location:\n                  type: string\n                hosts:\n                  type: integer\nEOF\nkubectl apply -f rack-crd.yaml\nkubectl wait --for=condition=Established crd/racks.lab.example.com --timeout=60s\n```"
+          },
+          {
+            "subgoal": "Create a custom resource",
+            "detail": "```bash\ncat > rack-a.yaml <<'EOF'\napiVersion: lab.example.com/v1\nkind: Rack\nmetadata:\n  name: rack-a01\n  namespace: default\nspec:\n  location: row-a\n  hosts: 18\nEOF\nkubectl apply -f rack-a.yaml\nkubectl get racks\nkubectl get rack rack-a01 -o yaml\n```"
+          },
+          {
+            "subgoal": "See validation reject bad data",
+            "detail": "```bash\nkubectl patch rack rack-a01 --type=merge -p '{\"spec\":{\"hosts\":\"many\"}}'\n```\nThe API server rejects it with an error saying `spec.hosts` must be an integer. The schema is enforced even though no operator exists."
+          },
+          {
+            "subgoal": "Notice what is missing",
+            "detail": "Nothing powers on 18 hosts in row A. With no operator watching `racks`, the CR is just stored data. On a NICo site, `kubectl get pods -n metallb-system` shows the controller that makes `IPAddressPool` objects actually do something."
+          },
+          {
+            "subgoal": "List real CRDs",
+            "detail": "```bash\nkubectl get crd\n```\nkind ships only a few. On a NICo site you'd see `ipaddresspools.metallb.io`, `certificates.cert-manager.io`, `externalsecrets.external-secrets.io` and many more."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete this CRD for a `Switch` type in group `lab.example.com`, plus one instance. Fill in the CRD's name and the instance's kind.",
+        "partialSolution": "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: ___\nspec:\n  group: lab.example.com\n  scope: Namespaced\n  names:\n    plural: switches\n    singular: switch\n    kind: Switch\n  versions:\n    - name: v1\n      served: true\n      storage: true\n      schema:\n        openAPIV3Schema:\n          type: object\n          x-kubernetes-preserve-unknown-fields: true\n---\napiVersion: lab.example.com/v1\nkind: ___\nmetadata:\n  name: tor-a01\n  namespace: default",
+        "answer": "`name: switches.lab.example.com` (CRD names are always `<plural>.<group>`) and `kind: Switch`. If you apply both documents at once, the second may fail the first time because the CRD isn't registered yet. Run `kubectl apply` again, or apply the CRD first and wait for it to be Established."
+      },
+      "independentProblem": {
+        "prompt": "After an install, `kubectl get ipaddresspool -n metallb-system` lists your pools, but every LoadBalancer Service in `nico-system` still shows `<pending>`. Using what you know about CRs and operators, list the first things you'd check.",
+        "hints": [
+          "A CR existing is not the same as a CR being acted on.",
+          "Which pods turn MetalLB CRs into real behaviour?",
+          "The Quick Start says to check BGP session status on the ToRs and the peer addresses in `metallb-config.yaml`. The preflight also checks that exactly one advertisement mode is active."
+        ],
+        "answer": "(1) Check that the operator is running: `kubectl get pods -n metallb-system` should show the controller and speaker as Running. Then read their logs. (2) Check that the CRs are complete and correct. The pools must contain the VIPs you annotated, an advertisement must exist (BGP *or* L2, not both), BGPPeer addresses and ASNs must match the ToRs, and node selectors must match real hostnames (`kubectl get bgppeer -n metallb-system -o yaml`). (3) Check the ToR side for established BGP sessions. A CR with no operator, or one the operator can't satisfy, leaves Services pending."
+      },
+      "selfExplanation": "Explain the difference between a CRD, a CR and an operator, and why a CR with no operator is \"valid but does nothing\". Why might Kubernetes be designed to accept it anyway?",
+      "checks": [
+        {
+          "question": "You apply a CR whose CRD is installed but whose operator is not running. What happens?",
+          "options": [
+            "The API server rejects it",
+            "It is stored and visible with kubectl get, but nothing reconciles it",
+            "Kubernetes reconciles it itself",
+            "The CRD is deleted"
+          ],
+          "answer": "It is stored and visible with kubectl get, but nothing reconciles it",
+          "explanation": "The API server stores and schema-validates CRs. Reconciling them is the operator's job, because core Kubernetes doesn't know what an IPAddressPool means."
+        },
+        {
+          "question": "Which of these is a custom resource on a NICo site, not a built-in Kubernetes type?",
+          "options": [
+            "ConfigMap",
+            "StatefulSet",
+            "ClusterIssuer",
+            "Service"
+          ],
+          "answer": "ClusterIssuer",
+          "explanation": "ClusterIssuer comes from cert-manager's CRDs. The other three are built-in types."
+        },
+        {
+          "question": "What is the required metadata.name of a CRD whose plural is `dpuflavors` in group `example.com`?",
+          "options": [],
+          "answer": "`dpuflavors.example.com`",
+          "explanation": "CRD names must be `<plural>.<group>`. Using the kind (`DPUFlavor`) or the singular is a common mistake, and the API server rejects it."
+        }
+      ],
+      "sources": [
+        "getting-started/quick-start.md",
+        "getting-started/prerequisites/software.md",
+        "overview/what-is-nico.md"
+      ]
+    },
+    {
+      "concept": "kubernetes-service-types",
+      "prequestions": [
+        {
+          "question": "NICo's PostgreSQL is only ever used by `nico-api` and other pods in the cluster. Should it be reachable from the datacenter network?",
+          "answer": "No. It is exposed as a ClusterIP Service on port 5432, which is reachable only from inside the cluster."
+        },
+        {
+          "question": "On a bare-metal cluster with no cloud provider, what do you think a Service of type LoadBalancer shows as its external IP?",
+          "answer": "`<pending>`, until something like MetalLB provides an IP. That is exactly what the Quick Start warns about."
+        }
+      ],
+      "explanation": "A **Service** gives a stable name and IP to the set of pods that match its selector. Kubernetes DNS makes it resolvable as `<name>.<namespace>.svc.cluster.local`, for example `temporal-frontend.temporal.svc:7233` or `vault.vault.svc:8200`. The Service's **type** decides who can reach it:\n\n- **ClusterIP** (the default): a virtual IP reachable **only from inside the cluster**. It suits internal dependencies. The docs expose PostgreSQL as a ClusterIP Service on port `5432`.\n- **NodePort**: everything ClusterIP does, plus a port opened on **every node's IP**, by default in the range 30000–32767. Traffic to `<any-node-ip>:<nodePort>` reaches the pods. By default, `setup.sh` exposes `nico-rest-api` through a NodePort. It's simple, but clients need to know a node IP and a high port.\n- **LoadBalancer**: everything NodePort does, plus an **external IP** supplied by a load-balancer implementation. In a public cloud, the cloud provides it. On bare metal nothing provides it by default, so **MetalLB** fills the gap: it assigns a VIP from your `IPAddressPool` and advertises it (L2 or BGP, Chapter 15). The Quick Start notes that without MetalLB, NICo Core services \"stay in `<pending>` state and the site is unreachable\".\n\nThe NICo Core services that must be reachable from outside (`nico-api`, `nico-dhcp`, `nico-dns`, `nico-pxe`, `nico-ssh-console-rs`) use LoadBalancer, each with a pinned VIP as in the first lesson. Contour's Envoy is also a LoadBalancer and takes its IP from the external pool. Some charts let you change `externalService.type` to `NodePort` or `ClusterIP`, and those types don't need VIPs. The DHCPv6 external Service is always LoadBalancer.\n\nTo see what was assigned, run `kubectl get svc -n nico-system` and read the `TYPE`, `CLUSTER-IP`, `EXTERNAL-IP` and `PORT(S)` columns.",
+      "analogy": "Think of an office building. ClusterIP is an internal extension: only people inside the building can dial it. NodePort means every entrance has a side door numbered 30080 that leads to the same desk. LoadBalancer is a published street address with a receptionist who directs visitors, and MetalLB is the city office that hands out that address. Where it breaks down: a building has one location, but a Service's pods can be spread across many nodes and move between them.",
+      "workedExample": {
+        "title": "Expose one app three ways on kind",
+        "steps": [
+          {
+            "subgoal": "Deploy an app",
+            "detail": "```bash\nkubectl create namespace svc-demo\nkubectl -n svc-demo create deployment web --image=nginx --replicas=2\nkubectl -n svc-demo rollout status deployment/web\n```"
+          },
+          {
+            "subgoal": "ClusterIP: reachable from inside only",
+            "detail": "```bash\nkubectl -n svc-demo expose deployment web --name=web-cip --port=80\nkubectl -n svc-demo get svc web-cip\nkubectl run tmp -n svc-demo --rm -i --quiet --restart=Never --image=curlimages/curl -- \\\n  -s -o /dev/null -w '%{http_code}\\n' http://web-cip.svc-demo.svc.cluster.local\n# 200\n```\nThe CLUSTER-IP (for example 10.96.x.x) isn't routable from your laptop."
+          },
+          {
+            "subgoal": "NodePort: a port on every node",
+            "detail": "```bash\nkubectl -n svc-demo expose deployment web --name=web-np --type=NodePort --port=80\nkubectl -n svc-demo get svc web-np          # PORT(S) shows 80:3xxxx/TCP\nNP=$(kubectl -n svc-demo get svc web-np -o jsonpath='{.spec.ports[0].nodePort}')\nNODE=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type==\"InternalIP\")].address}')\nkubectl run tmp -n svc-demo --rm -i --quiet --restart=Never --image=curlimages/curl -- \\\n  -s -o /dev/null -w '%{http_code}\\n' http://$NODE:$NP\n# 200\n```\nTry another node's InternalIP and it works too."
+          },
+          {
+            "subgoal": "LoadBalancer: see <pending>",
+            "detail": "```bash\nkubectl -n svc-demo expose deployment web --name=web-lb --type=LoadBalancer --port=80\nkubectl -n svc-demo get svc web-lb\n# EXTERNAL-IP   <pending>\n```\nkind has no load-balancer implementation, so nothing assigns an IP. A NICo site whose MetalLB is missing or misconfigured shows the same symptom. The LoadBalancer Service still received a NodePort, because each type builds on the one before it."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete this Service so the pods labelled `app: web` are reachable on port 30080 of every node.",
+        "partialSolution": "apiVersion: v1\nkind: Service\nmetadata:\n  name: web-fixed-np\n  namespace: svc-demo\nspec:\n  type: ___\n  selector:\n    app: web\n  ports:\n    - port: 80\n      targetPort: 80\n      nodePort: ___",
+        "answer": "`type: NodePort` and `nodePort: 30080`. 30080 is inside the default range of 30000–32767; values outside that range are rejected."
+      },
+      "independentProblem": {
+        "prompt": "For each NICo-related endpoint, pick a Service type and justify it: (a) PostgreSQL used only by nico-api; (b) nico-dhcp, which receives relayed requests from OOB switches; (c) a quick lab exposure of nico-rest-api without DNS or TLS; (d) Contour's Envoy serving `https://rest-api.mysite.example.com`.",
+        "hints": [
+          "Who are the clients: pods in the cluster, or devices on the datacenter network?",
+          "Does the client need a stable, well-known address and a normal port (DHCP uses port 67)?",
+          "From the docs: Postgres uses ClusterIP on 5432, REST defaults to NodePort, NICo Core services use LoadBalancer VIPs, and Envoy is a LoadBalancer from vip-pool-external."
+        ],
+        "answer": "(a) ClusterIP: the only clients are inside the cluster, and the docs specify a ClusterIP on 5432. (b) LoadBalancer with a pinned internal-pool VIP: switches relay to one fixed address on the standard DHCP port, so a NodePort's high port and per-node IPs won't work. (c) NodePort: this is the default for nico-rest-api in `setup.sh`, and it is easy for a lab. (d) LoadBalancer: the DNS A record must point at a stable external IP, which MetalLB assigns from `vip-pool-external`."
+      },
+      "selfExplanation": "Explain why a LoadBalancer Service on bare metal shows `<pending>`, while the same manifest gets an IP immediately in a public cloud. What exactly does MetalLB contribute?",
+      "checks": [
+        {
+          "question": "`kubectl get svc -n nico-system` shows `nico-dhcp` with EXTERNAL-IP `<pending>`. What is the most likely cause?",
+          "options": [
+            "The DHCP pods crashed",
+            "No load-balancer implementation (MetalLB) assigned an IP: it isn't running, the pool is wrong, or the requested VIP is outside the pool",
+            "The Service should be ClusterIP",
+            "DNS is broken"
+          ],
+          "answer": "No load-balancer implementation (MetalLB) assigned an IP: it isn't running, the pool is wrong, or the requested VIP is outside the pool",
+          "explanation": "EXTERNAL-IP is filled in by the load-balancer implementation, whatever the state of the pods. A Service gets its address even if its pods are down. Changing the type to ClusterIP would make DHCP unreachable from the switches."
+        },
+        {
+          "question": "Which type is reachable only from inside the cluster?",
+          "options": [
+            "NodePort",
+            "LoadBalancer",
+            "ClusterIP",
+            "All of them"
+          ],
+          "answer": "ClusterIP",
+          "explanation": "NodePort and LoadBalancer add external exposure on top of the ClusterIP that all of them have."
+        },
+        {
+          "question": "Why is NodePort a poor fit for nico-dhcp?",
+          "options": [
+            "NodePort doesn't support UDP",
+            "Clients must target a node IP and a high port, and neither the node nor the port is a stable, standard DHCP endpoint",
+            "NodePort Services can't select pods",
+            "NodePort costs money"
+          ],
+          "answer": "Clients must target a node IP and a high port, and neither the node nor the port is a stable, standard DHCP endpoint",
+          "explanation": "NodePort does support UDP, so that isn't the problem. Relays need one well-known address on the standard port that survives a node failure, which is what a VIP gives you."
+        }
+      ],
+      "sources": [
+        "getting-started/quick-start.md",
+        "getting-started/prerequisites/software.md",
+        "getting-started/prerequisites/hardware.md"
+      ]
+    },
+    {
+      "concept": "persistent-storage",
+      "prequestions": [
+        {
+          "question": "A PostgreSQL pod is deleted and recreated on a fresh container filesystem. What happens to the database if nothing else is configured?",
+          "answer": "It's gone. A container's filesystem is ephemeral, so durable data needs a persistent volume that outlives the pod."
+        },
+        {
+          "question": "NICo's reference install doesn't need SAN/NAS or Ceph. Where do you think the PostgreSQL and Vault data actually lives?",
+          "answer": "On each node's local NVMe disk, in volumes created by local-path-provisioner."
+        }
+      ],
+      "explanation": "Pods are disposable, so anything written inside a container disappears when the pod is replaced. Kubernetes separates *asking for* storage from *providing* it:\n\n- **PersistentVolume (PV)**: an actual piece of storage, such as a directory on a node's disk, a cloud disk or a SAN LUN.\n- **PersistentVolumeClaim (PVC)**: a pod's request for storage, for example \"10Gi, ReadWriteOnce\". Pods mount PVCs, never PVs directly.\n- **StorageClass**: a named recipe for creating PVs on demand. When a PVC names a StorageClass, that class's **provisioner** creates a matching PV automatically. This is called *dynamic provisioning*.\n\n**local-path-provisioner** is a simple provisioner. It creates each PV as a directory on the local disk of the node where the pod is scheduled. That is fast and needs no shared storage, but the data lives on **one node**. The pod is effectively pinned to that node, and if the node's disk dies, that copy is lost. So the applications provide their own redundancy. That is why NICo runs three PostgreSQL instances with three 10Gi `pgdata` PVs, and Vault with three `data-vault` and three `audit-vault` 10GB PVs, \"in the absence of a shared storage solution\". Loki uses a single 50GB PV.\n\nIn NICo's `setup.sh`, **Phase 1** installs local-path-provisioner and its StorageClasses before anything else, because the PostgreSQL and Vault claims depend on them. The `volumeSize: \"10Gi\"` setting for PostgreSQL in `values.yaml` sets the claim size.\n\nStatefulSets request storage through **volumeClaimTemplates**, which create one PVC per replica named `<template>-<statefulset>-<ordinal>`. A replacement `pg-1` pod reattaches to its own PVC. By default, deleting a StatefulSet does **not** delete those PVCs, which protects your data. You delete them yourself, or delete the whole namespace.\n\nA separate fact: when a PVC is deleted, its PV's **reclaim policy** decides what happens next. `Delete` removes the PV and its data. `Retain` keeps the PV in a **Released** state. NICo's teardown script `clean.sh` removes the namespaces, which deletes the PVCs in them, and then cleans up any released PersistentVolumes left behind.\n\nkind ships local-path-provisioner as its default StorageClass, `standard`, so you can try all of this on a laptop.",
+      "analogy": "A PVC is a hotel booking (\"one double room, two nights\"), a PV is the actual room, and the StorageClass is the hotel chain's rule for where rooms come from. With local-path, your room is in one specific building. Your luggage stays safe while you go out (the pod restarts), but if that building floods, it's gone, and you can't check into a different building and find your luggage there. Where it breaks down: hotels clear the room at checkout, while a PV's reclaim policy decides whether the data is deleted or kept.",
+      "workedExample": {
+        "title": "Prove data survives a pod being deleted",
+        "steps": [
+          {
+            "subgoal": "Inspect the StorageClass",
+            "detail": "```bash\nkubectl get storageclass\n# NAME                 PROVISIONER             ... VOLUMEBINDINGMODE\n# standard (default)   rancher.io/local-path   ... WaitForFirstConsumer\n```\n`WaitForFirstConsumer` means a PVC stays `Pending` until a pod that uses it is scheduled. That way the volume can be created on that pod's node."
+          },
+          {
+            "subgoal": "Create a claim and a pod that writes to it",
+            "detail": "```bash\nkubectl create namespace pv-demo\ncat > pv.yaml <<'EOF'\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: notes\n  namespace: pv-demo\nspec:\n  accessModes: [\"ReadWriteOnce\"]\n  storageClassName: standard\n  resources:\n    requests:\n      storage: 100Mi\n---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: writer\n  namespace: pv-demo\nspec:\n  containers:\n    - name: c\n      image: busybox:1.36\n      command: [\"sh\", \"-c\", \"date >> /data/boots.log; sleep 3600\"]\n      volumeMounts:\n        - name: notes\n          mountPath: /data\n  volumes:\n    - name: notes\n      persistentVolumeClaim:\n        claimName: notes\nEOF\nkubectl apply -f pv.yaml\nkubectl -n pv-demo wait --for=condition=Ready pod/writer --timeout=120s\nkubectl -n pv-demo get pvc,pv\n```\nThe PVC is now `Bound` to an automatically created PV."
+          },
+          {
+            "subgoal": "Delete and recreate the pod",
+            "detail": "```bash\nkubectl -n pv-demo delete pod writer     # waits until the pod is gone\nkubectl apply -f pv.yaml\nkubectl -n pv-demo wait --for=condition=Ready pod/writer --timeout=120s\nkubectl -n pv-demo exec writer -- cat /data/boots.log\n```\nThe file has **two** timestamps. The first was written by the previous pod."
+          },
+          {
+            "subgoal": "Find where the data physically lives",
+            "detail": "```bash\nkubectl get pv -o jsonpath='{.items[0].spec.local.path}{.items[0].spec.hostPath.path}{\"\\n\"}'\nkubectl get pv -o jsonpath='{.items[0].spec.nodeAffinity}{\"\\n\"}'\nkubectl get pv -o jsonpath='{.items[0].spec.persistentVolumeReclaimPolicy}{\"\\n\"}'\n```\nYou'll see a directory path, a node affinity naming exactly one node (the \"node-local\" in local-path), and the reclaim policy, which is `Delete` for kind's `standard` class."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete this claim for a PostgreSQL member that should use the `standard` StorageClass and request the same size as NICo's default `volumeSize`.",
+        "partialSolution": "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: pgdata-demo\nspec:\n  accessModes: [\"ReadWriteOnce\"]\n  storageClassName: ___\n  resources:\n    requests:\n      storage: ___",
+        "answer": "`storageClassName: standard` and `storage: 10Gi`."
+      },
+      "independentProblem": {
+        "prompt": "A StatefulSet named `vault` has two volumeClaimTemplates, `data` and `audit`, and 3 replicas. (a) Which PVC names will exist? (b) After `kubectl delete statefulset vault`, are they still there? (c) Why is local-path acceptable here even though each volume lives on one node?",
+        "hints": [
+          "The naming pattern is `<template>-<statefulset>-<ordinal>`.",
+          "Kubernetes is cautious with data when you delete a StatefulSet.",
+          "If storage doesn't provide redundancy, who does? Think about \"HA Raft\"."
+        ],
+        "answer": "(a) `data-vault-0`, `data-vault-1`, `data-vault-2`, `audit-vault-0`, `audit-vault-1`, `audit-vault-2`. This matches the docs' three `data-vault` and three `audit-vault` PVs. (b) Yes. PVCs created from volumeClaimTemplates survive StatefulSet deletion by default, and you must delete them yourself (or delete the namespace) to free the storage. (c) Vault runs as a 3-node HA Raft cluster, so the application replicates data across nodes. Losing one node's disk loses only one replica."
+      },
+      "selfExplanation": "Explain why NICo can get away with node-local storage for PostgreSQL and Vault, and what the trade-off would be if it ran a single replica of each.",
+      "checks": [
+        {
+          "question": "Your new PVC on kind shows `Pending`, and no pod uses it yet. What's going on?",
+          "options": [
+            "The provisioner is broken",
+            "The StorageClass uses WaitForFirstConsumer, so the volume is created only once a pod using it is scheduled",
+            "PVCs always need a manually created PV",
+            "The cluster is out of disk"
+          ],
+          "answer": "The StorageClass uses WaitForFirstConsumer, so the volume is created only once a pod using it is scheduled",
+          "explanation": "This is expected for local-path, which needs to know the node before it can create the directory. With dynamic provisioning you don't create PVs by hand."
+        },
+        {
+          "question": "Which setup.sh phase installs local-path-provisioner, and why that early?",
+          "options": [
+            "Phase 6, alongside NICo Core",
+            "Phase 1, because PostgreSQL and Vault volume claims depend on its StorageClasses",
+            "Phase 7, for REST",
+            "It's never installed; kind provides it"
+          ],
+          "answer": "Phase 1, because PostgreSQL and Vault volume claims depend on its StorageClasses",
+          "explanation": "The phase table lists local-path-provisioner and its StorageClasses as Phase 1. kind has its own copy, but a real NICo cluster gets it from setup.sh."
+        },
+        {
+          "question": "What is the main risk of local-path volumes?",
+          "options": [
+            "They are slower than network storage",
+            "The data lives on one node's disk, so the pod is tied to that node and a disk failure loses that replica",
+            "They can't be larger than 1Gi",
+            "They are deleted on every pod restart"
+          ],
+          "answer": "The data lives on one node's disk, so the pod is tied to that node and a disk failure loses that replica",
+          "explanation": "Local NVMe is usually *faster* than network storage, and volumes survive pod restarts, as the worked example showed. The real risk is that each volume depends on a single node."
+        }
+      ],
+      "sources": [
+        "getting-started/quick-start.md",
+        "architecture/overview.md",
+        "getting-started/prerequisites/hardware.md"
+      ]
+    },
+    {
+      "concept": "kubernetes-rbac",
+      "prequestions": [
+        {
+          "question": "A pod in `nico-system` makes calls to the Kubernetes API. Whose identity is it using, and who decided what it may do?",
+          "answer": "It uses a ServiceAccount: its own, or `default` if none is set. RBAC Roles and bindings decide which verbs it may use on which resources."
+        },
+        {
+          "question": "Should a pod that only needs to read ConfigMaps be able to read Secrets?",
+          "answer": "No. That is least privilege: grant only the verbs and resources it needs."
+        }
+      ],
+      "explanation": "Every request to the Kubernetes API server is made by some identity. Humans use credentials from their kubeconfig. Pods use a **ServiceAccount**, a namespaced identity that Kubernetes mounts into the pod as a token. If you don't set one, the pod uses its namespace's `default` ServiceAccount. Kubernetes **RBAC** (role-based access control) decides what each identity may do. It denies by default, so anything not granted is refused.\n\nThere are four object types:\n\n- **Role**: a list of rules within **one namespace**. Each rule names API groups, resources (`pods`, `configmaps`, `secrets` and so on) and **verbs** (`get`, `list`, `watch`, `create`, `update`, `patch`, `delete`).\n- **ClusterRole**: the same, but cluster-wide, or for cluster-scoped resources such as nodes and CRDs.\n- **RoleBinding**: grants a Role, or a ClusterRole limited to the binding's namespace, to **subjects**: users, groups or ServiceAccounts.\n- **ClusterRoleBinding**: grants a ClusterRole across the whole cluster.\n\nThe Role says *what* is allowed, and the binding says *who* gets it. `kubectl auth can-i` lets you test this without writing any code:\n\n```bash\nkubectl auth can-i list secrets -n demo --as=system:serviceaccount:demo:reader\n```\n\nWhy this matters for NICo: operators like cert-manager, ESO, MetalLB and the Postgres operator all run under ServiceAccounts with ClusterRoles that let them watch their CRs and write Secrets or Services. Their Helm charts install these roles for you, and when one is missing you see `forbidden` errors in the operator's logs. ServiceAccount identity also reaches beyond Kubernetes. Vault's **Kubernetes auth** maps ServiceAccounts in `nico-system`, `cert-manager`, `cloud-api`, `cloud-workflow` and `elektra-site-agent` to Vault roles. That is Vault's own policy system (Chapter 20), not Kubernetes RBAC, but it relies on the same ServiceAccount tokens. The `--skip-vault` preflight even checks that `nico-api.automountServiceAccountToken` isn't `false`, because nico-api needs its token to request certificates through cert-manager.",
+      "analogy": "RBAC works like keycards in an office. The ServiceAccount is the employee badge, the Role is an access profile (\"may open supply cupboards on floor 3\"), and the RoleBinding links the badge to the profile. Where it breaks down: a keycard only opens doors, but RBAC is far more granular. It can allow `get` on a resource while denying `delete`, which no door lock can do.",
+      "workedExample": {
+        "title": "Give a ServiceAccount read-only access to ConfigMaps",
+        "steps": [
+          {
+            "subgoal": "Create a namespace and ServiceAccount",
+            "detail": "```bash\nkubectl create namespace rbac-demo\nkubectl -n rbac-demo create serviceaccount reader\nkubectl auth can-i list configmaps -n rbac-demo --as=system:serviceaccount:rbac-demo:reader\n# no\n```\nBy default, the new account can do nothing."
+          },
+          {
+            "subgoal": "Write a Role and RoleBinding",
+            "detail": "```bash\ncat > rbac.yaml <<'EOF'\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: configmap-reader\n  namespace: rbac-demo\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"configmaps\"]\n    verbs: [\"get\", \"list\", \"watch\"]\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: reader-can-read-configmaps\n  namespace: rbac-demo\nsubjects:\n  - kind: ServiceAccount\n    name: reader\n    namespace: rbac-demo\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: Role\n  name: configmap-reader\nEOF\nkubectl apply -f rbac.yaml\n```\n`apiGroups: [\"\"]` means the core API group, where ConfigMaps, Secrets and Pods live."
+          },
+          {
+            "subgoal": "Test with kubectl auth can-i",
+            "detail": "```bash\nSA=system:serviceaccount:rbac-demo:reader\nkubectl auth can-i list configmaps -n rbac-demo --as=$SA   # yes\nkubectl auth can-i delete configmaps -n rbac-demo --as=$SA # no\nkubectl auth can-i list secrets -n rbac-demo --as=$SA      # no\nkubectl auth can-i list configmaps -n default --as=$SA     # no (Role is namespaced)\n```"
+          },
+          {
+            "subgoal": "Read the permissions back",
+            "detail": "```bash\nkubectl -n rbac-demo describe rolebinding reader-can-read-configmaps\nkubectl auth can-i --list -n rbac-demo --as=system:serviceaccount:rbac-demo:reader\n```\nWhen an operator on a NICo site logs `forbidden`, this is how you check what its ServiceAccount is actually allowed to do."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete this Role and RoleBinding so the ServiceAccount `job-watcher` in namespace `ops` can view (but not change) Jobs. Jobs are in the `batch` API group.",
+        "partialSolution": "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: job-viewer\n  namespace: ops\nrules:\n  - apiGroups: [\"batch\"]\n    resources: [\"jobs\"]\n    verbs: ___\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: job-watcher-views-jobs\n  namespace: ops\nsubjects:\n  - kind: ___\n    name: job-watcher\n    namespace: ops\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: Role\n  name: job-viewer",
+        "answer": "`verbs: [\"get\", \"list\", \"watch\"]` and `kind: ServiceAccount`."
+      },
+      "independentProblem": {
+        "prompt": "An in-house monitoring tool runs in namespace `monitor` and needs to list Pods in *every* namespace, including `nico-system` and `nico-rest`, but must not touch Secrets. Which RBAC objects do you create, and how do you prove it works?",
+        "hints": [
+          "\"Every namespace\" rules out a plain Role and RoleBinding.",
+          "You need a cluster-scoped role and a cluster-scoped binding to a ServiceAccount.",
+          "Verify with `kubectl auth can-i list pods -A --as=system:serviceaccount:monitor:<name>` and the same command for secrets."
+        ],
+        "answer": "Create a ServiceAccount `pod-lister` in `monitor`, a **ClusterRole** with `apiGroups: [\"\"]`, `resources: [\"pods\"]` and `verbs: [\"get\",\"list\",\"watch\"]`, and a **ClusterRoleBinding** that grants it to that ServiceAccount. To verify, `kubectl auth can-i list pods -A --as=system:serviceaccount:monitor:pod-lister` should print yes, and `kubectl auth can-i list secrets -n nico-system --as=system:serviceaccount:monitor:pod-lister` should print no."
+      },
+      "selfExplanation": "Why does Kubernetes split \"what is allowed\" (Role) from \"who is allowed\" (RoleBinding) instead of attaching permissions directly to a ServiceAccount? Think about many NICo namespaces needing the same permission.",
+      "checks": [
+        {
+          "question": "A pod spec doesn't set `serviceAccountName`. Which identity does it use for API calls?",
+          "options": [
+            "The cluster admin",
+            "The `default` ServiceAccount in its namespace",
+            "No identity, so it can't call the API",
+            "The identity of whoever ran kubectl apply"
+          ],
+          "answer": "The `default` ServiceAccount in its namespace",
+          "explanation": "Every namespace has a `default` ServiceAccount, and pods use it unless told otherwise. Pods never inherit the permissions of the user who created them."
+        },
+        {
+          "question": "You bind a Role in namespace `a` to a ServiceAccount. Can it read ConfigMaps in namespace `b`?",
+          "options": [
+            "Yes, Roles are global",
+            "No, a Role and RoleBinding apply only in their own namespace",
+            "Only if the ServiceAccount is also in `b`",
+            "Yes, if the verbs include list"
+          ],
+          "answer": "No, a Role and RoleBinding apply only in their own namespace",
+          "explanation": "Cross-namespace or cluster-wide access needs a ClusterRole plus a ClusterRoleBinding, or a RoleBinding in each namespace."
+        },
+        {
+          "question": "Vault's Kubernetes auth maps NICo ServiceAccounts to Vault roles. Is that Kubernetes RBAC?",
+          "options": [
+            "Yes, it is a ClusterRoleBinding",
+            "No, it is Vault's own authorization, which uses the ServiceAccount token as proof of identity",
+            "Yes, Vault creates Roles in each namespace",
+            "No, Vault ignores ServiceAccounts"
+          ],
+          "answer": "No, it is Vault's own authorization, which uses the ServiceAccount token as proof of identity",
+          "explanation": "Kubernetes RBAC governs only the Kubernetes API. Vault checks the token and applies its own policies. They are two separate systems that share the same identity."
+        }
+      ],
+      "sources": [
+        "getting-started/prerequisites/software.md",
+        "getting-started/quick-start.md"
+      ]
+    },
+    {
+      "concept": "kubernetes-secret",
+      "prequestions": [
+        {
+          "question": "`kubectl get secret X -o yaml` shows `password: bmljby1wYXNz`. Is that encrypted?",
+          "answer": "No. It's base64-encoded, and `echo bmljby1wYXNz | base64 -d` prints `nico-pass`. The protection comes from RBAC, and optionally from encryption at rest in etcd, not from the encoding."
+        },
+        {
+          "question": "NICo images come from a private registry. How does a node's container runtime get the registry password when Kubernetes starts a pod?",
+          "answer": "The pod (or its ServiceAccount) references an image pull Secret of type `kubernetes.io/dockerconfigjson` in the same namespace."
+        }
+      ],
+      "explanation": "A **Secret** is a namespaced object for sensitive data such as passwords, tokens, keys, certificates and registry credentials. It looks like a ConfigMap, but the values under `data` are **base64-encoded**. You can also write plain text under `stringData`. Base64 is an encoding, not encryption. What actually protects a Secret is (a) RBAC, which controls who can `get` Secrets (previous lesson), (b) optional encryption at rest in the cluster's datastore, and (c) keeping the values out of Git and shell history.\n\nPods use Secrets in three common ways:\n\n1. **Environment variable** through `secretKeyRef`. NICo's Day 0 guide exposes the credential KEK this way: `NICO_SECRETS_KEK` uses `valueFrom.secretKeyRef` to name the Secret `nico-secrets-kek` and the key `site-kek-1`. The site-agent gets `DB_USER` and `DB_PASSWORD` from the `db-creds` Secret.\n2. **Mounted files**: each key becomes a file. TLS certificates are usually consumed this way.\n3. **Image pull Secret**: type `kubernetes.io/dockerconfigjson`, listed under `imagePullSecrets`. The docs ask for an image pull secret (for example `imagepullsecret`) in each namespace that pulls from your registry. `setup.sh` builds one from `REGISTRY_PULL_USERNAME` (default `$oauthtoken`) and `REGISTRY_PULL_SECRET`.\n\nSecrets are **namespace-local**: a pod can only reference Secrets in its own namespace. That's why NICo uses External Secrets Operator to copy `nico-roots` and the DB credentials into each NICo namespace, and why an Ingress TLS Secret must live in `nico-rest`. cert-manager also writes the certificates it issues into Secrets.\n\nHere is a habit worth copying from the docs: create Secrets without the value ever touching your shell history, for example\n`openssl rand -base64 32 | tr -d '\\n' | kubectl -n nico-system create secret generic nico-secrets-kek --from-file=site-kek-1=/dev/stdin`. To read one key, use `-o jsonpath='{.data.ca\\.crt}' | base64 -d`.",
+      "analogy": "A Secret is like a sealed envelope in a locked mailroom. The envelope (base64) only stops people from reading it by accident. The real security is who has a key to the mailroom (RBAC). Where it breaks down: anyone allowed into the mailroom can open every envelope instantly, because there is no extra seal. That's why the `get secrets` permission is so sensitive.",
+      "workedExample": {
+        "title": "Create, consume and decode a Secret",
+        "steps": [
+          {
+            "subgoal": "Create a Secret without leaking it to history",
+            "detail": "```bash\nkubectl create namespace sec-demo\nopenssl rand -base64 24 | tr -d '\\n' | \\\n  kubectl -n sec-demo create secret generic db-creds \\\n    --from-literal=DB_USER=nico --from-file=DB_PASSWORD=/dev/stdin\nkubectl -n sec-demo get secret db-creds -o yaml\n```\nThe values under `data` look scrambled, but they're only base64."
+          },
+          {
+            "subgoal": "Decode one key",
+            "detail": "```bash\nkubectl -n sec-demo get secret db-creds -o jsonpath='{.data.DB_USER}' | base64 -d; echo\n# nico\n```\nAnyone with `get secrets` permission in this namespace can do the same."
+          },
+          {
+            "subgoal": "Consume it as env vars and as files",
+            "detail": "```bash\ncat > sec-pod.yaml <<'EOF'\napiVersion: v1\nkind: Pod\nmetadata:\n  name: app\n  namespace: sec-demo\nspec:\n  restartPolicy: Never\n  containers:\n    - name: c\n      image: busybox:1.36\n      command: [\"sh\", \"-c\", \"echo user=$DB_USER; ls /creds\"]\n      env:\n        - name: DB_USER\n          valueFrom:\n            secretKeyRef:\n              name: db-creds\n              key: DB_USER\n      volumeMounts:\n        - name: creds\n          mountPath: /creds\n          readOnly: true\n  volumes:\n    - name: creds\n      secret:\n        secretName: db-creds\nEOF\nkubectl apply -f sec-pod.yaml\nkubectl -n sec-demo wait --for=jsonpath='{.status.phase}'=Succeeded pod/app --timeout=120s\nkubectl -n sec-demo logs app\n# user=nico\n# DB_PASSWORD\n# DB_USER\n```"
+          },
+          {
+            "subgoal": "See what happens with a missing Secret",
+            "detail": "Copy `sec-pod.yaml` to `sec-pod-bad.yaml`, change `metadata.name` to `app-bad` and `secretKeyRef.name` to `no-such-secret`, then apply it. `kubectl -n sec-demo get pods` shows `CreateContainerConfigError`. This is the classic symptom of a Secret that ESO hasn't synced yet, or that lives in the wrong namespace."
+          },
+          {
+            "subgoal": "Create an image pull Secret",
+            "detail": "```bash\nkubectl -n sec-demo create secret docker-registry imagepullsecret \\\n  --docker-server=nvcr.io --docker-username='$oauthtoken' --docker-password=dummy-key\nkubectl -n sec-demo get secret imagepullsecret -o jsonpath='{.type}'; echo\n# kubernetes.io/dockerconfigjson\n```\nPods reference it with `imagePullSecrets: [{name: imagepullsecret}]`. The `$oauthtoken` username is NGC's API-key convention, as in the Quick Start."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete this `extraEnv` entry (the same shape as in NICo's Day 0 credential store guide) so `nico-api` gets `NICO_SECRETS_KEK` from the Secret `nico-secrets-kek`, key `site-kek-1`.",
+        "partialSolution": "extraEnv:\n  - name: NICO_SECRETS_KEK\n    valueFrom:\n      ___:\n        name: nico-secrets-kek\n        key: ___",
+        "answer": "`secretKeyRef` and `site-kek-1`:\n```yaml\n    valueFrom:\n      secretKeyRef:\n        name: nico-secrets-kek\n        key: site-kek-1\n```"
+      },
+      "independentProblem": {
+        "prompt": "Pods in a new namespace, `nico-rest`, fail with `ImagePullBackOff` against your private registry `my-registry.example.com`, even though `nico-system` pulls fine. Explain the likely cause and give the commands to fix and confirm it.",
+        "hints": [
+          "Secrets are scoped to a namespace.",
+          "Which Secret type carries registry credentials, and where does the pod reference it?",
+          "`kubectl create secret docker-registry ... -n nico-rest`, then add it to `imagePullSecrets` on the pods or patch it onto the namespace's default ServiceAccount."
+        ],
+        "answer": "The image pull Secret exists only in `nico-system`, and pods can't use a Secret from another namespace. To fix it, run `kubectl -n nico-rest create secret docker-registry imagepullsecret --docker-server=my-registry.example.com --docker-username=<user> --docker-password=<key>`. Then either reference it through `imagePullSecrets` in the pod spec (usually through chart values), or run `kubectl -n nico-rest patch serviceaccount default -p '{\"imagePullSecrets\":[{\"name\":\"imagepullsecret\"}]}'` and recreate the pods. To confirm, check that `kubectl -n nico-rest describe pod <pod>` shows no more pull errors and `kubectl -n nico-rest get pods` shows Running."
+      },
+      "selfExplanation": "If base64 isn't encryption, what actually keeps a Kubernetes Secret secret? Explain how RBAC, namespaces and tools like ESO work together to limit who can read NICo's database credentials.",
+      "checks": [
+        {
+          "question": "Which statement about Secret `data` values is true?",
+          "options": [
+            "They are AES-encrypted by kubectl",
+            "They are base64-encoded, and anyone allowed to get the Secret can decode them",
+            "They can only be read by the pod that mounts them",
+            "They are hashed and cannot be recovered"
+          ],
+          "answer": "They are base64-encoded, and anyone allowed to get the Secret can decode them",
+          "explanation": "Base64 is reversible and adds no security, so access control comes from RBAC. kubectl doesn't encrypt anything, and hashing would make the values useless to applications."
+        },
+        {
+          "question": "Why does NICo use ESO to put `nico-roots` and the DB credentials into each NICo namespace?",
+          "options": [
+            "Secrets expire after 24 hours",
+            "Pods can only reference Secrets in their own namespace",
+            "Kubernetes limits each namespace to one Secret",
+            "ESO encrypts them, which Kubernetes cannot do"
+          ],
+          "answer": "Pods can only reference Secrets in their own namespace",
+          "explanation": "Secrets are namespace-local, so each namespace needs its own copy. Secrets don't expire, there's no per-namespace limit, and ESO's job is syncing, not encrypting."
+        },
+        {
+          "question": "A pod sits in `CreateContainerConfigError` right after deployment. What is a likely Secret-related cause?",
+          "options": [
+            "The Secret it references doesn't exist yet in that namespace, or is missing the requested key",
+            "The Secret is too large to mount",
+            "The image is missing",
+            "The node has no disk"
+          ],
+          "answer": "The Secret it references doesn't exist yet in that namespace, or is missing the requested key",
+          "explanation": "If an env var or volume references a missing Secret or key, container creation is blocked with this status. A missing image shows as ImagePullBackOff or ErrImagePull instead."
+        }
+      ],
+      "sources": [
+        "getting-started/installation-options/day0-credential-store.md",
+        "getting-started/quick-start.md",
+        "getting-started/prerequisites/software.md",
+        "overview/what-is-nico.md"
+      ]
+    }
+  ],
+  "buildTask": {
+    "title": "A mini \"site controller\" on kind",
+    "goal": "Build a small stand-in for a NICo control-plane service on a local kind cluster. It is a 2-replica StatefulSet that reads a TOML ConfigMap and DB credentials from a Secret, and keeps its state on PersistentVolumes. You'll expose it as ClusterIP, NodePort and LoadBalancer, register a custom resource type, and give a ServiceAccount least-privilege RBAC that a Job checks from inside the cluster.",
+    "whyItMatters": "Most of NICo's install and day-2 checks come down to the objects you'll build here: StatefulSets with PVCs from local-path StorageClasses (PostgreSQL, Vault, site-agent), Secrets consumed through `secretKeyRef` (db-creds, the KEK), ConfigMaps holding site TOML, LoadBalancer Services waiting for MetalLB VIPs, CRs reconciled by operators, and ServiceAccounts with scoped RBAC. Once you've built and broken these on a laptop, the output of `kubectl get pods,svc,pvc,jobs -n nico-system` on a real site will make sense.",
+    "setup": [
+      "Docker (or Podman with `KIND_EXPERIMENTAL_PROVIDER=podman`) on Linux or macOS, with about 4 GB of free RAM",
+      "kind (https://kind.sigs.k8s.io)",
+      "kubectl within one minor version of the Kubernetes version your kind node image runs. Recent kind releases use recent Kubernetes versions, so install a current kubectl and compare client and server with `kubectl version` after creating the cluster. NICo's tools table lists kubectl 1.26 as its minimum, but the Kubernetes version-skew rule still applies.",
+      "Internet access to pull `kindest/node`, `python:3.12-slim` and `curlimages/curl`",
+      "openssl (preinstalled on most Linux and macOS systems)",
+      "A working directory, for example `mkdir ~/nico-k8s-lab && cd ~/nico-k8s-lab`"
+    ],
+    "steps": [
+      {
+        "subgoal": "Create the cluster",
+        "detail": "```bash\ncat > kind-3.yaml <<'EOF'\nkind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n  - role: control-plane\n  - role: worker\n  - role: worker\nEOF\nkind create cluster --name nico-lab --config kind-3.yaml\nkubectl version          # Server v1.30 or later; Client within one minor version of Server\nkubectl get nodes        # 3 nodes Ready\nkubectl get storageclass # 'standard' (local-path) should be the default\n```"
+      },
+      {
+        "subgoal": "Create the namespace, Secret and ConfigMap",
+        "detail": "Create the Secret imperatively so the password never appears in a file:\n```bash\nkubectl create namespace nico-lab\nopenssl rand -base64 24 | tr -d '\\n' | kubectl -n nico-lab create secret generic db-creds \\\n  --from-literal=DB_USER=nico --from-file=DB_PASSWORD=/dev/stdin\ncat > site.toml <<'EOF'\nsitename = \"mysite\"\ninitial_domain_name = \"mysite.example.com\"\nEOF\nkubectl -n nico-lab create configmap site-config --from-file=site.toml\n```"
+      },
+      {
+        "subgoal": "Deploy the StatefulSet with persistent storage",
+        "detail": "```bash\ncat > app.yaml <<'EOF'\napiVersion: v1\nkind: Service\nmetadata:\n  name: fake-api-headless\n  namespace: nico-lab\nspec:\n  clusterIP: None\n  selector:\n    app: fake-api\n  ports:\n    - port: 8080\n---\napiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: fake-api\n  namespace: nico-lab\nspec:\n  serviceName: fake-api-headless\n  replicas: 2\n  selector:\n    matchLabels:\n      app: fake-api\n  template:\n    metadata:\n      labels:\n        app: fake-api\n    spec:\n      containers:\n        - name: api\n          image: python:3.12-slim\n          command: [\"sh\", \"-c\"]\n          args:\n            - |\n              date >> /data/boots.log\n              echo \"pod=$(hostname) db_user=$DB_USER\" > /data/info.txt\n              cp /config/site.toml /data/site.toml\n              cd /data && exec python3 -m http.server 8080\n          env:\n            - name: DB_USER\n              valueFrom:\n                secretKeyRef:\n                  name: db-creds\n                  key: DB_USER\n          ports:\n            - containerPort: 8080\n          volumeMounts:\n            - name: data\n              mountPath: /data\n            - name: config\n              mountPath: /config\n      volumes:\n        - name: config\n          configMap:\n            name: site-config\n  volumeClaimTemplates:\n    - metadata:\n        name: data\n      spec:\n        accessModes: [\"ReadWriteOnce\"]\n        storageClassName: standard\n        resources:\n          requests:\n            storage: 100Mi\nEOF\nkubectl apply -f app.yaml\nkubectl -n nico-lab rollout status statefulset/fake-api --timeout=180s\nkubectl -n nico-lab get pods,pvc\n```\nYou should see pods `fake-api-0` and `fake-api-1`, and PVCs `data-fake-api-0` and `data-fake-api-1`, all `Bound`."
+      },
+      {
+        "subgoal": "Expose it three ways",
+        "detail": "```bash\ncat > svcs.yaml <<'EOF'\napiVersion: v1\nkind: Service\nmetadata:\n  name: fake-api\n  namespace: nico-lab\nspec:\n  type: ClusterIP\n  selector:\n    app: fake-api\n  ports:\n    - port: 80\n      targetPort: 8080\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: fake-api-np\n  namespace: nico-lab\nspec:\n  type: NodePort\n  selector:\n    app: fake-api\n  ports:\n    - port: 80\n      targetPort: 8080\n      nodePort: 30080\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: fake-api-lb\n  namespace: nico-lab\nspec:\n  type: LoadBalancer\n  selector:\n    app: fake-api\n  ports:\n    - port: 80\n      targetPort: 8080\nEOF\nkubectl apply -f svcs.yaml\nkubectl -n nico-lab get svc\n```\n`fake-api-lb` stays at EXTERNAL-IP `<pending>` because kind has no MetalLB. It is the same symptom the Quick Start warns about for NICo Core."
+      },
+      {
+        "subgoal": "Register a custom resource type",
+        "detail": "```bash\ncat > crd.yaml <<'EOF'\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: racks.lab.example.com\nspec:\n  group: lab.example.com\n  scope: Namespaced\n  names:\n    plural: racks\n    singular: rack\n    kind: Rack\n  versions:\n    - name: v1\n      served: true\n      storage: true\n      schema:\n        openAPIV3Schema:\n          type: object\n          properties:\n            spec:\n              type: object\n              properties:\n                location:\n                  type: string\n                hosts:\n                  type: integer\nEOF\nkubectl apply -f crd.yaml\nkubectl wait --for=condition=Established crd/racks.lab.example.com --timeout=60s\ncat > rack.yaml <<'EOF'\napiVersion: lab.example.com/v1\nkind: Rack\nmetadata:\n  name: rack-a01\n  namespace: nico-lab\nspec:\n  location: row-a\n  hosts: 18\nEOF\nkubectl apply -f rack.yaml\nkubectl -n nico-lab get racks\n```"
+      },
+      {
+        "subgoal": "Add least-privilege RBAC and check it from inside a pod",
+        "detail": "The Job calls the Kubernetes API directly with its ServiceAccount token:\n```bash\ncat > rbac.yaml <<'EOF'\napiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: config-reader\n  namespace: nico-lab\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: configmap-reader\n  namespace: nico-lab\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"configmaps\"]\n    verbs: [\"get\", \"list\"]\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: config-reader-binding\n  namespace: nico-lab\nsubjects:\n  - kind: ServiceAccount\n    name: config-reader\n    namespace: nico-lab\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: Role\n  name: configmap-reader\n---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: rbac-probe\n  namespace: nico-lab\nspec:\n  backoffLimit: 0\n  template:\n    spec:\n      serviceAccountName: config-reader\n      restartPolicy: Never\n      containers:\n        - name: probe\n          image: curlimages/curl\n          command: [\"sh\", \"-c\"]\n          args:\n            - |\n              SA=/var/run/secrets/kubernetes.io/serviceaccount\n              TOKEN=$(cat $SA/token)\n              API=https://kubernetes.default.svc/api/v1/namespaces/nico-lab\n              echo \"configmaps: $(curl -s -o /dev/null -w '%{http_code}' --cacert $SA/ca.crt -H \"Authorization: Bearer $TOKEN\" $API/configmaps)\"\n              echo \"secrets: $(curl -s -o /dev/null -w '%{http_code}' --cacert $SA/ca.crt -H \"Authorization: Bearer $TOKEN\" $API/secrets)\"\nEOF\nkubectl apply -f rbac.yaml\nkubectl -n nico-lab wait --for=condition=complete job/rbac-probe --timeout=120s\nkubectl -n nico-lab logs job/rbac-probe\n```\nExpected output: `configmaps: 200` and `secrets: 403`."
+      },
+      {
+        "subgoal": "Prove persistence and reachability",
+        "detail": "```bash\n# Delete a replica. It comes back with the same name and the same volume.\nkubectl -n nico-lab delete pod fake-api-0\nsleep 5   # give the StatefulSet controller a moment to recreate the pod\nkubectl -n nico-lab rollout status statefulset/fake-api --timeout=180s\nkubectl -n nico-lab exec fake-api-0 -- wc -l /data/boots.log\n# 2 /data/boots.log  (one line per start)\n\n# Per-pod DNS through the headless Service: always reaches fake-api-0\nkubectl run tmp -n nico-lab --rm -i --quiet --restart=Never --image=curlimages/curl -- \\\n  -s http://fake-api-0.fake-api-headless.nico-lab.svc.cluster.local:8080/info.txt\n\n# Through the ClusterIP Service: port 80, load-balanced across both replicas\nkubectl run tmp1 -n nico-lab --rm -i --quiet --restart=Never --image=curlimages/curl -- \\\n  -s http://fake-api.nico-lab.svc.cluster.local/site.toml\n\n# Through the NodePort on a node IP\nNODE=$(kubectl get nodes -o jsonpath='{.items[1].status.addresses[?(@.type==\"InternalIP\")].address}')\nkubectl run tmp2 -n nico-lab --rm -i --quiet --restart=Never --image=curlimages/curl -- \\\n  -s http://$NODE:30080/site.toml\n```\n`boots.log` should have **two** lines. The headless request names `fake-api-0`, and both the ClusterIP and NodePort requests return your TOML. Run the ClusterIP request with `/info.txt` a few times and you'll see answers from both pods."
+      }
+    ],
+    "verify": "Run these and compare each result with the expected value:\n```bash\nkubectl -n nico-lab get statefulset fake-api          # READY 2/2\nkubectl -n nico-lab get pvc                            # data-fake-api-0 and -1 Bound\nkubectl -n nico-lab get svc                            # fake-api ClusterIP, fake-api-np 80:30080, fake-api-lb <pending>\nkubectl -n nico-lab get racks                          # rack-a01\nkubectl -n nico-lab logs job/rbac-probe                # configmaps: 200 / secrets: 403\nkubectl auth can-i list secrets -n nico-lab --as=system:serviceaccount:nico-lab:config-reader   # no\nkubectl -n nico-lab exec fake-api-0 -- wc -l /data/boots.log                                    # 2 (or more) /data/boots.log\nkubectl run v -n nico-lab --rm -i --quiet --restart=Never --image=curlimages/curl -- \\\n  -s http://fake-api.nico-lab.svc.cluster.local/site.toml                                       # prints your site.toml\n```\nThe task is done when every line matches: 2/2 ready, both PVCs Bound, the LB pending, the CR listed, 200/403 from the probe, `no` from can-i, at least 2 lines in `boots.log` (proving the volume survived the pod restart), and the TOML served through the ClusterIP Service.",
+    "hints": [
+      "Pods stuck in `CreateContainerConfigError`: the `db-creds` Secret is missing or was created in a different namespace. Check with `kubectl -n nico-lab get secret db-creds`.",
+      "PVCs stuck in `Pending` before any pods exist is normal for `WaitForFirstConsumer`. If they stay Pending after pods are scheduled, check `kubectl get pods -n local-path-storage` and `kubectl describe pvc`.",
+      "`kubectl apply -f rack.yaml` says `no matches for kind \"Rack\"`: the CRD wasn't established yet. Run the `kubectl wait --for=condition=Established` line and apply again.",
+      "The rbac-probe Job shows `configmaps: 403`: check that the RoleBinding's subject name and namespace exactly match the ServiceAccount, and that the Job sets `serviceAccountName: config-reader`. Jobs are immutable, so delete it (`kubectl -n nico-lab delete job rbac-probe`) and apply again.",
+      "`kubectl -n nico-lab exec fake-api-0` says the pod is not found or not running: the StatefulSet hasn't finished recreating it. Re-run `kubectl -n nico-lab rollout status statefulset/fake-api`.",
+      "`kubectl run tmp` fails with `AlreadyExists`: an earlier run left the pod behind. Run `kubectl -n nico-lab delete pod tmp`.",
+      "kubectl warns about version skew, or commands behave oddly: install a kubectl within one minor version of the server shown by `kubectl version`.",
+      "On Podman, run `export KIND_EXPERIMENTAL_PROVIDER=podman` before `kind create cluster`."
+    ],
+    "stretch": "Give `fake-api-lb` a real, *pinned* VIP. Install MetalLB in kind with `kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.5/config/manifests/metallb-native.yaml` (v0.14.5 is the version NICo validates). Find kind's Docker subnet with `docker network inspect kind`, then in `metallb-system` create an `IPAddressPool` with a small range from the top of that subnet and an `L2Advertisement`. Annotate the Service with `metallb.universe.tf/loadBalancerIPs: <an IP from the pool>` and watch EXTERNAL-IP change from `<pending>` to exactly that address. Delete and recreate the Service and confirm the IP stays the same, which is the reason the first lesson gave for pinning VIPs. On Linux you can `curl http://<VIP>/info.txt` from the host. On macOS the kind network isn't routable from the host, so test from a pod instead. Bonus: create two LoadBalancer Services, each selecting one replica through the `statefulset.kubernetes.io/pod-name` label, so each replica gets its own VIP. This mimics `perPodAnnotations` for nico-dns and nico-ntp."
+  }
+}

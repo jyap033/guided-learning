@@ -129,3 +129,14 @@ chapters:
       user-mode networking the VM's requests appear in the access log as
       127.0.0.1, and iPXE's echo lines usually do show on the -nographic
       console.
+  13:
+    - >-
+      binfmt_misc registrations made by `docker run --privileged --rm
+      tonistiigi/binfmt --install all` are runtime kernel state and are lost
+      on reboot unless something re-registers them (qemu-user-static with
+      binfmt-support, or /etc/binfmt.d entries). Never claim they survive a
+      reboot; after a reboot, tell the learner to check
+      /proc/sys/fs/binfmt_misc/ and re-run the install if needed.
+    - >-
+      Files in /etc/sysctl.d are applied at boot or by `sudo sysctl --system`,
+      not at login. Group membership needs a new login. Say both consistently.

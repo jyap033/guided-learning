@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The build task says it supports Docker Desktop on macOS, and both it and the container-registry lesson start the registry with `-p 5000:5000`. On macOS 12 and later, the AirPlay Receiver (ControlCenter) often already listens on port 5000. The port binding then fails with 'address already in use', or `curl http://localhost:5000/v2/` gets an HTTP 403 from AirPlay instead of `{}`, and the pushes fail. None of the hints mention this.",
+        "fix": "Add a hint telling Mac users to turn off AirPlay Receiver in System Settings, or to map a different host port (for example `-p 5001:5000`) and use `localhost:5001` in every later command."
+      }
+    ]
+  }
+}

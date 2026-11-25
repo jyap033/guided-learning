@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The two-stage Dockerfile compiles in `rust:1-slim`, which now tracks Debian trixie (newer glibc), and runs the binary on `debian:bookworm-slim` (glibc 2.36). A trivial std-only binary will probably still run, but mismatched Debian releases between build and runtime stages are a known cause of 'GLIBC_x.yy not found' errors as soon as the program gets more complex.",
+        "fix": "Pin matching releases, e.g. `FROM rust:1-slim-bookworm AS build` with `FROM debian:bookworm-slim`, or use `debian:trixie-slim` as the runtime. Add a sentence explaining why the bases should match."
+      },
+      {
+        "where": "docker-buildkit-and-buildx",
+        "severity": "minor",
+        "problem": "'supports features such as `RUN --mount=type=cache`. That's how build recipes keep Cargo caches warm between builds' reads as a claim about how NICo's recipes work. The docs only say that repeated builds reuse Docker layers and Cargo caches, separated by architecture. They don't name the mechanism.",
+        "fix": "Present it as a general BuildKit capability (e.g. 'Recipes commonly use this to keep Cargo caches warm') rather than as how NICo's recipes are implemented."
+      }
+    ]
+  }
+}

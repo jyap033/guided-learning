@@ -1,0 +1,903 @@
+{
+  "kind": "revise",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Up to now you've treated NICo as something that already exists. You've seen its services, its DHCP/DNS/PXE stack and its DPU networking. This chapter covers how those running pieces get built. Every NICo Core service, every NICo REST service, and every OS image that a host or DPU network-boots starts as source code in the `infra-controller` repository. All of it gets compiled and packed into container images.\n\nThe chapter goes from the bottom up. First the Rust toolchain and Cargo, because NICo Core is written in Rust. Then the one-step build-host bootstrap. Then the Docker parts the build depends on: registries, BuildKit/Buildx builders, QEMU emulation for the other CPU architecture, and multi-architecture manifests. With those in hand, the `make images-dev`, `make images` and `make images-all` targets make sense. The chapter ends with boot artifacts and the DPU BFB, which are the images NICo serves to machines that don't have an OS yet. They build on the PXE/iPXE material from Chapter 12 and the BlueField material from Chapter 7.\n\nThis matters for running NICo because the Quick Start's first step is \"build the containers and push them to your registry\". If the build or push goes wrong, the Kubernetes deployment in the next chapters has nothing to pull. For example, an image tag might be missing its arm64 half, or images might be pushed to a registry the cluster can't reach. Knowing what each target produces, and how to check its output, saves you from debugging pods stuck pulling images.\n\nYou can try most examples on a laptop with Docker. The full NICo builds need an Ubuntu 24.04 host with about 150 GB free, and the chapter says clearly where that applies.",
+    "objectives": [
+      "Explain how rustup, rustc, Cargo and cargo-make fit together, and read a `cargo make` invocation from the NICo build docs",
+      "Prepare an Ubuntu 24.04 build host with `make bootstrap` and check that the docker group, the userns sysctl and binfmt emulation are actually in effect",
+      "Build and smoke-test a single native development image with `make images-dev`, and predict which image references a set of Make variables produces",
+      "Explain how BuildKit builders, Docker contexts, binfmt/QEMU emulation and registries interact when building for amd64 and arm64",
+      "Run `make images` / `make images-all` with the right architecture and registry variables, and check each tag's platforms with `docker buildx imagetools inspect`",
+      "Describe what the boot-artifact images and the DPU BFB contain, and why a container's platform can differ from the architecture of the payload it carries"
+    ],
+    "lessons": [
+      {
+        "concept": "rust-toolchain-and-cargo",
+        "prequestions": [
+          {
+            "question": "Rust comes with three commands: `rustup`, `rustc` and `cargo`. Which one would you normally run to build a project and fetch its dependencies?",
+            "answer": "`cargo`. It reads the project manifest, downloads dependencies and calls the compiler `rustc` for you. `rustup` installs and switches toolchains. You rarely call `rustc` directly."
+          },
+          {
+            "question": "The NICo docs use both `make ...` and `cargo make ...`. Guess: are these the same tool?",
+            "answer": "No. `make` is GNU Make, which reads a `Makefile`. `cargo make` is cargo-make, a separate Rust task runner installed with `cargo install cargo-make`. It reads `Makefile.toml`."
+          }
+        ],
+        "explanation": "NICo Core is written in Rust, so building it starts with the Rust toolchain.\n\n- **`rustc`** is the compiler. It turns `.rs` source into a native binary for one target, such as `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`.\n- **`rustup`** installs and manages toolchains: compiler versions, extra targets and components. NICo's manual setup installs it with `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`.\n- **Cargo** is Rust's package manager and build tool. A project (a *crate*) is described in `Cargo.toml`, which is TOML, a format you already know. `cargo build` resolves dependencies, records their exact versions in `Cargo.lock` and compiles into `target/`. `cargo build --release` produces an optimised build in `target/release/`. A *workspace* groups many crates in one repository, and `-p <name>` picks one of them. The Quick Start's `cargo build --release -p nico-admin-cli` builds just the admin CLI, giving `target/release/nico-admin-cli`.\n- **`cargo install <tool>`** compiles a Rust tool and puts it in `~/.cargo/bin`. NICo's setup runs `cargo install cargo-make cargo-cache`.\n\n**cargo-make** is a task runner. Tasks live in a `Makefile.toml`, and you run one with `cargo make <task>`. Tasks can run commands, set environment variables and depend on other tasks. NICo uses it for Rust-centred build tasks, for example:\n\n```sh\ncargo make --cwd pxe --env SA_ENABLEMENT=1 build-boot-artifacts-bfb-sa\nBUILD_CONTAINER_X86_URL=\"nico-buildcontainer-x86_64\" cargo make build-cli\n```\n\n`--cwd pxe` runs from the `pxe/` directory, so the `Makefile.toml` there is used. `--env NAME=value` sets a variable for the tasks. The second line sets a variable through the normal shell environment instead.\n\nThe NICo build has two layers. The top-level GNU `make` targets (`make bootstrap`, `make images`, ...) are the operator-facing entry points. cargo-make tasks run Rust-specific steps inside them or alongside them. **cargo-cache** is a helper for inspecting and trimming Cargo's download cache in `~/.cargo`, which grows quickly on a build host.",
+        "analogy": "Cargo is like a kitchen's head chef. You hand over a recipe card (`Cargo.toml`), and the chef orders the ingredients (dependencies) and tells the line cook (`rustc`) what to do. rustup is the restaurant supply company that delivers and swaps out the chef's equipment. cargo-make is the shift checklist pinned on the wall: 'prep veg, then make stock, then plate'. The analogy breaks down because a real chef improvises. Cargo is deterministic, and `Cargo.lock` pins the exact ingredient versions so every build uses the same ones.",
+        "workedExample": {
+          "title": "From zero to a cargo-make task on your laptop",
+          "steps": [
+            {
+              "subgoal": "Install the toolchain",
+              "detail": "On Linux or macOS:\n```sh\ncurl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # choose option 1\n. \"$HOME/.cargo/env\"     # or open a new shell\nrustup --version && cargo --version && rustc --version\n```"
+            },
+            {
+              "subgoal": "Create and run a crate",
+              "detail": "```sh\ncargo new hello && cd hello\ncat Cargo.toml          # [package] name, version, edition\ncargo run               # compiles target/debug/hello and runs it: Hello, world!\n```"
+            },
+            {
+              "subgoal": "Make a release build and find the binary",
+              "detail": "```sh\ncargo build --release\nls -l target/release/hello\nfile target/release/hello    # e.g. ELF 64-bit ... x86-64, or Mach-O arm64 on Apple silicon\n```\nThe binary is native to the machine that built it. This becomes important later in the chapter."
+            },
+            {
+              "subgoal": "Install cargo-make and add a task",
+              "detail": "```sh\ncargo install cargo-make\ncat > Makefile.toml <<'EOF'\n[env]\nTARGET_NAME = \"world\"\n\n[tasks.greet]\ncommand = \"echo\"\nargs = [\"hello\", \"${TARGET_NAME}\"]\nEOF\ncargo make greet\n```\ncargo-make prints its own log lines and then `hello world`."
+            },
+            {
+              "subgoal": "Run it from another directory",
+              "detail": "```sh\ncd ..\ncargo make --cwd hello greet\n```\nThis is the same pattern as NICo's `cargo make --cwd pxe ...`: point cargo-make at the directory whose `Makefile.toml` you want."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so that `cargo make shout` prints `HELLO WORLD`. Use the same `TARGET_NAME` variable as in the worked example.",
+          "partialSolution": "[env]\nTARGET_NAME = \"WORLD\"\n\n[tasks.___]\ncommand = \"___\"\nargs = [\"HELLO\", \"${TARGET_NAME}\"]",
+          "answer": "The section header is `[tasks.shout]` and the command is `echo`. The task name comes from the `tasks.<name>` table key, and `command` is the program to run, with `args` as its arguments."
+        },
+        "independentProblem": {
+          "prompt": "In the same `Makefile.toml`, add a task `all`. Running `cargo make all` should first run `cargo build --release` (as its own task called `release`) and then the `greet` task. Write the TOML for both new tasks.",
+          "hints": [
+            "Each task is its own `[tasks.<name>]` table. The `release` task runs the program `cargo` with two arguments.",
+            "cargo-make lets a task list other tasks that must run first. The key is a list of task names.",
+            "`[tasks.all]` needs only one line: `dependencies = [...]` with the two task names in order."
+          ],
+          "answer": "```toml\n[tasks.release]\ncommand = \"cargo\"\nargs = [\"build\", \"--release\"]\n\n[tasks.all]\ndependencies = [\"release\", \"greet\"]\n```\n`cargo make all` runs `release` and then `greet`."
+        },
+        "selfExplanation": "Why do you think NICo keeps top-level GNU `make` targets for operators while using cargo-make for Rust-specific tasks, rather than putting everything in one tool?",
+        "checks": [
+          {
+            "question": "How does NICo's manual setup install cargo-make?",
+            "options": [
+              "`apt-get install cargo-make`",
+              "`rustup component add cargo-make`",
+              "`cargo install cargo-make cargo-cache`",
+              "It ships inside rustup by default"
+            ],
+            "answer": "`cargo install cargo-make cargo-cache`",
+            "explanation": "Step 10 of the manual setup runs `cargo install cargo-make cargo-cache`. cargo-make isn't in the apt package list, and it isn't a rustup component. rustup components are toolchain parts such as clippy or rustfmt."
+          },
+          {
+            "question": "After `cargo build --release -p nico-admin-cli`, where is the binary?",
+            "options": [
+              "`target/debug/nico-admin-cli`",
+              "`target/release/nico-admin-cli`",
+              "`~/.cargo/bin/nico-admin-cli`",
+              "`crates/admin-cli/bin/nico-admin-cli`"
+            ],
+            "answer": "`target/release/nico-admin-cli`",
+            "explanation": "`--release` writes to `target/release/` at the workspace root, as both the Quick Start and the build manual say. `target/debug` is for builds without `--release`. `~/.cargo/bin` is where `cargo install` puts tools, not where `cargo build` puts output."
+          },
+          {
+            "question": "Which file does `cargo make --cwd pxe <task>` look for in the `pxe/` directory?",
+            "options": [],
+            "answer": "`Makefile.toml`",
+            "explanation": "cargo-make reads tasks from `Makefile.toml`, not from a GNU `Makefile` and not from `Cargo.toml`."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md",
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "build-host-bootstrap",
+        "prequestions": [
+          {
+            "question": "The docs call `make bootstrap` 'idempotent'. What does that tell you about running it a second time?",
+            "answer": "Running it again is safe. It brings the host to the same end state without breaking or duplicating anything, so you can re-run it to repair a host that drifted or was only half set up."
+          },
+          {
+            "question": "The bootstrap adds you to the `docker` group. Will `docker ps` work in the same terminal straight afterwards, without sudo?",
+            "answer": "Usually not. Group membership is read when you log in, so you need a new login session (or a reboot) before it applies."
+          }
+        ],
+        "explanation": "The complete stack and boot-artifact build needs an **Ubuntu 24.04 host or VM with at least 150 GB of free disk space**, plus Git and Make. The bootstrap **does not run on macOS**. On a Mac, use `make images-dev` through a Linux Docker daemon (later lesson).\n\n```sh\ngit clone git@github.com:dsx-ai-factory/infra-controller.git\ncd infra-controller\nmake bootstrap          # or: ./scripts/setup-build-host.sh\n```\n\n`make bootstrap` runs `scripts/setup-build-host.sh`. In one idempotent step it does what the manual steps do:\n\n1. **System packages** via apt: compilers (`build-essential`), `mkosi`, `docker.io`, `docker-buildx`, `sccache` (a compile cache), `protobuf-compiler`, assorted `-dev` libraries, `systemd-boot`, `systemd-ukify`, `jq`, `zip` and more.\n2. **direnv** shell hook, then `direnv allow` in the repo. direnv loads per-directory environment variables when you `cd` in.\n3. **rustup**, which provides `cargo`.\n4. **Git submodules**: `git submodule update --init --recursive`, which pulls the mkosi and iPXE sources the boot-artifact build needs.\n5. **Docker plus emulation**: `sudo systemctl enable --now docker.socket`, then a privileged `tonistiigi/binfmt` container that registers QEMU for other CPU architectures.\n6. **Cargo tooling**: `cargo install cargo-make cargo-cache`.\n7. **A sysctl drop-in**: `kernel.apparmor_restrict_unprivileged_userns=0` in `/etc/sysctl.d/99-userns.conf`. This relaxes Ubuntu's AppArmor restriction on unprivileged user namespaces.\n8. **Group membership**: `sudo usermod -aG docker $(id -un)`.\n\nThen **reboot (or log out and back in)**. Be precise about what takes effect when:\n\n- The **docker group** applies at your next login.\n- The **sysctl file** is applied at boot, or right away with `sudo sysctl --system`. Logging out alone doesn't apply it.\n- **binfmt registrations** live in the running kernel and are **lost on reboot** unless something re-registers them. So after the reboot the docs recommend, check `/proc/sys/fs/binfmt_misc/` and re-run the binfmt install if the entries are gone. Re-running `make bootstrap` also works, because it's idempotent.\n\nThe point is a repeatable build host: anyone can recreate it from a fresh Ubuntu VM, which matters when you need to rebuild images months later.",
+        "analogy": "It's like the induction checklist at a new workshop: get your badge, collect your tools, sign the safety form. Some items work immediately, like tools in hand. Some only work after the badge system syncs overnight, like group membership at next login. And some, like a whiteboard note, are wiped every night (binfmt state at reboot). The analogy fails in one way: a workshop checklist is done once, but you can re-run the bootstrap any time.",
+        "workedExample": {
+          "title": "Bootstrap a fresh Ubuntu 24.04 VM and confirm it worked",
+          "steps": [
+            {
+              "subgoal": "Check the host qualifies",
+              "detail": "```sh\n. /etc/os-release && echo \"$VERSION_ID\"    # want 24.04\ndf -h .                                    # want >= 150G available\ngit --version && make --version | head -1\n```"
+            },
+            {
+              "subgoal": "Run the bootstrap",
+              "detail": "```sh\ngit clone git@github.com:dsx-ai-factory/infra-controller.git\ncd infra-controller\nmake bootstrap\n```\nIt prompts for sudo where it needs root."
+            },
+            {
+              "subgoal": "Reboot so group and sysctl changes apply",
+              "detail": "```sh\nsudo reboot\n```\nA reboot covers both the new login (group) and the boot-time sysctl load. Logging out and back in only covers the group. In that case, also run `sudo sysctl --system`."
+            },
+            {
+              "subgoal": "Verify each piece after reboot",
+              "detail": "```sh\nid -nG | tr ' ' '\\n' | grep -x docker          # in the docker group?\ndocker ps                                       # works without sudo?\nsysctl -n kernel.apparmor_restrict_unprivileged_userns   # want 0\ncargo make --version && docker buildx version\ncd infra-controller && git submodule status     # a leading '-' means not initialised\nls /proc/sys/fs/binfmt_misc/                    # expect qemu-* entries\n```"
+            },
+            {
+              "subgoal": "Re-register emulation if the reboot wiped it",
+              "detail": "If there are no `qemu-*` files, re-run the pinned install from the manual (or `make bootstrap` again):\n```sh\nsudo docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install all\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Finish this post-bootstrap check script for an x86_64 build host. Fill each blank with a single word or filename.",
+          "partialSolution": "#!/usr/bin/env bash\nset -u\ncommand -v cargo-make >/dev/null && echo \"ok cargo-make\" || echo \"MISSING cargo-make\"\nid -nG | grep -qw ___ && echo \"ok docker group\" || echo \"MISSING docker group: log in again\"\n[ \"$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)\" = \"0\" ] && echo \"ok userns\" || echo \"userns restricted: run sudo sysctl --system\"\n[ -e /proc/sys/fs/binfmt_misc/___ ] && echo \"ok arm64 emulation\" || echo \"MISSING arm64 emulation: re-run the binfmt install\"",
+          "answer": "The first blank is `docker`, the group name. The second is `qemu-aarch64`, the binfmt_misc entry that tonistiigi/binfmt registers for arm64 binaries on an x86_64 host."
+        },
+        "independentProblem": {
+          "prompt": "Straight after `make bootstrap` finishes, without logging out, a colleague runs `docker ps` and gets `permission denied while trying to connect to the Docker daemon socket`. They also see that `sysctl -n kernel.apparmor_restrict_unprivileged_userns` still prints `1`. Explain both symptoms and the quickest fix for each that doesn't require re-running the bootstrap.",
+          "hints": [
+            "Ask yourself when Linux reads a user's group list, and when files in `/etc/sysctl.d` are read.",
+            "One is fixed by a new login session. The other is fixed by a command that reloads all sysctl config files.",
+            "Log out and back in (or reboot) for the group. Run `sudo sysctl --system` (or reboot) for the sysctl."
+          ],
+          "answer": "The shell's group list was set at login, before `usermod -aG docker` ran, so the session isn't in `docker` yet. Fix: log out and back in, or reboot. The sysctl change was only written to `/etc/sysctl.d/99-userns.conf`, and those files are applied at boot or by `sudo sysctl --system`. Fix: run `sudo sysctl --system`. A single reboot fixes both, but then you must check that the binfmt registrations are still present and re-run the install if not."
+        },
+        "selfExplanation": "Why is an idempotent, scripted bootstrap better for a team than a wiki page of manual steps, especially for a build that has to be repeated for every release?",
+        "checks": [
+          {
+            "question": "You only have a MacBook with Docker Desktop. What's the supported way to build a NICo image locally?",
+            "options": [
+              "Run `make bootstrap` on macOS, then `make images`",
+              "Use `make images-dev` through the Linux Docker daemon",
+              "Install Ubuntu packages with Homebrew and run `scripts/setup-build-host.sh`",
+              "Building NICo on a Mac isn't possible at all"
+            ],
+            "answer": "Use `make images-dev` through the Linux Docker daemon",
+            "explanation": "The docs say the bootstrap doesn't run on macOS and point to the local development service workflow, which needs only Git, Make and a Docker client connected to a Linux daemon. The full stack build needs an Ubuntu 24.04 host or VM."
+          },
+          {
+            "question": "After rebooting a freshly bootstrapped host, `ls /proc/sys/fs/binfmt_misc/` shows only `register` and `status`. What happened?",
+            "options": [
+              "The bootstrap failed and must be debugged from scratch",
+              "binfmt registrations are runtime kernel state and were lost at reboot. Re-run the binfmt install (or `make bootstrap`).",
+              "The userns sysctl disabled QEMU",
+              "Docker deletes binfmt entries when it starts"
+            ],
+            "answer": "binfmt registrations are runtime kernel state and were lost at reboot. Re-run the binfmt install (or `make bootstrap`).",
+            "explanation": "The `tonistiigi/binfmt --install all` registrations aren't persistent unless something like binfmt-support or `/etc/binfmt.d` entries re-registers them at boot. That's expected, not a failure. Re-running the idempotent bootstrap or the single install command restores them."
+          },
+          {
+            "question": "Which two Git submodules does the bootstrap pull for the boot-artifact build?",
+            "options": [],
+            "answer": "mkosi and iPXE",
+            "explanation": "The bootstrap description lists 'the mkosi/ipxe git submodules', fetched by `git submodule update --init --recursive`."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "concept": "container-registry",
+        "prequestions": [
+          {
+            "question": "In the image reference `localhost:5000/nico:latest`, which part says *which server* the image lives on?",
+            "answer": "`localhost:5000`. It's the registry host and port. `nico` is the repository and `latest` is the tag."
+          },
+          {
+            "question": "After `docker build -t nico .`, can a Kubernetes node on another machine run the image `nico`?",
+            "answer": "No. The image only exists in your local Docker daemon's image store. It has to be pushed to a registry the node can reach."
+          }
+        ],
+        "explanation": "A **container registry** is an HTTP server that stores and serves container images. Docker Hub, NGC and a self-hosted `registry:2` container all speak the same OCI Distribution API, whose paths start with `/v2/`.\n\nThe parts of an image reference, `host[:port]/path/name:tag`:\n\n- **Registry host**: `localhost:5000`, `my-registry.example.com`. If you leave it out, Docker assumes Docker Hub.\n- **Repository path**: `nico`, or `nico/nico-rest-api` when the registry setting includes a path prefix.\n- **Tag**: a movable, human-friendly label such as `latest` or `v1.0.0`.\n- **Digest**: `@sha256:...`, an immutable content hash. The NICo bootstrap pins `tonistiigi/binfmt` by digest for exactly this reason: a tag can be repointed, a digest can't.\n\n`docker push` uploads an image's layers and manifest. `docker pull` downloads them. Layers are deduplicated, so pushing a second image that shares a base sends only the new layers.\n\n**How NICo uses registries**\n\n- `make images` pushes to `localhost:5000` by default. If you keep that default, the Makefile starts a local registry container named `nico-build-registry`.\n- To publish elsewhere, set `IMAGE_REGISTRY` and usually `IMAGE_TAG`, and **authenticate Docker to that registry first** (`docker login my-registry.example.com`):\n  ```sh\n  make images IMAGE_REGISTRY=my-registry.example.com/nico IMAGE_TAG=v1.0.0\n  ```\n- `make images-dev` doesn't push at all, and `IMAGE_REGISTRY` has no effect on it.\n- At deploy time, `setup.sh` reads `NICO_IMAGE_REGISTRY`. Preflight checks it has **no URL scheme** (no `https://`) and that the registry responds to an HTTPS probe. The cluster nodes need network access to it.\n\nThere's a catch with `localhost:5000`. It's \"localhost\" only from the build machine's point of view. A Kubernetes node that pulls `localhost:5000/nico` looks for a registry on *itself*. For a real deployment, push to a registry the cluster can reach.\n\nDocker allows plain-HTTP registries on `127.0.0.0/8` by default, which is why a local `registry:2` works without TLS.",
+        "analogy": "A registry is like a parcel locker bank. `push` drops a parcel in, and `pull` collects it with the locker address (host/repo:tag). The tag is the name label on the locker door, which staff can move to another parcel. The digest is the tamper-evident seal number on the parcel itself. The analogy fails on one point: locker parcels are single objects, while registry images share layers, so 'sending' a parcel often moves only the bytes the locker doesn't already have.",
+        "workedExample": {
+          "title": "Run a local registry and push to it",
+          "steps": [
+            {
+              "subgoal": "Start a registry",
+              "detail": "```sh\ndocker run -d --name lab-registry -p 5000:5000 registry:2\ncurl -s http://localhost:5000/v2/          # {} means the API is up\n```"
+            },
+            {
+              "subgoal": "Tag a local image with the registry's address",
+              "detail": "```sh\ndocker pull alpine:latest\ndocker tag alpine:latest localhost:5000/lab/alpine:v1\n```\nTagging only adds a name. It doesn't copy anything yet."
+            },
+            {
+              "subgoal": "Push it",
+              "detail": "```sh\ndocker push localhost:5000/lab/alpine:v1\n```\nNote the `digest: sha256:...` line it prints."
+            },
+            {
+              "subgoal": "Browse the registry API",
+              "detail": "```sh\ncurl -s http://localhost:5000/v2/_catalog            # {\"repositories\":[\"lab/alpine\"]}\ncurl -s http://localhost:5000/v2/lab/alpine/tags/list  # {\"name\":\"lab/alpine\",\"tags\":[\"v1\"]}\n```"
+            },
+            {
+              "subgoal": "Pull it back by tag and by digest",
+              "detail": "```sh\ndocker image rm localhost:5000/lab/alpine:v1\ndocker pull localhost:5000/lab/alpine:v1\ndocker pull localhost:5000/lab/alpine@sha256:<digest-from-push>\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Publish your local `myapp:dev` image to the lab registry as repository `team/myapp`, tag `0.1`, then list its tags. Fill in the blanks.",
+          "partialSolution": "docker tag myapp:dev ___/team/myapp:0.1\ndocker ___ localhost:5000/team/myapp:0.1\ncurl -s http://localhost:5000/v2/team/myapp/tags/list",
+          "answer": "The first blank is `localhost:5000` (the registry host:port prefix that tells Docker where to push). The second is `push`."
+        },
+        "independentProblem": {
+          "prompt": "You run `make images IMAGE_REGISTRY=my-registry.example.com/nico IMAGE_TAG=v1.0.0`. Write the full image reference for the NICo REST API image, and the command you must run before the build so the push succeeds. Then say what's wrong with setting `NICO_IMAGE_REGISTRY=https://my-registry.example.com/nico` for `setup.sh`.",
+          "hints": [
+            "The verification loop in the docs builds references as `${IMAGE_REGISTRY}/${image}:${IMAGE_TAG}`.",
+            "The REST API image is named `nico-rest-api`. Pushing to a private registry needs credentials.",
+            "Preflight checks that the registry value has no URL scheme."
+          ],
+          "answer": "The reference is `my-registry.example.com/nico/nico-rest-api:v1.0.0`. Before building, run `docker login my-registry.example.com` (or the equivalent for your registry). `NICO_IMAGE_REGISTRY` must not include `https://`: image references never have a scheme, and preflight explicitly checks for this. Use `my-registry.example.com/nico`."
+        },
+        "selfExplanation": "Why does pushing to the default `localhost:5000` work fine for checking a build but fail as the registry for a multi-node Kubernetes deployment?",
+        "checks": [
+          {
+            "question": "What does the NICo Makefile do when you build with the default registry setting?",
+            "options": [
+              "Pushes to Docker Hub under your username",
+              "Starts a local registry named `nico-build-registry` and pushes to `localhost:5000`",
+              "Keeps images only in the local daemon and never pushes",
+              "Asks for an NGC API key"
+            ],
+            "answer": "Starts a local registry named `nico-build-registry` and pushes to `localhost:5000`",
+            "explanation": "The docs say images are pushed to `localhost:5000` by default and the Makefile starts `nico-build-registry` for that default. Not pushing at all is the behaviour of `make images-dev`, not `make images`."
+          },
+          {
+            "question": "Why does the NICo bootstrap reference `tonistiigi/binfmt@sha256:400a...` instead of `tonistiigi/binfmt:latest`?",
+            "options": [
+              "Digests download faster than tags",
+              "A digest is immutable, so every build host runs exactly the same image",
+              "Tags don't work with `--privileged`",
+              "Docker Hub requires digests for privileged images"
+            ],
+            "answer": "A digest is immutable, so every build host runs exactly the same image",
+            "explanation": "Tags can be moved to new content at any time, and digests can't. Pinning makes a privileged, kernel-modifying step reproducible. Speed and privilege mode have nothing to do with it."
+          },
+          {
+            "question": "Which variable changes where `make images-dev` writes its output image?",
+            "options": [
+              "`IMAGE_REGISTRY`",
+              "`DEV_IMAGE`",
+              "`NICO_ARCHES`",
+              "`BUILDX_BUILDER`"
+            ],
+            "answer": "`DEV_IMAGE`",
+            "explanation": "`make images-dev` doesn't push, and the docs say `IMAGE_REGISTRY` doesn't affect it. The output reference is `DEV_IMAGE`, which defaults to `nico-dev-$(DEV_TARGET):$(IMAGE_TAG)`."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md",
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "docker-buildkit-and-buildx",
+        "prequestions": [
+          {
+            "question": "You build image `base:1` and then build a second Dockerfile that starts `FROM base:1`, without pushing anything. Will the second build always find `base:1`?",
+            "answer": "Not always. It depends on which builder runs the second build. A builder with its own separate store, such as a `docker-container` Buildx builder, can't see images in your daemon and will try to pull `base:1` from Docker Hub."
+          }
+        ],
+        "explanation": "**BuildKit** is the engine that executes Dockerfiles. It builds a graph of stages, runs independent stages in parallel and caches each step. It also supports features such as `RUN --mount=type=cache`, a cache directory that persists between builds; Rust Dockerfiles commonly use it to keep Cargo caches warm. (The NICo docs say only that repeated `images-dev` builds reuse Docker layers and Cargo caches, kept separate per architecture. They don't say which mechanism the recipes use.) **Buildx** is the Docker CLI plugin that drives BuildKit: `docker buildx build`, `docker buildx ls`, `docker buildx imagetools`. On current Docker Engine, plain `docker build` is an alias for Buildx.\n\nTwo concepts decide *where* a build runs:\n\n- **Docker context**: which Docker daemon the CLI talks to (`docker context ls`, `docker context show`). You can select one per command with the `DOCKER_CONTEXT` environment variable.\n- **Buildx builder**: which BuildKit instance runs the build (`docker buildx ls`). You can select one with `BUILDX_BUILDER`. Every context has a built-in builder using the **`docker` driver**, named after the context (`default`, or `desktop-linux` on Docker Desktop). It builds straight into that daemon's image store. You can also create builders with the **`docker-container` driver**. These run BuildKit in a container with its own cache and store. Results don't appear in `docker image ls` unless you `--load` them or `--push` them to a registry.\n\nThe builder also determines **which platforms** you can build. `docker buildx ls` lists them. Non-native platforms appear only when emulation is set up (next lessons).\n\n**Why NICo pins both.** `make images-dev` builds a chain: compiler image → runtime image → service image, where later builds use earlier ones by name. The recipe captures the active Docker context *once* and sets it in both `DOCKER_CONTEXT` and `BUILDX_BUILDER`. This keeps the architecture check and every build on that context's built-in builder and image store, even when Docker aliases builds to Buildx. Custom Buildx builders are **not** used, so the intermediate images stay visible to the next build without a registry. If one step ran on a `docker-container` builder, the service build would fail to find `nico-dev-build`.\n\nThe full `make images` flow also relies on the builder: 'building the non-native architecture uses the platforms configured on the active Docker Buildx builder.'",
+        "analogy": "The Docker context is which kitchen you're in, and the builder is which cook you hand the recipe to. The built-in cook works off the kitchen's shared shelves (the daemon image store). A `docker-container` cook has a private pantry, so dishes they make don't appear on the shared shelves unless they're plated out (`--load`) or shipped (`--push`). The analogy is imperfect: real cooks can walk over and look at shared shelves, but an isolated builder genuinely can't see the daemon's images.",
+        "workedExample": {
+          "title": "See builders, then watch an isolated builder lose an intermediate image",
+          "steps": [
+            {
+              "subgoal": "Inspect contexts and builders",
+              "detail": "```sh\ndocker context show        # e.g. default or desktop-linux\ndocker buildx ls           # the built-in builder has DRIVER docker; note its PLATFORMS\n```"
+            },
+            {
+              "subgoal": "Build a base image with the built-in builder",
+              "detail": "```sh\nmkdir -p bk-demo && cd bk-demo\nprintf 'FROM alpine:latest\\nRUN echo base > /base.txt\\n' > Dockerfile.base\nprintf 'FROM lab-base:1\\nRUN cat /base.txt\\n' > Dockerfile.app\ndocker build -f Dockerfile.base -t lab-base:1 .\ndocker image ls lab-base\n```"
+            },
+            {
+              "subgoal": "Chain a second build on the same builder",
+              "detail": "```sh\ndocker build -f Dockerfile.app -t lab-app:1 .   # succeeds: lab-base:1 is in the daemon store\n```"
+            },
+            {
+              "subgoal": "Try the chain on an isolated builder",
+              "detail": "```sh\ndocker buildx create --name iso --driver docker-container\ndocker buildx build --builder iso -f Dockerfile.app -t lab-app:2 .\n```\nThis fails while resolving `docker.io/library/lab-base:1`, because the isolated BuildKit can't see the daemon's images and looks on Docker Hub instead."
+            },
+            {
+              "subgoal": "Clean up",
+              "detail": "```sh\ndocker buildx rm iso\n```\nThis is the problem NICo's recipe avoids by pinning `DOCKER_CONTEXT` and `BUILDX_BUILDER` to the built-in builder."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Write the shell lines that pin every later `docker` and `docker buildx` command in a script to the current context and its built-in builder, the way the NICo recipe does.",
+          "partialSolution": "ctx=\"$(docker context ___)\"\nexport DOCKER_CONTEXT=\"$ctx\"\nexport BUILDX_BUILDER=\"___\"",
+          "answer": "The first blank is `show` (`docker context show` prints the active context name). The second is `$ctx`: the built-in builder of a context has the same name as the context, so `BUILDX_BUILDER` gets the captured value."
+        },
+        "independentProblem": {
+          "prompt": "A teammate set `docker buildx use mybuilder` (a `docker-container` builder) months ago and forgot. Their own script builds `nico-dev-build:latest` and then a service image `FROM nico-dev-build:latest`, and it fails with 'pull access denied for nico-dev-build'. Explain the failure and give two ways to fix it.",
+          "hints": [
+            "Where does an image built by a `docker-container` builder go if you don't add an output flag?",
+            "One fix changes which builder runs the builds. The other makes the first result visible to the second build.",
+            "Switch back to the context's built-in builder (`docker buildx use default`, or set `BUILDX_BUILDER`), or add `--load` (or push to a registry) after the first build."
+          ],
+          "answer": "The `docker-container` builder keeps results in its own store, so `nico-dev-build:latest` never reached the daemon. The second build then tried to pull it from Docker Hub. Fix 1: run both builds on the built-in builder (`docker buildx use default`, or `BUILDX_BUILDER=<context name>` as NICo's recipe does). Fix 2: `--load` the first image into the daemon, or push it to a registry and reference it there. NICo's `make images-dev` pins the context and builder for you and doesn't use custom builders, so it isn't affected by this setting."
+        },
+        "selfExplanation": "Why does capturing the Docker context *once* at the start of a recipe matter, instead of letting each command use whatever context is active when it runs?",
+        "checks": [
+          {
+            "question": "Which statement about BuildKit and Buildx is right?",
+            "options": [
+              "Buildx is a separate container runtime that replaces Docker",
+              "BuildKit is the build engine, and Buildx is the CLI front end that drives it",
+              "BuildKit is only used for multi-arch builds",
+              "Buildx and BuildKit are two names for the same binary"
+            ],
+            "answer": "BuildKit is the build engine, and Buildx is the CLI front end that drives it",
+            "explanation": "BuildKit executes builds. Buildx is the `docker buildx` plugin that selects builders and starts builds. Neither replaces the container runtime, and BuildKit handles single-arch builds too."
+          },
+          {
+            "question": "Why does `make images-dev` avoid custom Buildx builders?",
+            "options": [
+              "Custom builders can't build Rust",
+              "Custom builders are slower to start",
+              "Its later builds use earlier intermediate images by name, so they must share the context's built-in builder and image store without a registry",
+              "Custom builders always enable QEMU, which `images-dev` forbids"
+            ],
+            "answer": "Its later builds use earlier intermediate images by name, so they must share the context's built-in builder and image store without a registry",
+            "explanation": "The docs say pinning to the built-in builder keeps intermediate images available to the following service build without a registry. Language support and start-up time aren't the issue, and custom builders don't enable QEMU automatically."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "concept": "building-local-dev-images",
+        "prequestions": [
+          {
+            "question": "Guess: does `make images-dev DEV_TARGET=dhcp` push anything to a registry or deploy anything?",
+            "answer": "No. It builds three images in the selected Docker daemon (compiler, common runtime and `nico-dev-dhcp:latest`), and that's all. It doesn't push, create a registry, load into kind or deploy."
+          },
+          {
+            "question": "On an Apple-silicon Mac with Docker Desktop, which platform will `make images-dev` build for?",
+            "answer": "`linux/arm64`. It reads the daemon's architecture from `docker info` and builds natively."
+          }
+        ],
+        "explanation": "`make images-dev` builds **one native NICo Core development service image** using the same recipes as the Tilt dev environment. It's the fastest way to build and test a single service. You need only Git, Make and a Docker client connected to a **Linux AMD64 or ARM64 daemon that supports BuildKit**. The Rust compiler and runtime dependencies are built inside containers, so you don't need rustup on the host. That's why this works from a Mac.\n\n```sh\nmake images-dev DEV_TARGET=dhcp\n```\n\nThis produces three images in the daemon: a compiler image (`nico-dev-build:latest`), a common runtime image (`nico-dev-runtime:latest`) and the service (`nico-dev-dhcp:latest`). Repeated builds reuse Docker layers and Cargo caches. The caches are kept separate per architecture.\n\n**Architecture.** The target reads `docker info` and maps `amd64`/`x86_64` → `linux/amd64` and `arm64`/`aarch64` → `linux/arm64`. Any other OS or architecture is rejected before building. It **ignores `NICO_ARCHES`** and **never enables emulation**. It pins the context and the built-in builder as described in the previous lesson.\n\n**Variables** (`NAME=value` on the make command line):\n\n| Variable | Default |\n|---|---|\n| `DEV_TARGET` | `api`. Exactly one of `api`, `bmc-proxy`, `dhcp`, `machine-a-tron`, `ssh-console`, `mat-protocol-gateway`, `nico-postgres-exporter` |\n| `IMAGE_TAG` | `latest` |\n| `DEV_IMAGE` | `nico-dev-$(DEV_TARGET):$(IMAGE_TAG)` |\n| `DEV_BUILD_CONTAINER` | `nico-dev-build:$(IMAGE_TAG)` |\n| `DEV_RUNTIME_CONTAINER` | `nico-dev-runtime:$(IMAGE_TAG)` |\n\nExplicit references win over the defaults. Changing `IMAGE_TAG` doesn't rewrite a reference you set yourself. `IMAGE_REGISTRY` does nothing here.\n\n**Smoke test for DHCP.** The DHCP image packages the Kea DHCPv4 and DHCPv6 servers with the NICo hook at `/usr/lib/kea/hooks/libdhcp.so`, plus `iproute2` and `curl`. Check it with:\n\n```sh\ndev/docker/tests/smoke_dhcp_image.sh nico-dev-dhcp:latest\n```\n\nIt takes exactly one image reference (pass your `DEV_IMAGE` if you overrode it). Wrong arguments exit with status 2. It runs a throwaway `--network none` container, checks `ip`, `ss` and `curl`, starts each Kea server with the hook, verifies UDP listeners on IPv4 port 67 and IPv6 port 547, prints a success line per address family, and returns nonzero on any failure. It doesn't test lease allocation.\n\nThese dev images are separate from the full `make images` stack build.",
+        "analogy": "It's like a single test bake in your own oven before the big catering order. You use the same recipe as the catering kitchen, in your own oven only, with nothing delivered. The analogy breaks down slightly: unlike a test bake, the dev build also makes its own 'oven' first (the compiler and runtime images) and then reuses it next time.",
+        "workedExample": {
+          "title": "Build and smoke-test the DHCP dev image",
+          "steps": [
+            {
+              "subgoal": "Confirm the daemon is Linux and a supported architecture",
+              "detail": "```sh\ndocker info --format '{{.OSType}} {{.Architecture}}'   # e.g. linux x86_64, or linux aarch64\n```"
+            },
+            {
+              "subgoal": "Get the repo",
+              "detail": "```sh\ngit clone git@github.com:dsx-ai-factory/infra-controller.git\ncd infra-controller\nmake help        # lists the targets, including images-dev\n```"
+            },
+            {
+              "subgoal": "Build the DHCP service",
+              "detail": "```sh\nmake images-dev DEV_TARGET=dhcp\n```\nThe first run is slow because the Cargo caches are cold. Later runs reuse layers and caches."
+            },
+            {
+              "subgoal": "See what was produced",
+              "detail": "```sh\ndocker image ls | grep -E 'nico-dev-(build|runtime|dhcp)'\n```\nThere are three images, all tagged `latest`. Nothing was pushed."
+            },
+            {
+              "subgoal": "Run the smoke test and check the exit status",
+              "detail": "```sh\ndev/docker/tests/smoke_dhcp_image.sh nico-dev-dhcp:latest; echo \"exit=$?\"\n```\nExpect one success line for IPv4 and one for IPv6, then `exit=0`. Running the script with no argument prints usage and exits with 2."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Build the DHCP image tagged `pr42` instead of `latest`, then smoke-test exactly that image. Fill in the blanks.",
+          "partialSolution": "make images-dev DEV_TARGET=___ IMAGE_TAG=pr42\ndev/docker/tests/smoke_dhcp_image.sh ___",
+          "answer": "The first blank is `dhcp`. The second is `nico-dev-dhcp:pr42`, because with no explicit `DEV_IMAGE` the output is `nico-dev-$(DEV_TARGET):$(IMAGE_TAG)`."
+        },
+        "independentProblem": {
+          "prompt": "Predict the outcome of each command. (a) `make images-dev DEV_TARGET=bmc-proxy IMAGE_TAG=t1 DEV_IMAGE=lab/bmcp:x`: list the three image references it builds. (b) `make images-dev DEV_TARGET=dns`. (c) `make images-dev NICO_ARCHES=arm64` on an x86_64 daemon.",
+          "hints": [
+            "Explicit references beat defaults, and `IMAGE_TAG` only feeds the defaults you didn't override.",
+            "Check `DEV_TARGET` against its allowed list.",
+            "Ask whether `images-dev` reads `NICO_ARCHES` at all, and whether it ever emulates."
+          ],
+          "answer": "(a) `nico-dev-build:t1`, `nico-dev-runtime:t1` and `lab/bmcp:x`. The explicit `DEV_IMAGE` isn't rewritten by `IMAGE_TAG`. (b) It's rejected, because `dns` isn't one of the allowed `DEV_TARGET` values. (c) It builds the default `api` service for `linux/amd64`, the daemon's native architecture. `images-dev` ignores `NICO_ARCHES` and doesn't use emulation."
+        },
+        "selfExplanation": "Why is it useful for the dev image workflow to refuse emulation and always build for the daemon's own architecture?",
+        "checks": [
+          {
+            "question": "You ran `make images-dev DEV_TARGET=dhcp DEV_IMAGE=me/dhcp:try`. Which smoke-test command is correct?",
+            "options": [
+              "`dev/docker/tests/smoke_dhcp_image.sh`",
+              "`dev/docker/tests/smoke_dhcp_image.sh nico-dev-dhcp:latest`",
+              "`dev/docker/tests/smoke_dhcp_image.sh me/dhcp:try`",
+              "`dev/docker/tests/smoke_dhcp_image.sh me/dhcp:try nico-dev-dhcp:latest`"
+            ],
+            "answer": "`dev/docker/tests/smoke_dhcp_image.sh me/dhcp:try`",
+            "explanation": "The script needs exactly one image reference available in the daemon. Use the value of `DEV_IMAGE` if you overrode it. No argument or two arguments print usage and exit with 2, and `nico-dev-dhcp:latest` wasn't built in this run."
+          },
+          {
+            "question": "What does a passing DHCP smoke test prove?",
+            "options": [
+              "Hosts can get leases from the DHCP service",
+              "The image's tools are present, the Kea servers start with the NICo hook, and they listen on UDP 67 (IPv4) and 547 (IPv6)",
+              "IPv6 is enabled in the deployment",
+              "The image was pushed to localhost:5000"
+            ],
+            "answer": "The image's tools are present, the Kea servers start with the NICo hook, and they listen on UDP 67 (IPv4) and 547 (IPv6)",
+            "explanation": "The docs say lease allocation and instance connectivity need separate lifecycle validation, and that building the DHCPv6 binary doesn't enable IPv6 in a deployment. Nothing is pushed."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "concept": "cross-architecture-emulation",
+        "prequestions": [
+          {
+            "question": "On an x86_64 Linux laptop with no special setup, what happens when you run `docker run --rm --platform linux/arm64 alpine uname -m`?",
+            "answer": "It typically fails with an `exec format error`, because the kernel can't execute arm64 machine code. With QEMU registered through binfmt_misc, it prints `aarch64`."
+          }
+        ],
+        "explanation": "In Chapter 1 you saw that amd64 and arm64 CPUs run different machine code. A binary built for one won't execute on the other. NICo needs images for both, because control-plane nodes can be either and DPUs are arm64.\n\n**binfmt_misc** is a Linux kernel feature that says 'when asked to execute a file whose header looks like X, run it with interpreter Y instead'. **QEMU user-mode emulation** (`qemu-aarch64`, `qemu-x86_64`, ...) is such an interpreter. It translates foreign instructions to native ones as the program runs. Together they make foreign binaries run transparently. That includes inside containers, which is what lets Docker build and run arm64 images on an x86 host.\n\nThe registrations appear as files under `/proc/sys/fs/binfmt_misc/`. NICo's bootstrap creates them with:\n\n```sh\nsudo docker run --privileged --rm tonistiigi/binfmt@sha256:400a... --install all\n```\n\nFacts to keep straight:\n\n- **It's runtime kernel state.** Reboots wipe it unless something re-registers it, such as qemu-user-static with binfmt-support, or `/etc/binfmt.d` entries. After a reboot, check the directory and re-run the install if needed.\n- **It's slow.** Every instruction is translated, and compiling Rust under emulation is many times slower than compiling natively.\n- **It's per host.** Docker Desktop on macOS ships emulation inside its Linux VM, so you don't run this there.\n\n**How NICo uses it**\n\n- `make images` / `make images-all` build both architectures by default. The non-native one 'uses the platforms configured on the active Docker Buildx builder', which in practice means emulation on a single-architecture host.\n- The **`-arm` targets** (`images-arm`, `images-all-arm`, `images-bfb-arm`, `images-machine-validation-arm`) need an ARM64 Docker host and stop before building on any other architecture. They **don't use QEMU or binfmt** because everything is native.\n- `make images-dev` never enables emulation.",
+        "analogy": "binfmt_misc plus QEMU is like a phone line that automatically patches in a live interpreter whenever the caller speaks a language you don't. You keep talking normally and it just works, only slower. The analogy is imperfect in one way: human interpreters remember the arrangement, but this one is forgotten every time the phone (kernel) restarts.",
+        "workedExample": {
+          "title": "Turn emulation on and look at what it registers (Linux)",
+          "steps": [
+            {
+              "subgoal": "Check the current state",
+              "detail": "```sh\nuname -m                                   # x86_64\nls /proc/sys/fs/binfmt_misc/               # maybe only 'register' and 'status'\ndocker run --rm --platform linux/arm64 alpine uname -m   # exec format error if not set up\n```"
+            },
+            {
+              "subgoal": "Register QEMU interpreters",
+              "detail": "```sh\nsudo docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install all\n```"
+            },
+            {
+              "subgoal": "Inspect a registration",
+              "detail": "```sh\nls /proc/sys/fs/binfmt_misc/ | grep qemu\ncat /proc/sys/fs/binfmt_misc/qemu-aarch64   # shows 'enabled', the interpreter path, flags and the ELF magic it matches\n```"
+            },
+            {
+              "subgoal": "Run a foreign image",
+              "detail": "```sh\ndocker run --rm --platform linux/arm64 alpine uname -m   # aarch64\ndocker buildx ls                                          # linux/arm64 now appears in the builder's PLATFORMS\n```"
+            },
+            {
+              "subgoal": "Feel the cost",
+              "detail": "```sh\ntime docker run --rm --platform linux/amd64 alpine sh -c 'i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done'\ntime docker run --rm --platform linux/arm64 alpine sh -c 'i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done'\n```\nThe emulated run is noticeably slower. Scale that up to a full Rust build."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Finish this check-and-repair snippet for an x86_64 build host after a reboot.",
+          "partialSolution": "if [ ! -e /proc/sys/fs/binfmt_misc/___ ]; then\n  sudo docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install ___\nfi\ndocker run --rm --platform linux/arm64 alpine uname -m",
+          "answer": "The first blank is `qemu-aarch64` (the arm64 interpreter entry). The second is `all`, matching the bootstrap's `--install all`. The last line should print `aarch64`."
+        },
+        "independentProblem": {
+          "prompt": "Two engineers need the full arm64 stack. Alice has an x86_64 Ubuntu build host and runs `make images-all-arm`. Bob has an ARM64 Ubuntu build host and runs the same target. Predict what happens for each, and say whether QEMU is involved.",
+          "hints": [
+            "Read what the `-arm` targets require of the Docker host.",
+            "Do the `-arm` targets ever fall back to emulation?",
+            "One build stops before building. The other builds natively with no binfmt use."
+          ],
+          "answer": "Alice's build stops before building anything, because the `-arm` targets require an ARM64 Docker host and refuse other architectures. Bob's build runs natively and produces the 13 ARM64 outputs. No QEMU or binfmt is involved in either case. If Alice wants arm64 images, she would use the non-`-arm` targets (for example `make images-all`), which build the non-native architecture through the builder's emulated platforms."
+        },
+        "selfExplanation": "Why do you think NICo offers separate native `-arm` targets even though emulation can already build arm64 images on an x86 host?",
+        "checks": [
+          {
+            "question": "After a reboot, `docker run --platform linux/arm64 alpine uname -m` fails with `exec format error`, though it worked yesterday. Most likely cause?",
+            "options": [
+              "The alpine image lost its arm64 variant",
+              "The binfmt_misc QEMU registrations were lost at reboot",
+              "The docker group membership expired",
+              "The userns sysctl reset"
+            ],
+            "answer": "The binfmt_misc QEMU registrations were lost at reboot",
+            "explanation": "binfmt registrations from `tonistiigi/binfmt --install` are kernel runtime state. Check `/proc/sys/fs/binfmt_misc/` and re-run the install. Group membership would give a permission error, not exec format, and the alpine image still has its arm64 variant."
+          },
+          {
+            "question": "Which target never uses emulation, whatever host it runs on?",
+            "options": [
+              "`make images`",
+              "`make images-all`",
+              "`make images-dev`",
+              "`make images-machine-lifecycle`"
+            ],
+            "answer": "`make images-dev`",
+            "explanation": "`images-dev` always builds for the daemon's native architecture and doesn't enable cross-architecture emulation. The `-arm` targets also avoid it. `images` and `images-all` build both architectures by default, so one of them is emulated on a single-architecture host."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "concept": "multi-architecture-image-manifest",
+        "prequestions": [
+          {
+            "question": "`docker pull alpine:latest` on an Apple-silicon Mac and on an x86 Linux server: do both download the same image bytes?",
+            "answer": "No. The tag points to an index listing one image per platform, and each client pulls the entry matching its own architecture."
+          }
+        ],
+        "explanation": "A single-platform image is described by an **image manifest**: a JSON document listing a config blob and the layer blobs, all addressed by digest. A **multi-architecture image** adds one level above that: an **image index** (Docker calls it a *manifest list*). The index is a JSON document whose `manifests` array has one entry per image. Each entry has a digest and a `platform` (`os`, `architecture`, sometimes `variant`). A tag such as `nico:latest` points at the index. When you pull it, the client picks the entry matching its platform.\n\nIndexes can also contain non-runnable entries, for example BuildKit provenance attestations, whose platform is `unknown/unknown`. That's why NICo's verification loop keeps only `select(.os == \"linux\")` entries before comparing.\n\nUseful commands:\n\n```sh\ndocker buildx imagetools inspect alpine:latest          # human summary\ndocker buildx imagetools inspect --raw alpine:latest | jq .  # the raw index JSON\ndocker buildx imagetools create -t REPO:TAG SRC1 SRC2   # assemble an index from existing images\n```\n\n**How NICo does it.** Each architecture is built **separately**, producing `-amd64` and `-arm64` service tags (and architecture-specific Core base images). Then the bare multi-arch tag is assembled from them. The docs give the reason: this matches CI, and it's required for the REST Dockerfiles. A single combined Buildx invocation 'would reuse one builder stage and could copy an amd64 binary into the arm64 image'. That result is an image *labelled* arm64 that contains x86 code, which only fails when it runs on the wrong machine.\n\nA single-architecture build still produces a **valid tag** whose index has just one entry. That's why `NICO_ARCHES=amd64` works for deploy as long as your nodes are amd64.",
+        "analogy": "An image index is like a restaurant menu that lists the same dish in 'regular' and 'gluten-free' versions. You order 'the lasagne', and the kitchen gives you the version that fits you. It breaks down because the client chooses silently and strictly. If the menu has no version matching your platform, you get an error, not a substitute.",
+        "workedExample": {
+          "title": "Read an index, then assemble your own",
+          "steps": [
+            {
+              "subgoal": "Inspect a public multi-arch tag",
+              "detail": "```sh\ndocker buildx imagetools inspect alpine:latest\n```\nYou'll see `MediaType: application/vnd.oci.image.index.v1+json` (or a Docker manifest list) and one `Platform:` per entry."
+            },
+            {
+              "subgoal": "Extract the platforms the way NICo's loop does",
+              "detail": "```sh\ndocker buildx imagetools inspect --raw alpine:latest | \\\n  jq -r '[.manifests[].platform | select(.os == \"linux\") | \"\\(.os)/\\(.architecture)\"] | unique | sort | join(\",\")'\n```\nYou get a comma-separated list such as `linux/386,linux/amd64,linux/arm,...`."
+            },
+            {
+              "subgoal": "Push two single-arch images to a local registry",
+              "detail": "Use the `lab-registry` from the registry lesson.\n```sh\nfor a in amd64 arm64; do\n  docker pull --platform linux/$a alpine:latest\n  docker tag alpine:latest localhost:5000/demo:latest-$a\n  docker push localhost:5000/demo:latest-$a\ndone\n```\nIf your Docker uses the containerd image store, `docker push` may push the whole index. In that case, check with `imagetools inspect` that each `-<arch>` tag has the platform you expect."
+            },
+            {
+              "subgoal": "Assemble the bare tag",
+              "detail": "```sh\ndocker buildx imagetools create -t localhost:5000/demo:latest \\\n  localhost:5000/demo:latest-amd64 localhost:5000/demo:latest-arm64\ndocker buildx imagetools inspect localhost:5000/demo:latest\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the jq filter so it prints `linux/amd64,linux/arm64` for the `demo:latest` tag you assembled.",
+          "partialSolution": "docker buildx imagetools inspect --raw localhost:5000/demo:latest | \\\n  jq -r '[.___[].platform | select(.os == \"linux\") | \"\\(.os)/\\(.___)\"] | unique | sort | join(\",\")'",
+          "answer": "The first blank is `manifests` (the index's array of per-platform entries). The second is `architecture` (the field inside each entry's `platform` object)."
+        },
+        "independentProblem": {
+          "prompt": "A teammate 'optimises' a REST service build by replacing the two per-architecture builds with one `docker buildx build --platform linux/amd64,linux/arm64 ...`. The tag's index looks perfect, with both platforms listed, but the arm64 pods crash with `exec format error`. Explain what probably happened and how NICo's approach prevents it.",
+          "hints": [
+            "The index only records what each entry *claims*. It doesn't check the bytes inside.",
+            "Re-read the docs' reason for building each architecture separately.",
+            "A shared builder stage can produce one binary that gets copied into both platform images."
+          ],
+          "answer": "In a combined invocation, the REST Dockerfile's builder stage was reused, so the amd64 binary was copied into the arm64 image as well. The index correctly lists `linux/arm64`, but that image holds x86 code, so it fails with `exec format error` on arm64 nodes. NICo builds each architecture in its own invocation, producing `-amd64` and `-arm64` tags, and only then assembles the bare tag, so each image gets a binary built for its own platform."
+        },
+        "selfExplanation": "Why does the verification loop filter to `os == \"linux\"` entries before comparing platform lists, and what would go wrong without that filter?",
+        "checks": [
+          {
+            "question": "You build with `NICO_ARCHES=amd64`. What does the bare `nico:latest` tag look like?",
+            "options": [
+              "It's missing, because the bare tag is only created for two architectures",
+              "A valid tag whose index has one `linux/amd64` entry",
+              "Only `nico:latest-amd64` exists",
+              "An index with an empty arm64 placeholder"
+            ],
+            "answer": "A valid tag whose index has one `linux/amd64` entry",
+            "explanation": "The docs say a single-architecture build still produces a valid tag at `$(IMAGE_TAG)`, and the multi-arch manifest has one entry."
+          },
+          {
+            "question": "Why does NICo build amd64 and arm64 in separate invocations before assembling the tag?",
+            "options": [
+              "Registries reject indexes created in one push",
+              "A single combined Buildx invocation could reuse one builder stage and copy an amd64 binary into the arm64 image",
+              "Buildx can't build two platforms at once",
+              "To save disk space"
+            ],
+            "answer": "A single combined Buildx invocation could reuse one builder stage and copy an amd64 binary into the arm64 image",
+            "explanation": "That's the documented reason, and it also matches CI. Buildx *can* build several platforms in one invocation, which is exactly what causes the stage-reuse problem for the REST Dockerfiles."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "concept": "building-all-images",
+        "prequestions": [
+          {
+            "question": "How many images do you think `make images` publishes, and does it include the OS images that hosts network-boot?",
+            "answer": "11 images: NICo Core (`nico`) plus 10 REST service images. Boot artifacts and machine-validation come only with `make images-all`."
+          }
+        ],
+        "explanation": "Once the bootstrap has run, these top-level targets build and push the deployable images:\n\n| Command | Builds |\n|---|---|\n| `make images` | The 11-image deployable stack: NICo Core `nico` plus `nico-rest-api`, `nico-rest-workflow`, `nico-rest-site-manager`, `nico-rest-site-agent`, `nico-rest-db`, `nico-rest-cert-manager`, `nico-flow`, `nico-psm`, `nico-nsm`, `nico-mcp` |\n| `make images-arm` | That stack for ARM64, natively on an ARM64 host |\n| `make images-all` | The stack plus `machine-validation`, `boot-artifacts-x86_64` and `boot-artifacts-aarch64` (14 images) |\n| `make images-all-arm` | 13 native ARM64 outputs. Omits `boot-artifacts-x86_64` |\n\nThe individual targets they wrap are `images-core`, `images-rest`, `images-machine-validation`, `images-machine-validation-arm`, `images-boot-artifacts`, `images-bfb` and `images-bfb-arm` (`make help` lists them). `make images-machine-lifecycle` is a separate QA image that isn't part of `images-all`.\n\n**Where and what**: `IMAGE_REGISTRY` (default `localhost:5000`) and `IMAGE_TAG` (default `latest`). Log in to non-default registries first.\n\n**Which architectures** (default `amd64 arm64` for each group):\n\n- `NICO_ARCHES`: control-plane images (`images-base`, `images-core`, `images-rest`, `images-machine-validation`)\n- `BOOT_ARTIFACTS_ARCHES`: the x86 boot-artifact image\n- `DPU_ARCHES`: the DPU BFB image\n\n`images-arm` sets `NICO_ARCHES=arm64`. `images-all-arm` sets `NICO_ARCHES=arm64` and `DPU_ARCHES=arm64`. Values other than `amd64`/`arm64` fail fast. `images-machine-validation` requires `NICO_ARCHES` to include `amd64`, because its local-only `machine-validation-runner` intermediate is amd64 and depends on the amd64 Core runtime base. Use `images-machine-validation-arm` for native ARM64.\n\n```sh\nmake images-all NICO_ARCHES=amd64 DPU_ARCHES=arm64\nmake images IMAGE_REGISTRY=my-registry.example.com/nico IMAGE_TAG=v1.0.0\n```\n\n**Verify** with the loop in the build manual. For each image it reads `${IMAGE_REGISTRY}/${image}:${IMAGE_TAG}` with `docker buildx imagetools inspect --raw`, works out the expected platforms from the right `*_ARCHES` variable, and prints `PASS` or exits on the first `FAIL`. Set the same registry, tag and arch variables you gave `make`, and set `ARM_ONLY=1` after `images-all-arm`. Expect 14 PASS lines after `images-all` and 13 after `images-all-arm`. The loop lists all 14 images, so after plain `make images` it fails at `machine-validation`, the first image `make images` didn't build.\n\nBudget for size: the full workflow needs about 150 GB of disk, and the three boot/validation images need the full mkosi + Rust toolchain.",
+        "analogy": "`make images-all` is like a print shop running a full catalogue job. Each product is printed in two paper sizes (architectures), each size is run separately, and then they're bound into one catalogue entry per product. The verification loop is the final proofread against the order sheet. The analogy breaks down because the order sheet here is three separate variables, so one product can be ordered in different sizes from the others.",
+        "workedExample": {
+          "title": "Build everything for a private registry and verify it",
+          "steps": [
+            {
+              "subgoal": "Authenticate",
+              "detail": "```sh\ndocker login my-registry.example.com\n```"
+            },
+            {
+              "subgoal": "Build and push",
+              "detail": "```sh\ncd infra-controller\nmake images-all IMAGE_REGISTRY=my-registry.example.com/nico IMAGE_TAG=v1.0.0\n```\nThis takes a long time: two architectures, mkosi images and Rust builds."
+            },
+            {
+              "subgoal": "Save the verification loop",
+              "detail": "Copy the loop from the 'Verifying the build' section of the build manual into `verify-images.sh`. It reads `IMAGE_REGISTRY`, `IMAGE_TAG`, `NICO_ARCHES`, `BOOT_ARTIFACTS_ARCHES`, `DPU_ARCHES` and `ARM_ONLY` from the environment, with the Makefile defaults."
+            },
+            {
+              "subgoal": "Run it with the same values you gave make",
+              "detail": "```sh\nIMAGE_REGISTRY=my-registry.example.com/nico IMAGE_TAG=v1.0.0 bash verify-images.sh\n```\nExpected output is 14 lines like `PASS nico: linux/amd64,linux/arm64`."
+            },
+            {
+              "subgoal": "Act on a FAIL",
+              "detail": "If you see, for example, `FAIL boot-artifacts-aarch64: got linux/amd64, want linux/amd64,linux/arm64`, the table in the docs maps it back to `images-bfb`. Rebuild that target with the same variables and re-run the loop."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "You built with `make images-all NICO_ARCHES=amd64 DPU_ARCHES=arm64` to the default registry and tag. Fill in the verification environment and the expected PASS line for `nico`.",
+          "partialSolution": "export IMAGE_REGISTRY=localhost:5000 IMAGE_TAG=latest\nexport NICO_ARCHES=___ DPU_ARCHES=___\nbash verify-images.sh\n# expected first line: PASS nico: ___",
+          "answer": "`NICO_ARCHES=amd64` and `DPU_ARCHES=arm64`, matching the make command. The expected line is `PASS nico: linux/amd64`. `boot-artifacts-x86_64` still expects `linux/amd64,linux/arm64`, because `BOOT_ARTIFACTS_ARCHES` keeps its default."
+        },
+        "independentProblem": {
+          "prompt": "On an x86_64 build host, an engineer runs `make images-machine-validation NICO_ARCHES=arm64` and it fails immediately. Explain why, and give two correct alternatives depending on whether they need amd64 or only ARM64.",
+          "hints": [
+            "Look at what the `machine-validation-runner` intermediate image is built for.",
+            "The compatibility target has a requirement on what `NICO_ARCHES` must contain.",
+            "There's a separate native target with an `-arm` suffix, but it needs an ARM64 host."
+          ],
+          "answer": "`images-machine-validation` requires `NICO_ARCHES` to include `amd64`. Its `machine-validation-runner` intermediate is built for amd64 and depends on the amd64 Core runtime base, so `NICO_ARCHES=arm64` alone fails fast. Alternatives: include amd64 (for example `NICO_ARCHES=amd64` or `\"amd64 arm64\"`) on this host, or, for an ARM64-only image, run `make images-machine-validation-arm` on an ARM64 Docker host."
+        },
+        "selfExplanation": "Why do you think NICo gives the control-plane images, the x86 boot artifact and the DPU BFB separate architecture variables instead of one global setting?",
+        "checks": [
+          {
+            "question": "After `make images-all-arm`, which variable must you set before running the verification loop?",
+            "options": [
+              "`NICO_ARCHES=amd64`",
+              "`ARM_ONLY=1`",
+              "`BOOT_ARTIFACTS_ARCHES=arm64`",
+              "Nothing, since the loop detects the target"
+            ],
+            "answer": "`ARM_ONLY=1`",
+            "explanation": "`ARM_ONLY=1` removes `boot-artifacts-x86_64` from the list and sets `NICO_ARCHES` and `DPU_ARCHES` to arm64, giving 13 checks. `images-all-arm` doesn't use `BOOT_ARTIFACTS_ARCHES`, and the loop can't detect which target you ran."
+          },
+          {
+            "question": "Which image is NOT built by `make images-all`?",
+            "options": [
+              "`nico-mcp`",
+              "`boot-artifacts-aarch64`",
+              "`machine-validation`",
+              "The machine lifecycle test image"
+            ],
+            "answer": "The machine lifecycle test image",
+            "explanation": "The machine lifecycle image is a QA tool built with `make images-machine-lifecycle`, and `images-all` doesn't include it. The other three are among the 14 images `images-all` produces."
+          },
+          {
+            "question": "Which variable controls the container platforms of `boot-artifacts-x86_64`?",
+            "options": [],
+            "answer": "`BOOT_ARTIFACTS_ARCHES`",
+            "explanation": "`BOOT_ARTIFACTS_ARCHES` covers the x86 boot-artifact image (`images-boot-artifacts`). `NICO_ARCHES` is for control-plane images and `DPU_ARCHES` is for the BFB image."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md"
+        ]
+      },
+      {
+        "concept": "boot-artifacts",
+        "prequestions": [
+          {
+            "question": "A server PXE-boots from the network with an empty disk. From Chapter 12, what does the network have to give it before it can run anything useful?",
+            "answer": "A boot program (such as iPXE) and an OS to boot: typically a kernel and initial ramdisk or a full OS image, plus the scripts or config that tie them together."
+          },
+          {
+            "question": "Can a container image built for `linux/amd64` carry files meant for an arm64 machine?",
+            "answer": "Yes. A container can be just a carrier of files. Its platform says which CPU can *run the container*, not what the files inside are for."
+          }
+        ],
+        "explanation": "**Boot artifacts** are the OS images and binaries NICo serves to hosts and DPUs that network-boot. The glossary says NICo runs its own PXE server to serve images shipped as part of the software, such as DPU software and iPXE. They're built from two upstream projects pulled in as Git submodules by the bootstrap:\n\n- **iPXE**, the open-source network bootloader from Chapter 12, built from source.\n- **mkosi**, a systemd-project tool that builds bootable OS images from distribution packages. The bootstrap's apt list also installs `systemd-boot` and `systemd-ukify`, tools for EFI boot loaders and unified kernel images.\n\nThe build has two stages. First, a cargo-make task in `pxe/` produces the artifacts. Then a Dockerfile packages them into an image:\n\n```sh\ncargo make --cwd pxe --env SA_ENABLEMENT=1 build-boot-artifacts-x86-host-sa\ndocker build --build-arg \"CONTAINER_RUNTIME_X86_64=alpine:latest\" \\\n  -t boot-artifacts-x86_64 -f dev/docker/Dockerfile.release-artifacts-x86_64 .\n```\n\nIn the `make` workflow this is the `images-boot-artifacts` target. It's part of `images-all` and produces `boot-artifacts-x86_64`. Its sibling `boot-artifacts-aarch64` (next lesson) holds the DPU payload. Both need the full mkosi + Rust toolchain, which is one reason the bootstrap exists.\n\n**Why put files in a container?** It's how everything else in NICo ships. Images get versioned tags, live in the same registry and are pulled by Kubernetes like any other image. The runtime base here is just `alpine:latest`: a small shell around the files.\n\n**The key idea: container platform ≠ payload architecture.** The name `boot-artifacts-x86_64` describes the *payload*, an OS for x86 hosts. Its container platforms are a separate setting, `BOOT_ARTIFACTS_ARCHES`, which defaults to `amd64 arm64`, so the image can be pulled on either kind of control-plane node. `images-all-arm` skips this image entirely.",
+        "analogy": "A boot-artifact image is a shipping container full of flat-pack furniture. The container's spec (its platform) has to fit the truck and crane (the node that pulls and runs it), while the furniture inside is built for a completely different room (the machine that boots it). The analogy breaks down because a real shipping container doesn't care about the truck's make, whereas a container image's platform does have to match the node that runs it.",
+        "workedExample": {
+          "title": "Pack an arm64 payload into an amd64 carrier image (no emulation needed)",
+          "steps": [
+            {
+              "subgoal": "Extract a foreign binary without running it",
+              "detail": "```sh\nmkdir -p carrier/artifacts && cd carrier\ndocker create --platform linux/arm64 --name bb-arm busybox:latest\ndocker cp bb-arm:/bin/busybox artifacts/busybox-aarch64\ndocker rm bb-arm\nfile artifacts/busybox-aarch64     # ELF 64-bit ... ARM aarch64, statically linked\n```\n`docker create` doesn't execute anything, so this works even without QEMU."
+            },
+            {
+              "subgoal": "Write a carrier Dockerfile",
+              "detail": "```sh\ncat > Dockerfile <<'EOF'\nFROM alpine:latest\nCOPY artifacts/ /artifacts/\nEOF\n```"
+            },
+            {
+              "subgoal": "Build it for amd64",
+              "detail": "```sh\ndocker build --platform linux/amd64 -t lab-artifacts-aarch64 .\ndocker image inspect lab-artifacts-aarch64 --format '{{.Os}}/{{.Architecture}}'   # linux/amd64\n```\nOnly `COPY` runs, so this also builds on an arm Mac without emulation."
+            },
+            {
+              "subgoal": "Get the payload back out",
+              "detail": "```sh\ndocker create --name art lab-artifacts-aarch64\ndocker cp art:/artifacts ./out\ndocker rm art\nfile out/busybox-aarch64          # still ARM aarch64\n```\nYou now have an amd64 container carrying an aarch64 payload, the same shape as NICo's DPU artifact image."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Make the carrier's base image configurable with a build argument, like NICo's `CONTAINER_RUNTIME_X86_64`, defaulting to alpine. Then build it, passing alpine explicitly.",
+          "partialSolution": "# Dockerfile\nARG CONTAINER_RUNTIME=___\nFROM ___\nCOPY artifacts/ /artifacts/\n\n# shell\ndocker build --build-arg \"CONTAINER_RUNTIME=alpine:latest\" -t lab-artifacts-aarch64 .",
+          "answer": "The first blank is `alpine:latest` (an `ARG` declared before `FROM` can set the base image). The second is `${CONTAINER_RUNTIME}`."
+        },
+        "independentProblem": {
+          "prompt": "Someone says: '`boot-artifacts-x86_64` is x86, so building it with `BOOT_ARTIFACTS_ARCHES=arm64` is nonsense and should fail.' Explain why that's wrong. Then say what `BOOT_ARTIFACTS_ARCHES=arm64` would actually produce, and which deployment that might suit.",
+          "hints": [
+            "Separate 'what the files inside are for' from 'what CPU pulls and runs the container'.",
+            "The image's runtime base is a tiny Alpine image whose job is to carry the files.",
+            "Think of control-plane nodes that are ARM64 serving x86 hosts."
+          ],
+          "answer": "The `x86_64` in the name describes the payload: the OS and boot files served to x86 hosts. `BOOT_ARTIFACTS_ARCHES` controls the container's platform, meaning which control-plane nodes can pull and run the carrier. `arm64` is one of the two accepted values, so the build is valid. It produces a `boot-artifacts-x86_64` tag whose index has a single `linux/arm64` entry, which carries x86 boot files. That suits a site whose Kubernetes nodes are ARM64 but whose managed hosts are x86. (The default builds both platforms.)"
+        },
+        "selfExplanation": "Why does packaging boot files into container images make sense for a system that's otherwise deployed with Kubernetes and Helm?",
+        "checks": [
+          {
+            "question": "Which two upstream projects are brought in as submodules to build boot artifacts?",
+            "options": [
+              "mkosi and iPXE",
+              "Kea and iPXE",
+              "systemd and GRUB",
+              "QEMU and BuildKit"
+            ],
+            "answer": "mkosi and iPXE",
+            "explanation": "The bootstrap pulls 'the mkosi/ipxe git submodules'. Kea is the DHCP server in the DHCP service image, and QEMU/BuildKit are build tools, not boot payloads."
+          },
+          {
+            "question": "In the manual x86 boot-artifact build, what's the base for the packaged image?",
+            "options": [
+              "`nico-runtime-container-x86_64`",
+              "`alpine:latest`, passed as `CONTAINER_RUNTIME_X86_64`",
+              "`ubuntu:24.04`",
+              "`scratch`"
+            ],
+            "answer": "`alpine:latest`, passed as `CONTAINER_RUNTIME_X86_64`",
+            "explanation": "The docs build it with `--build-arg \"CONTAINER_RUNTIME_X86_64=alpine:latest\"`. The heavier `nico-runtime-container-x86_64` is used for Core and machine-validation images, not for the artifact carrier."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "concept": "dpu-bfb",
+        "prequestions": [
+          {
+            "question": "A BlueField DPU has its own Arm cores (Chapter 7). What CPU architecture must the OS installed *on the DPU* be built for?",
+            "answer": "aarch64 (arm64), whatever the architecture of the host server or the control-plane nodes."
+          },
+          {
+            "question": "How might you get a fresh OS onto a DPU when the DPU has nothing usable installed?",
+            "answer": "Push an install image to it through a path that doesn't need the DPU OS, such as rshim from the host (Chapter 7) or the DPU's BMC. The image format used for this is the BFB."
+          }
+        ],
+        "explanation": "A **BFB (BlueField bootstream)** is the image format used to install or update the operating system and firmware bundle on a BlueField DPU (glossary). Think of it as a self-contained installer stream: boot components, a kernel and installer environment, and the root filesystem to write to the DPU's storage. It's typically delivered over **rshim**, the host-side interface from Chapter 7, which exposes a boot device you stream the BFB into. It can also be delivered through the DPU's BMC. Install-time settings can be supplied through a `bf.cfg` file, which a later chapter covers. NICo is responsible for installing the DPU OS and all DPU firmware, so it needs its own BFB.\n\nNICo builds the BFB as its **aarch64 boot artifact**:\n\n```sh\ncargo make --cwd pxe --env SA_ENABLEMENT=1 build-boot-artifacts-bfb-sa\ndocker build --build-arg \"CONTAINER_RUNTIME_AARCH64=alpine:latest\" \\\n  -t boot-artifacts-aarch64 -f dev/docker/Dockerfile.release-artifacts-aarch64 .\n```\n\nThe docs stress that `CONTAINER_RUNTIME_AARCH64=alpine:latest` must be included, and that 'the aarch64 binaries are bundled into an x86 container'. This is the payload-vs-platform split from the previous lesson. The payload is aarch64 because it's for the DPU. In this manual command, the carrier is an x86 container.\n\nIn the `make` workflow:\n\n- `images-bfb` builds `boot-artifacts-aarch64` with container platforms from **`DPU_ARCHES`** (default `amd64 arm64`).\n- `images-bfb-arm` builds it natively on an ARM64 host. `images-all-arm` sets `DPU_ARCHES=arm64` and uses this path. The native DPU artifact build also leaves out the deployment-local `carbide-pxe.forge` package source, so it doesn't depend on that service being reachable during the build.\n- The verification loop expects `boot-artifacts-aarch64` to match `DPU_ARCHES`.\n\nThe Quick Start also describes DPF as the default per-host DPU provisioning path, with iPXE as a deprecated opt-out. Later chapters cover how each path uses DPU images. This chapter covers only how the BFB artifact is built and published.",
+        "analogy": "A BFB is like a factory reimaging kit for a phone: one sealed file you push over a service cable, and the phone wipes itself and comes back with a fresh OS and firmware. The analogy holds for rshim as the 'service cable'. It breaks down because NICo ships that kit inside a container image so it can be versioned and distributed like the rest of the stack.",
+        "workedExample": {
+          "title": "Trace the DPU BFB from build to verification",
+          "steps": [
+            {
+              "subgoal": "Build the artifact (Ubuntu build host)",
+              "detail": "```sh\ncargo make --cwd pxe --env SA_ENABLEMENT=1 build-boot-artifacts-bfb-sa\n```\nThis runs the BFB task from `pxe/Makefile.toml` with `SA_ENABLEMENT=1`. It needs the mkosi submodule and the Rust toolchain from the bootstrap."
+            },
+            {
+              "subgoal": "Package it into a carrier image",
+              "detail": "```sh\ndocker build --build-arg \"CONTAINER_RUNTIME_AARCH64=alpine:latest\" \\\n  -t boot-artifacts-aarch64 -f dev/docker/Dockerfile.release-artifacts-aarch64 .\n```"
+            },
+            {
+              "subgoal": "Or let make do both and publish",
+              "detail": "```sh\nmake images-bfb DPU_ARCHES=arm64            # carrier for arm64 nodes only\n# on an ARM64 host, natively:\nmake images-bfb-arm\n```"
+            },
+            {
+              "subgoal": "Check the published platforms match DPU_ARCHES",
+              "detail": "```sh\ndocker buildx imagetools inspect --raw localhost:5000/boot-artifacts-aarch64:latest | \\\n  jq -r '[.manifests[].platform | select(.os == \"linux\") | \"\\(.os)/\\(.architecture)\"] | unique | sort | join(\",\")'\n# want: linux/arm64 (for DPU_ARCHES=arm64)\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the manual packaging step for the DPU BFB exactly as the build manual gives it.",
+          "partialSolution": "docker build --build-arg \"CONTAINER_RUNTIME_AARCH64=___\" -t ___ -f dev/docker/Dockerfile.release-artifacts-aarch64 .",
+          "answer": "The first blank is `alpine:latest`, which the docs say must be included. The second is `boot-artifacts-aarch64`."
+        },
+        "independentProblem": {
+          "prompt": "You need only the DPU BFB image, rebuilt after a fix, pushed to `my-registry.example.com/nico` with tag `v1.0.1`, as a container pullable by both amd64 and arm64 nodes, from an x86_64 build host. Write the make command and the verification expectation for this one image.",
+          "hints": [
+            "The individual target for the BFB image appears in the `make help` list in the docs.",
+            "Which architecture variable belongs to that target, and what's its default?",
+            "Use `IMAGE_REGISTRY` and `IMAGE_TAG`. With the default `DPU_ARCHES`, the expected platform string has two entries."
+          ],
+          "answer": "Log in first, then run `make images-bfb IMAGE_REGISTRY=my-registry.example.com/nico IMAGE_TAG=v1.0.1` (`DPU_ARCHES` defaults to `amd64 arm64`, so you don't need to set it). The arm64 carrier comes from the builder's emulated platform on this x86 host. Verify that `my-registry.example.com/nico/boot-artifacts-aarch64:v1.0.1` reports `linux/amd64,linux/arm64`. The payload inside is aarch64 either way."
+        },
+        "selfExplanation": "Why must the BFB payload always be aarch64, while the container that carries it can be amd64, arm64 or both?",
+        "checks": [
+          {
+            "question": "What is a BFB?",
+            "options": [
+              "A container image format for DPU microservices",
+              "The BlueField bootstream image format used to install or update the OS and firmware bundle on a BlueField DPU",
+              "A Redfish endpoint on the DPU BMC",
+              "A Kubernetes CRD for DPU provisioning"
+            ],
+            "answer": "The BlueField bootstream image format used to install or update the OS and firmware bundle on a BlueField DPU",
+            "explanation": "The glossary defines it this way. NICo ships it *inside* a container image (`boot-artifacts-aarch64`), but the BFB itself isn't a container format."
+          },
+          {
+            "question": "Which variable sets the published platforms of `boot-artifacts-aarch64`?",
+            "options": [
+              "`NICO_ARCHES`",
+              "`BOOT_ARTIFACTS_ARCHES`",
+              "`DPU_ARCHES`",
+              "`CONTAINER_RUNTIME_AARCH64`"
+            ],
+            "answer": "`DPU_ARCHES`",
+            "explanation": "`DPU_ARCHES` controls the DPU BFB image (`images-bfb`), and the verification loop maps `boot-artifacts-aarch64` to it. `BOOT_ARTIFACTS_ARCHES` is for the x86 artifact. `CONTAINER_RUNTIME_AARCH64` sets the carrier's base image, not its platforms."
+          },
+          {
+            "question": "What does the native ARM64 DPU artifact build (as used by `images-all-arm`) leave out, and why?",
+            "options": [],
+            "answer": "It leaves out the deployment-local `carbide-pxe.forge` package source, so the native build doesn't depend on that service being reachable.",
+            "explanation": "This comes straight from the build manual's description of `images-all-arm`."
+          }
+        ],
+        "sources": [
+          "manuals/building_nico_containers.md",
+          "glossary.md",
+          "getting-started/quick-start.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Ship a multi-arch Rust image through a local registry, NICo-style",
+      "goal": "Build a tiny Rust program into container images for linux/amd64 and linux/arm64 in separate builds, pinned to one Docker context and builder. Push them to a local registry on localhost:5000, assemble one multi-arch tag, and check it with the same jq platform check NICo's verification loop uses.",
+      "whyItMatters": "This is `make images` in miniature. A Rust binary is compiled inside a container, each architecture is built separately (as NICo does to avoid copying an amd64 binary into the arm64 image), the non-native one is emulated through binfmt/QEMU, the results are pushed to `localhost:5000`, and the bare tag is assembled and verified. Once this works on your laptop, a `FAIL` line from the real verification loop is something you can reason about rather than guess at.",
+      "setup": [
+        "Docker Engine with Buildx (`docker buildx version`), or Docker Desktop on macOS",
+        "Linux only: QEMU registered via binfmt_misc, done in step 1. Docker Desktop already includes emulation.",
+        "`jq` and `curl`",
+        "About 2 GB free disk and some patience: the arm64 (or amd64 on Apple silicon) Rust build runs under emulation and can take several minutes",
+        "No local Rust install needed, because the compiler runs in the `rust:1-slim-bookworm` image"
+      ],
+      "steps": [
+        {
+          "subgoal": "Enable and confirm emulation",
+          "detail": "On Linux:\n```sh\nls /proc/sys/fs/binfmt_misc/ | grep qemu || \\\n  sudo docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install all\ndocker run --rm --platform linux/arm64 alpine uname -m   # aarch64\ndocker run --rm --platform linux/amd64 alpine uname -m   # x86_64\n```\nRemember that these registrations disappear on reboot. On Docker Desktop, just run the two `uname` checks."
+        },
+        {
+          "subgoal": "Pin the context and builder, and start a registry",
+          "detail": "```sh\nctx=\"$(docker context show)\"\nexport DOCKER_CONTEXT=\"$ctx\" BUILDX_BUILDER=\"$ctx\"\ndocker buildx ls | grep -E \"^$ctx\"       # the built-in builder (docker driver)\ndocker run -d --name lab-registry -p 5000:5000 registry:2\ncurl -s http://localhost:5000/v2/         # {}\n```\nIf `lab-registry` already exists from an earlier lesson, skip the `docker run` (or `docker start lab-registry`)."
+        },
+        {
+          "subgoal": "Write the Rust crate",
+          "detail": "```sh\nmkdir -p archecho/src && cd archecho\ncat > Cargo.toml <<'EOF'\n[package]\nname = \"archecho\"\nversion = \"0.1.0\"\nedition = \"2021\"\nEOF\ncat > src/main.rs <<'EOF'\nfn main() {\n    println!(\"archecho built for {}-{}\", std::env::consts::ARCH, std::env::consts::OS);\n}\nEOF\n```\n`std::env::consts::ARCH` is fixed at compile time, so the output shows which architecture the binary was *built* for."
+        },
+        {
+          "subgoal": "Write a two-stage Dockerfile",
+          "detail": "```sh\ncat > Dockerfile <<'EOF'\nFROM rust:1-slim-bookworm AS build\nWORKDIR /src\nCOPY Cargo.toml .\nCOPY src ./src\nRUN cargo build --release\n\nFROM debian:bookworm-slim\nCOPY --from=build /src/target/release/archecho /usr/local/bin/archecho\nENTRYPOINT [\"/usr/local/bin/archecho\"]\nEOF\n```\nBoth stages use the same Debian release (bookworm). The binary links dynamically against the glibc of the stage that built it. If the build stage had a newer glibc than the runtime stage (for example plain `rust:1-slim`, which now follows a newer Debian release), the program could fail at start-up with `GLIBC_x.yy not found` once it uses more of the C library. Matching the releases rules this out."
+        },
+        {
+          "subgoal": "Build each architecture separately and push per-arch tags",
+          "detail": "```sh\nfor arch in amd64 arm64; do\n  docker buildx build --platform \"linux/$arch\" --provenance=false \\\n    -t \"localhost:5000/archecho:latest-$arch\" --push .\ndone\ncurl -s http://localhost:5000/v2/archecho/tags/list\n```\n`--provenance=false` stops BuildKit from adding attestation entries, so the per-arch tags stay simple. One build will be slow because it's emulated."
+        },
+        {
+          "subgoal": "Assemble the bare multi-arch tag",
+          "detail": "```sh\ndocker buildx imagetools create -t localhost:5000/archecho:latest \\\n  localhost:5000/archecho:latest-amd64 localhost:5000/archecho:latest-arm64\ndocker buildx imagetools inspect localhost:5000/archecho:latest\n```"
+        },
+        {
+          "subgoal": "Verify like NICo does",
+          "detail": "```sh\ncat > verify.sh <<'EOF'\n#!/usr/bin/env bash\nset -euo pipefail\nIMAGE_REGISTRY=\"${IMAGE_REGISTRY:-localhost:5000}\"\nIMAGE_TAG=\"${IMAGE_TAG:-latest}\"\nARCHES=\"${ARCHES:-amd64 arm64}\"\nexpected=\"$(echo \"$ARCHES\" | tr ' ' '\\n' | sed 's#^#linux/#' | sort | paste -sd, -)\"\nfor image in archecho; do\n  platforms=\"$(docker buildx imagetools inspect --raw \"${IMAGE_REGISTRY}/${image}:${IMAGE_TAG}\" | \\\n    jq -r '[.manifests[].platform | select(.os == \"linux\") | \"\\(.os)/\\(.architecture)\"] | unique | sort | join(\",\")')\"\n  if [ \"$platforms\" != \"$expected\" ]; then\n    printf 'FAIL %s: got %s, want %s\\n' \"$image\" \"$platforms\" \"$expected\" >&2; exit 1\n  fi\n  printf 'PASS %s: %s\\n' \"$image\" \"$platforms\"\ndone\nEOF\nbash verify.sh\nfor arch in amd64 arm64; do\n  docker run --rm --pull always --platform \"linux/$arch\" localhost:5000/archecho:latest\ndone\n```"
+        }
+      ],
+      "verify": "`bash verify.sh` prints `PASS archecho: linux/amd64,linux/arm64`. Running the bare tag prints `archecho built for x86_64-linux` with `--platform linux/amd64` and `archecho built for aarch64-linux` with `--platform linux/arm64`.",
+      "hints": [
+        "`exec format error` during the emulated build or run means binfmt isn't registered (for example after a reboot). Re-run the `tonistiigi/binfmt --install all` command and check `/proc/sys/fs/binfmt_misc/`.",
+        "`ERROR: ... no builder \"...\" found` means `BUILDX_BUILDER` doesn't match a builder name. Run `docker buildx ls`: the built-in builder is named after the context (`default`, or `desktop-linux` on Docker Desktop).",
+        "If `--push` fails with a connection error, check that the registry is up: `docker ps --filter name=lab-registry` and `curl -s http://localhost:5000/v2/`.",
+        "If `imagetools create` can't talk to the plain-HTTP registry on your setup, you can assemble the list with the Docker CLI instead: `docker manifest create --insecure localhost:5000/archecho:latest localhost:5000/archecho:latest-amd64 localhost:5000/archecho:latest-arm64`, then `docker manifest push --insecure localhost:5000/archecho:latest`.",
+        "If the container fails with `GLIBC_x.yy not found`, the build and runtime stages are on different Debian releases. Keep `rust:1-slim-bookworm` with `debian:bookworm-slim` (or move both to the same newer release).",
+        "If both `docker run` lines print the same architecture, a cached local image was reused. Keep `--pull always`, or remove the local tag with `docker image rm localhost:5000/archecho:latest`.",
+        "`FAIL archecho: got linux/amd64, want linux/amd64,linux/arm64` means the arm64 per-arch tag is missing or wasn't included in `imagetools create`. Check `tags/list` and rebuild that architecture."
+      ],
+      "stretch": "Add a second image, `archecho-artifacts-aarch64`, that mimics NICo's DPU artifact. Extract the arm64 `archecho` binary from `localhost:5000/archecho:latest-arm64` with `docker create --platform linux/arm64` + `docker cp`. Package it into an `alpine:latest` carrier whose base comes from a `CONTAINER_RUNTIME` build arg, and push it for `linux/amd64` only. Extend `verify.sh` with a per-image `expected_platforms_for` function (as in NICo's loop) so `archecho` expects both platforms and `archecho-artifacts-aarch64` expects `linux/amd64`. Then confirm with `file` that the payload you copy out of the amd64 carrier is still `ARM aarch64`."
+    }
+  }
+}

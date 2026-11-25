@@ -140,3 +140,22 @@ chapters:
     - >-
       Files in /etc/sysctl.d are applied at boot or by `sudo sysctl --system`,
       not at login. Group membership needs a new login. Say both consistently.
+    - >-
+      Tested 2026-11-25: the multi-arch archecho build task works as written
+      (separate amd64 and arm64 buildx builds pushed to a local registry,
+      imagetools create, verify.sh PASS linux/amd64,linux/arm64, the bare tag
+      prints x86_64-linux and aarch64-linux). The pinned tonistiigi/binfmt
+      digest is NICo's own (scripts/setup-build-host.sh). Keep it.
+  14:
+    - >-
+      Not yet run end to end (2026-11-25): the test machine could not run kind
+      (nested runc failed under cgroup v1). Statically checked instead: every
+      manifest is valid against Kubernetes 1.31 schemas, and every image
+      exists. Needs a real run on a laptop.
+  15:
+    - >-
+      Not yet run end to end (2026-11-25), same reason as chapter 14.
+      Statically checked: manifests valid (MetalLB CRs against MetalLB's
+      schemas), the Calico v3.28.1 and MetalLB v0.14.5 manifest URLs and all
+      their images exist, and the app=metallb label and bird.ctl path the
+      steps rely on are present. Needs a real run on a laptop.

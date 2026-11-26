@@ -1,0 +1,34 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "intro",
+        "severity": "minor",
+        "problem": "Intro says the Site Controller stores 'the keys that lock SuperNIC firmware'. The docs (and the KDF lesson) say derived lockdown keys are never stored; only the versioned lockdown IKM is stored. The intro contradicts the lesson that comes later.",
+        "fix": "Reword to 'the secret from which SuperNIC lockdown keys are derived (the lockdown IKM)'."
+      },
+      {
+        "where": "site-controller",
+        "severity": "minor",
+        "problem": "The lesson says the API Service is the only service that 'touches PostgreSQL'. But the AES-GCM lesson says Flow persists to 'its database', and the Flow docs show a separate Flow PostgreSQL. The docs' 'only service' claim is about the NICo system database (nico_system_nico).",
+        "fix": "Say the API Service is the only service that reads and writes the NICo Core database (nico_system_nico), and note that Flow keeps its own task database."
+      },
+      {
+        "where": "site-controller",
+        "severity": "minor",
+        "problem": "The explanation for check 3 says 'Temporal is used only between NICo REST and the Site Agent'. The Flow docs say Flow also runs its tasks through Temporal workflows, so 'only' is inaccurate.",
+        "fix": "Rephrase: Temporal is not the service-to-service protocol; it is a workflow engine that NICo REST/Site Agent (and Flow) use for orchestration."
+      },
+      {
+        "where": "envelope-encryption-and-kek",
+        "severity": "minor",
+        "problem": "'Machine identity follows the same pattern' implies there are per-key data keys wrapped by a KEK. The docs only say the AES site master keys encrypt the per-org signing private keys at rest, with each blob carrying its key_id. They never mention a data-key layer.",
+        "fix": "Say that machine identity shares the key-ID/rotation discipline: private keys are encrypted under a site KEK identified by a key_id embedded in each blob. Don't claim the internal structure matches the Postgres credential store."
+      }
+    ]
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "pod-anti-affinity",
+        "severity": "major",
+        "problem": "The independent problem is ambiguous and one of its hints is wrong. The prompt asks for \"one anti-affinity term\", but the given answer has two terms. Hint 1 says \"You need two terms or `matchExpressions`\". That is wrong: the expressions inside one `labelSelector` are ANDed together, so a single term can't match `app=nico-api` OR `role=postgres-primary`. The second part, \"if a fourth heavy component later takes the only free node\", also makes no sense. With three nodes and three heavy components each on its own node, there is no free node.",
+        "fix": "Reword the prompt to \"write the anti-affinity rule (one or more terms)\". Change the hint to say that keys inside one selector are ANDed, so you need one term per selector. Rewrite the follow-up scenario so it matches the node count, for example: \"a fourth heavy component with a similar rule is added to the same 3 nodes\", or \"one of the three nodes is drained\"."
+      },
+      {
+        "where": "kubernetes-resource-limits",
+        "severity": "major",
+        "problem": "The completion problem says \"the later large runs kept nico-api's memory at 32 GiB\". The sizing page doesn't support this. The 400-rack and 556-rack runs used 32 GiB, but the 1,112-rack runs gave nico-api a 64 GiB limit. The 250-rack row doesn't state a nico-api memory limit at all.",
+        "fix": "Say \"the 400- and 556-rack runs used a 32 GiB nico-api memory limit (the chart default at 556 racks)\", or present the 32Gi value as an exercise choice instead of a documented 250-rack setting."
+      },
+      {
+        "where": "tokio-worker-threads",
+        "severity": "minor",
+        "problem": "The explanation suggests Tokio's default worker count could miss the cgroup quota, the way `nproc` does. In fact Tokio sizes its default pool with `num_cpus` / `std::thread::available_parallelism`, and on Linux both read the CFS quota in cgroup v1 and v2. So under `--cpus=2`, Tokio would usually pick 2 even though `nproc` prints 8. The `nproc` demo is correct, but using it to justify the Tokio point is misleading.",
+        "fix": "Say that `nproc` ignores quotas but Tokio's default detection usually honours them. The reason to set `TOKIO_WORKER_THREADS` explicitly is to make the count deliberate and visible, matched to the limit as the guidance does, and to cover fractional limits and older runtimes."
+      },
+      {
+        "where": "pod-anti-affinity",
+        "severity": "minor",
+        "problem": "The independent-problem answer says \"If the third node is taken\". That doesn't match the prompt's \"fourth heavy component\" wording, so the explanation is confusing.",
+        "fix": "Use the same scenario wording in both the prompt and the answer once the scenario is fixed."
+      }
+    ]
+  }
+}

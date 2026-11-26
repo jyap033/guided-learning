@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "kustomize",
+        "severity": "minor",
+        "problem": "The analogy says a typo in a patch's resource name \"silently fails to match, or causes an error\". Current Kustomize stops with a 'no matches' error when a patch targets a resource that doesn't exist, so it does not fail silently.",
+        "fix": "Say that a patch whose kind/name matches no resource makes the build fail with an error, while the transparent sheet always lines up."
+      },
+      {
+        "where": "postgresql",
+        "severity": "minor",
+        "problem": "The chapter calls 8 CPUs / 16 GiB the Postgres defaults, as the sizing guide does. The quick start shows a sample `postgresql` block in helm-prereqs/values.yaml with 4 CPU / 4Gi limits, described as conservative dev defaults. Learners who open values.yaml may see different numbers from the ones the lesson states.",
+        "fix": "Add a sentence saying the shipped values block may show smaller dev defaults (the quick start shows 4 CPU / 4Gi), and that the 8 CPU / 16 GiB figures and the sizing table come from the sizing guide. Learners should check their own values.yaml."
+      }
+    ]
+  }
+}

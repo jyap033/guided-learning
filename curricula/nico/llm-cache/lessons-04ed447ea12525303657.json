@@ -1,0 +1,599 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "NICo holds a lot of secrets. Its Site Controller stores the BMC and UEFI passwords for every managed server, the keys that lock SuperNIC firmware, and the private keys that sign machine-identity tokens. Every one of its services talks to the others over mutually authenticated TLS. To run NICo safely you need to know what protects each of those secrets, and what breaks if you lose a key.\n\nThis chapter starts with the **Site Controller**, the thing you are protecting. You already know Kubernetes (ch. 14) and microservices (ch. 4), so this lesson is about how NICo's control plane is laid out and where its secrets live. The next five lessons build a small cryptography toolkit, one tool at a time:\n\n- **AES-GCM** encrypts data and detects tampering.\n- **Key derivation (HKDF)** turns one secret into many independent keys.\n- **Hashing** produces fingerprints.\n- **Envelope encryption** wraps per-item data keys under a master key encryption key (KEK) that you can rotate.\n- **Public-key cryptography** makes signatures possible, which mTLS, SSH and JWTs all depend on.\n\nEach concept is tied to a real NICo mechanism: Flow's encrypted firmware credentials, the SuperNIC lockdown KDF, the Postgres credential store's KEK, and ES256 machine-identity signing keys. All the examples run on a laptop with Python's `cryptography` package and `openssl`. The chapter ends with a build task where you write a small envelope-encrypted credential store, rotate its KEK, derive per-card keys, and sign the result.",
+    "objectives": [
+      "Describe the Site Controller's layout: what runs on it, where it runs, how its services talk to each other, and which secrets it holds",
+      "Encrypt and decrypt data with AES-256-GCM, and use additional authenticated data (AAD) to bind context to ciphertext",
+      "Derive stable, independent per-device keys with HKDF-SHA256, and explain why a weak input secret defeats the derivation",
+      "Use SHA-256 for fingerprints and integrity checks, and explain why hashing is not encryption",
+      "Build and rotate an envelope-encryption scheme with key IDs, and say which keys must be retained and backed up",
+      "Generate an ECDSA P-256 key pair, sign and verify data with openssl, and say which key each party needs"
+    ],
+    "lessons": [
+      {
+        "concept": "site-controller",
+        "prequestions": [
+          {
+            "question": "NICo's control plane runs on Kubernetes. What is the minimum number of nodes, and why that number?",
+            "answer": "Three nodes. That is the minimum for high availability: the cluster and its replicated services keep running if one node fails."
+          },
+          {
+            "question": "Guess: of all the NICo services, how many are allowed to read from and write to the PostgreSQL database directly?",
+            "answer": "One. Only the API Service (NICo Core) reads and writes PostgreSQL. Every other service goes through it over mTLS/gRPC."
+          }
+        ],
+        "explanation": "The **Site Controller** is NICo's control plane. It is a suite of microservices running on a Kubernetes cluster that sits *inside the datacenter it manages*. The cluster needs **at least three nodes** for high availability. For large GB200-class sites, the docs recommend five nodes or nodes with more cores. Each node is a serious server: two 24+-core x86_64 sockets, 256 GiB RAM minimum, NVMe storage, and a TPM 2.0 with Secure Boot.\n\nThe main services:\n\n- **API Service (NICo Core)**: the single source of truth. It runs the state machines and is the *only* service that touches PostgreSQL.\n- **DHCP, PXE, Authoritative DNS, recursive DNS (unbound)**: the boot and network services from chapters 8 and 12.\n- **Hardware Health**: scrapes BMCs over Redfish HTTPS.\n- **SSH Console Service**: keeps serial-console connections open to host BMCs.\n- **Site Agent**: connects the site to **NICo REST** through Temporal. This lets REST run centrally in the cloud while the Site Controller stays on-premises.\n- **Admin CLI**: talks directly to the API Service.\n\nAll control-plane services talk to each other over **mTLS/gRPC**. Agents on managed hosts call the API Service the same way: Scout runs on the host during discovery, and the DPU Agent polls every 30 seconds.\n\nNICo also depends on off-the-shelf prerequisites, which you met in chapter 17: PostgreSQL, **Vault** (a PKI engine for certificates and a KV store for secrets), **cert-manager** (issues and rotates the mTLS certificates), the **External Secrets Operator** (copies Vault secrets into Kubernetes Secrets), Temporal and MetalLB.\n\n**Scope:** one Site Controller manages one site. Tenancy objects such as VPCs belong to one `siteId`, and nothing is shared between site controllers. To run several sites, you connect each one's Site Agent to a shared NICo REST.\n\n**Why this lesson opens a cryptography chapter:** the Site Controller holds the most sensitive secrets on the site:\n\n- every BMC and UEFI password\n- the KEK that protects stored credentials\n- the input secret used to derive SuperNIC lockdown keys\n- the per-org JWT signing keys\n- the TLS private keys of every service\n\nThe rest of this chapter covers the tools that protect them.",
+        "analogy": "The Site Controller is like a building's security office. It has a master records room (PostgreSQL) that only the head clerk (API Service) may enter. Everyone else, including the door guards (DHCP, PXE, DNS) and the patrols (Hardware Health), sends requests to the clerk over an authenticated intercom (mTLS/gRPC). Where it breaks down: a real security office is one room. The Site Controller runs replicated across three or more machines precisely so that losing one of them doesn't stop it.",
+        "workedExample": {
+          "title": "Trace three requests through the Site Controller",
+          "steps": [
+            {
+              "subgoal": "Admin lists machines",
+              "detail": "The admin runs Admin CLI → **API Service** over mTLS/gRPC → API Service queries PostgreSQL. No other service is involved, because only the API Service touches the database."
+            },
+            {
+              "subgoal": "DPU picks up new network config",
+              "detail": "The DPU Agent on the DPU (ARM OS) polls the **API Service** every 30 s over mTLS/gRPC, gets the desired config, applies it through HBN, and reports observed state back. The DPU Agent runs *on the managed host's DPU*, not in the Site Controller."
+            },
+            {
+              "subgoal": "Cloud orchestrator provisions an instance",
+              "detail": "The orchestrator calls **NICo REST** over HTTP with a JWT. REST may run centrally in the cloud. It reaches the site through Temporal → **Site Agent** → API Service over mTLS/gRPC."
+            },
+            {
+              "subgoal": "Look at it on a real cluster (if you have one)",
+              "detail": "The reference install runs NICo in the `nico-system` namespace:\n```bash\nkubectl -n nico-system get pods\nkubectl -n nico-system logs deployment/nico-api --tail=20\n```\nIf you have no cluster, sketch the three request paths above on paper instead."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks in this request path for Hardware Health reporting a failing fan.",
+          "partialSolution": "Hardware Health --(Redfish over ___)--> host BMC   # read sensors\nHardware Health --(___)--> API Service             # report the health alert\nAPI Service --> ___                                # persist the alert",
+          "answer": "Blank 1: HTTPS (Redfish HTTPS). Blank 2: mTLS/gRPC. Blank 3: PostgreSQL. Hardware Health never writes the database itself. It reports to the API Service, which is the only service that writes PostgreSQL."
+        },
+        "independentProblem": {
+          "prompt": "Your company has two datacenters, East and West. A colleague proposes one Site Controller in East that manages hosts in both. Using what the docs say, explain why this doesn't fit NICo's design, and describe the layout NICo supports instead.",
+          "hints": [
+            "Where does the docs say the Site Controller is located relative to the hardware it manages?",
+            "How many sites does one Site Controller manage, and what scopes a VPC?",
+            "Which component lets several sites share one REST API?"
+          ],
+          "answer": "The Site Controller is co-located in the datacenter it manages, and one Site Controller manages one site. Tenancy objects such as VPCs are scoped to one siteId and are not shared between controllers. The supported layout is a Site Controller (with three or more nodes) in each of East and West. Each one's Site Agent connects through Temporal to a single, possibly central, NICo REST deployment. A tenant that needs capacity in both sites gets a VPC in each."
+        },
+        "selfExplanation": "Why do you think NICo lets only the API Service read and write PostgreSQL, instead of letting every service query the database directly? Think about consistency, the state machines, and security.",
+        "checks": [
+          {
+            "question": "Which of these is a prerequisite NICo depends on, rather than a service NICo itself provides in the Site Controller?",
+            "options": [
+              "API Service (NICo Core)",
+              "PXE Service",
+              "Vault",
+              "Site Agent"
+            ],
+            "answer": "Vault",
+            "explanation": "Vault is an off-the-shelf prerequisite that provides PKI and KV secrets. The API Service, PXE Service and Site Agent are all NICo-built Site Controller services. Site Agent can be tempting because it connects outward, but it is NICo's own service."
+          },
+          {
+            "question": "Where does the DPU Agent run?",
+            "options": [
+              "On the Site Controller's Kubernetes cluster",
+              "On the managed host's BlueField DPU",
+              "Centrally in the cloud next to NICo REST"
+            ],
+            "answer": "On the managed host's BlueField DPU",
+            "explanation": "The DPU Agent is a persistent daemon on the DPU's ARM OS. It polls the API Service every 30 seconds. It is a managed-host agent, not a Site Controller pod."
+          },
+          {
+            "question": "What protocol do the Site Controller's services use to talk to each other?",
+            "options": [
+              "Plain HTTP with API keys",
+              "mTLS/gRPC",
+              "Temporal workflows",
+              "SSH tunnels"
+            ],
+            "answer": "mTLS/gRPC",
+            "explanation": "The docs say all NICo control-plane services communicate over mTLS/gRPC. Temporal is used only between NICo REST and the Site Agent. HTTP with a JWT is how external orchestrators reach NICo REST."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/hardware.md",
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "concept": "aes-gcm-symmetric-encryption",
+        "prequestions": [
+          {
+            "question": "You encrypt a message with a secret key. An attacker can't read it, but flips one bit of the ciphertext. What should a well-designed cipher do when you decrypt?",
+            "answer": "It should detect the change and refuse to decrypt. Authenticated ciphers like AES-GCM do this. Older modes without authentication would quietly hand you corrupted plaintext."
+          },
+          {
+            "question": "What does 'symmetric' mean in 'symmetric encryption'?",
+            "answer": "The same secret key is used to encrypt and to decrypt."
+          }
+        ],
+        "explanation": "**Symmetric encryption** uses one shared secret key for both directions. **AES** (Advanced Encryption Standard) is the standard symmetric cipher. A **256-bit key** is 32 random bytes; `openssl rand -base64 32` prints one in base64, as the NICo Day 0 guides do.\n\nAES on its own encrypts 16-byte blocks. A *mode* says how to handle messages of any length. **GCM** (Galois/Counter Mode) is an **authenticated encryption** mode. One operation gives you both:\n\n- **Confidentiality**: without the key, the ciphertext reveals nothing about the plaintext except its length.\n- **Integrity and authenticity**: GCM appends a 16-byte **authentication tag**. If any byte of the ciphertext, the tag, the nonce or the AAD changes, decryption fails outright. You never get garbled plaintext back.\n\nEach encryption takes three inputs besides the plaintext:\n\n1. **Key**: secret, 32 bytes.\n2. **Nonce** (\"number used once\"): 12 bytes. It doesn't have to be secret, but it **must never repeat with the same key**. Reusing one breaks both confidentiality and integrity. Use a fresh random nonce each time and store it next to the ciphertext.\n3. **AAD** (additional authenticated data): context that is *not encrypted* but *is authenticated*. Decryption succeeds only if you pass exactly the same AAD. Use it to bind ciphertext to a purpose, version or owner.\n\n**In NICo:** Flow encrypts firmware authentication data with AES-GCM before persisting it to its database or to Temporal. The key is a base64-encoded 32-byte key read from `FLOW_DATA_ENCRYPTION_KEY_PATH`. Flow's AAD provides *domain separation* (this ciphertext is firmware auth data and nothing else) and authenticates the envelope version and key ID. The docs say plainly what the AAD does not cover: it doesn't bind an envelope to a particular database row. A whole envelope could be copied to another row, so database controls have to prevent that. If the key path is unset, requests that carry firmware authentication data fail with `FailedPrecondition` instead of being stored unencrypted.",
+        "analogy": "AES-GCM is like a locked box with a tamper-evident seal. The key opens the box (confidentiality). The seal (the tag) shows if anyone pried at it (integrity). The AAD is a label glued to the outside: anyone can read it, but the seal covers it, so swapping the label breaks the seal. Where it breaks down: you can reuse a physical lock forever, but a GCM nonce must never be reused with the same key.",
+        "workedExample": {
+          "title": "Encrypt, tamper and mismatch with AES-256-GCM",
+          "steps": [
+            {
+              "subgoal": "Install the library",
+              "detail": "```bash\npython3 -m venv .venv && . .venv/bin/activate\npip install cryptography\n```"
+            },
+            {
+              "subgoal": "Write the demo",
+              "detail": "Save as `gcm_demo.py`:\n```python\nimport os\nfrom cryptography.hazmat.primitives.ciphers.aead import AESGCM\nfrom cryptography.exceptions import InvalidTag\n\nkey = AESGCM.generate_key(bit_length=256)   # 32 random bytes\naes = AESGCM(key)\nnonce = os.urandom(12)                      # fresh for every encryption\naad = b\"firmware-auth:v1\"                   # context, not secret\n\nct = aes.encrypt(nonce, b\"s3cret-token\", aad)\nprint(\"ciphertext+tag bytes:\", len(ct))     # 12 plaintext + 16 tag = 28\nprint(\"decrypted:\", aes.decrypt(nonce, ct, aad))\n\nbad = bytearray(ct)\nbad[0] ^= 1                                 # flip one bit\ntry:\n    aes.decrypt(nonce, bytes(bad), aad)\nexcept InvalidTag:\n    print(\"tampered ciphertext rejected\")\n\ntry:\n    aes.decrypt(nonce, ct, b\"other-domain:v1\")\nexcept InvalidTag:\n    print(\"wrong AAD rejected\")\n```"
+            },
+            {
+              "subgoal": "Run and read the output",
+              "detail": "`python3 gcm_demo.py` prints `28`, then `b's3cret-token'`, then both rejection lines. Flipping a single bit or changing the AAD makes decryption fail completely."
+            },
+            {
+              "subgoal": "Use a key from a file, as NICo does",
+              "detail": "```bash\nopenssl rand -base64 32 > flow.key\npython3 -c 'import base64; print(len(base64.b64decode(open(\"flow.key\").read())))'   # 32\n```\nFlow reads a base64-encoded 32-byte key file like this one through `FLOW_DATA_ENCRYPTION_KEY_PATH`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the script so it encrypts a password bound to a domain label and then decrypts it successfully.",
+          "partialSolution": "import os\nfrom cryptography.hazmat.primitives.ciphers.aead import AESGCM\n\nkey = AESGCM.generate_key(bit_length=256)\naes = AESGCM(key)\ncontext = b\"flow:firmware-auth:v1\"\nnonce = ___\nct = aes.encrypt(nonce, b\"bmc-password\", context)\nprint(aes.decrypt(nonce, ct, ___))",
+          "answer": "`nonce = os.urandom(12)` and `print(aes.decrypt(nonce, ct, context))`. The nonce must be a fresh 12-byte value, and decryption must get exactly the same AAD used for encryption."
+        },
+        "independentProblem": {
+          "prompt": "Flow's docs say its AAD authenticates the envelope version and key ID but does not bind an envelope to a particular database row. Describe an attack that this leaves open, and change the AAD design to stop it in your own toy store. Write a Python snippet that shows the copied envelope failing to decrypt.",
+          "hints": [
+            "The attacker can't read or change ciphertext, but suppose they can write to the database. What if they copy a whole valid envelope from one row into another?",
+            "Decryption succeeds whenever key, nonce, ciphertext and AAD all match. Which of those depends on the row?",
+            "Put the row's identity, such as `task_id`, into the AAD. Decrypting a copied envelope under a different row ID then raises InvalidTag."
+          ],
+          "answer": "Attack: replay or relocation. An attacker with write access to the database copies a valid envelope, for example rack A's firmware credentials, into another row (rack B's task). It decrypts cleanly because nothing in the AAD names the row. Fix: include the row identity in the AAD, e.g. `aad = f\"firmware-auth:v1:task:{task_id}\".encode()`. Demo: `ct = aes.encrypt(n, b\"pw\", b\"firmware-auth:v1:task:A\")`; then `aes.decrypt(n, ct, b\"firmware-auth:v1:task:B\")` raises InvalidTag. The trade-off is that you can no longer move ciphertext between rows on purpose without re-encrypting it."
+        },
+        "selfExplanation": "Why is it better for decryption to fail completely on tampering than to return slightly corrupted plaintext? Think about a BMC password or a firmware token that gets used automatically.",
+        "checks": [
+          {
+            "question": "What does AAD give you in AES-GCM?",
+            "options": [
+              "It is encrypted together with the plaintext so it stays hidden",
+              "It is authenticated but not encrypted, so decryption fails if it differs",
+              "It replaces the need for a nonce",
+              "It doubles the effective key length"
+            ],
+            "answer": "It is authenticated but not encrypted, so decryption fails if it differs",
+            "explanation": "AAD stays readable but is covered by the tag. A common misconception is that it gets hidden; it doesn't. It also has nothing to do with nonces or key length."
+          },
+          {
+            "question": "Flow starts with FLOW_DATA_ENCRYPTION_KEY_PATH unset, and a request arrives with non-empty authentication_data. What happens?",
+            "options": [
+              "Flow stores it in plaintext and logs a warning",
+              "Flow fails the request with FailedPrecondition before persisting it",
+              "Flow crashes at startup",
+              "Flow generates a random key and continues"
+            ],
+            "answer": "Flow fails the request with FailedPrecondition before persisting it",
+            "explanation": "With the variable unset, Flow starts with a warning and serves operations that carry no firmware auth data. Requests that do carry it are rejected. Flow fails at startup only if the variable is set but the key file is unreadable or invalid."
+          },
+          {
+            "question": "Two messages are encrypted with the same AES-GCM key and the same nonce. Why is that a problem?",
+            "options": [
+              "It isn't a problem; nonces are public",
+              "It breaks confidentiality and integrity for those messages",
+              "It only makes ciphertexts slightly longer"
+            ],
+            "answer": "It breaks confidentiality and integrity for those messages",
+            "explanation": "Nonces are public, but they must be unique for each key. Reusing one leaks the relationship between the plaintexts and lets an attacker forge tags."
+          }
+        ],
+        "sources": [
+          "architecture/flow.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      },
+      {
+        "concept": "key-derivation-function",
+        "prequestions": [
+          {
+            "question": "You need a different secret key for each of 10,000 network cards, but you can store only one secret. How could that work?",
+            "answer": "Derive each card's key from the one stored secret plus non-secret, card-specific context such as its MAC address and host ID. A key derivation function produces the same key every time for the same inputs."
+          },
+          {
+            "question": "If your one secret is 'password123', does running it through a strong KDF make the derived keys strong?",
+            "answer": "No. A KDF like HKDF adds no entropy. An attacker can guess the weak secret offline and check each guess against a leaked derived key."
+          }
+        ],
+        "explanation": "A **key derivation function (KDF)** is a deterministic function:\n\n```\nkey = KDF(secret input material, context) \n```\n\n- **Deterministic**: the same inputs always give the same key, so you can recompute it instead of storing it.\n- **Independent**: different contexts give keys that look unrelated. Knowing one derived key tells you nothing about another.\n- **One-way**: you can't feasibly recover the secret input from a derived key, *as long as that input is high-entropy*.\n\n**HKDF** (RFC 5869) is the standard KDF built on HMAC. Its inputs:\n\n- **IKM** (input key material): the secret.\n- **Salt**: optional; NICo uses none.\n- **Info**: the context string. Different info values give independent keys. Putting a label and a version in it is called **domain separation**.\n- **Length**: how many output bytes you want.\n\n**In NICo:** SuperNICs in non-ASTRA setups (BF3 in NIC mode, ConnectX-8) are locked with a 64-bit key. If NICo loses that key, the card is effectively bricked. NICo doesn't store per-card keys at all. NICo Core derives each one with **HKDF-SHA256**:\n\n- IKM = the versioned site-wide lockdown IKM from the credential store\n- salt = none\n- info = `supernic-lock:v1:{mac_address}:{machine_id}`\n- output = 8 bytes, shown as 16 hex characters\n\nDerived keys exist only in memory during lock and unlock. They are never written to disk or the database. The MAC address and MachineId are not secret; leaking them is not a security event. All the security rests on the IKM being **secret, random and high-entropy**. The docs warn that HKDF \"neither adds entropy nor slows password guessing\". Chapter 19 covers that offline-guessing risk in detail.\n\nBecause the derivation is deterministic, you can re-derive a key only while you still have the *exact* IKM version, the MachineId and the MAC. If any of them is lost, so is the key.",
+        "analogy": "A KDF is like a master locksmith who can cut a unique key for any apartment from a sealed master blank and the apartment number. The apartment numbers are public. Without the master blank, knowing them gets you nowhere. Where it breaks down: a physical master key opens every door directly. A derived key opens only its own door, and holding one derived key doesn't let you work back to the master.",
+        "workedExample": {
+          "title": "Derive SuperNIC-style lockdown keys with HKDF-SHA256",
+          "steps": [
+            {
+              "subgoal": "Create a high-entropy IKM",
+              "detail": "```bash\nopenssl rand -hex 32 > ikm.hex   # 256 random bits, demo only\n```"
+            },
+            {
+              "subgoal": "Write the derivation",
+              "detail": "Save as `kdf_demo.py` and use the same venv as before:\n```python\nfrom cryptography.hazmat.primitives import hashes\nfrom cryptography.hazmat.primitives.kdf.hkdf import HKDF\n\nikm = bytes.fromhex(open(\"ikm.hex\").read().strip())\n\ndef lockdown_key(mac, machine_id):\n    info = f\"supernic-lock:v1:{mac}:{machine_id}\".encode()\n    hkdf = HKDF(algorithm=hashes.SHA256(), length=8, salt=None, info=info)\n    return hkdf.derive(ikm).hex()   # 8 bytes -> 16 hex chars\n\nm = \"fm100hsdhjkfasjkdhaskjdhasd\"\nprint(lockdown_key(\"00:11:22:33:44:56\", m))\nprint(lockdown_key(\"00:11:22:33:44:56\", m))   # same as line 1\nprint(lockdown_key(\"00:11:22:33:44:57\", m))   # one MAC digit differs\nprint(lockdown_key(\"00:11:22:33:44:56\", \"other-machine\"))\n```\nThis follows the info format from the docs. NICo's internal encoding of the IKM bytes isn't documented, so your values won't match a real site."
+            },
+            {
+              "subgoal": "Check determinism",
+              "detail": "Run `python3 kdf_demo.py` twice. Lines 1 and 2 match each other and match across runs. This is what lets NICo re-derive a key to unlock a card later."
+            },
+            {
+              "subgoal": "Check independence",
+              "detail": "Lines 3 and 4 look completely unrelated to line 1, even though only one character of context changed. A compromised card exposes only its own key."
+            },
+            {
+              "subgoal": "See why the IKM matters",
+              "detail": "Replace the contents of `ikm.hex` with a new random value and rerun. Every key changes. This is why the docs warn: **do not replace an IKM version that cards still use**. Cards locked under the old value could no longer be unlocked."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so the function produces NICo's documented 64-bit lockdown key with the V1 info format.",
+          "partialSolution": "from cryptography.hazmat.primitives import hashes\nfrom cryptography.hazmat.primitives.kdf.hkdf import HKDF\n\ndef lockdown_key(ikm, mac, machine_id):\n    info = f\"___\".encode()\n    hkdf = HKDF(algorithm=hashes.SHA256(), length=___, salt=None, info=info)\n    return hkdf.derive(ikm).hex()",
+          "answer": "`info = f\"supernic-lock:v1:{mac}:{machine_id}\".encode()` and `length=8`. 64 bits is 8 bytes, which `.hex()` turns into 16 hex characters."
+        },
+        "independentProblem": {
+          "prompt": "A card was locked using lockdown IKM version 0. An operator runs a credential rotation that creates version 1 and sets it as the site target. `nic_lockdown_ikm_rotation_enabled` is still false, and the operator deletes version 0 from the credential store to tidy up. Later the host is decommissioned and NICo must unlock the card. What happens, and what should the operator have done?",
+          "hints": [
+            "For unlock requests, which IKM version does NICo Core pick: the site target, or something tracked per card?",
+            "The docs say unlock uses rotating_to_version, then current_version, then version 0. With rotation disabled, has this card migrated?",
+            "The docs also say a missing credential fails lookup rather than falling back to another secret. Without v0, can the key be re-derived?"
+          ],
+          "answer": "Rotation was disabled and not forced, so the card never migrated. Its tracked current_version is still 0, and the unlock uses version 0. That credential is gone, and lookup fails instead of falling back to version 1. Deriving with v1 would give a different key anyway. The key can't be re-derived, and a lost lockdown key leaves the card effectively bricked. The operator should keep every IKM version still referenced by cards or saved firmware operations, and back them up along with the NICo Core database, which holds the MachineIds, MACs and tracked versions. Check convergence with `nico-admin-cli credential rotation-status` before retiring anything."
+        },
+        "selfExplanation": "Why do you think NICo derives each lockdown key on demand instead of generating a random key for each card and storing it in the database? What does NICo gain, and what new risk does it accept?",
+        "checks": [
+          {
+            "question": "An attacker learns every SuperNIC's MAC address and host MachineId. What can they derive?",
+            "options": [
+              "Every lockdown key, because the HKDF algorithm is public",
+              "Nothing useful, unless they also have the secret lockdown IKM",
+              "The IKM itself, by inverting HKDF"
+            ],
+            "answer": "Nothing useful, unless they also have the secret lockdown IKM",
+            "explanation": "The context values are not secret, and the docs say their leak is not a security event on its own. The algorithm being public doesn't help either. Inverting HKDF to recover a high-entropy IKM is computationally impractical."
+          },
+          {
+            "question": "The lockdown IKM is a short, human-chosen password. One derived card key leaks. What is the risk?",
+            "options": [
+              "None; HKDF stretches weak secrets into strong ones",
+              "An attacker can guess IKM candidates offline and check each one against the leaked key and its known context",
+              "Only that single card is affected"
+            ],
+            "answer": "An attacker can guess IKM candidates offline and check each one against the leaked key and its known context",
+            "explanation": "HKDF adds no entropy and doesn't slow guessing. Once the attacker guesses the IKM, they can derive every card's key, not just the leaked one."
+          },
+          {
+            "question": "Where do derived lockdown keys live in NICo?",
+            "options": [
+              "In the credential store next to the IKM",
+              "In the NICo Core database, encrypted",
+              "Only in memory during lock and unlock operations"
+            ],
+            "answer": "Only in memory during lock and unlock operations",
+            "explanation": "The docs say derived keys are never written to disk or the database, and are absent from persisted operations and reports. What is persisted is the IKM (in the credential store) and the context and versions (in the database)."
+          }
+        ],
+        "sources": [
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "concept": "cryptographic-hashing",
+        "prequestions": [
+          {
+            "question": "Given only the SHA-256 hash of some data, can you compute the original data?",
+            "answer": "Not directly. Hashes are one-way. If the input could only be one of a few likely values, though, you can hash each guess and compare."
+          },
+          {
+            "question": "How long is the SHA-256 output for a 1-byte input, and for a 1 GB file?",
+            "answer": "The same: 256 bits, shown as 64 hex characters. The output is fixed-size whatever the input length."
+          }
+        ],
+        "explanation": "A **cryptographic hash function** maps any input to a fixed-size **digest**. SHA-256 always gives 32 bytes, or 64 hex characters. A good one has these properties:\n\n- **Deterministic**: the same input always gives the same digest.\n- **Preimage resistant**: given a digest, you can't feasibly find an input that produces it.\n- **Collision resistant**: you can't feasibly find two different inputs with the same digest.\n- **Avalanche effect**: changing one bit of input changes about half the output bits.\n\nHashing is **not encryption**. There is no key and no way to decrypt. Anyone can compute a hash, so hashing a *guessable* input hides nothing: an attacker hashes candidates until one matches.\n\nCommon uses:\n\n- **Integrity checks.** Compare a file's digest to a published one. Container images are identified by `sha256:` digests (ch. 13).\n- **Fingerprints.** A short public identifier for a long secret.\n- **Building blocks.** HMAC and HKDF (the previous lesson) are built from SHA-256. Digital signatures (the next lesson) sign a hash of the message, not the message itself.\n\n**In NICo:** Flow's ciphertext envelope version 1 records the **non-secret SHA-256 fingerprint** of the encryption key. If Flow is restarted with a different key, it notices the fingerprint mismatch and fails explicitly instead of producing confusing decryption errors. Storing that fingerprint is safe because the key is 256 random bits: there's no feasible way to work back from the fingerprint to the key, and guessing is hopeless.\n\nHashing alone is the wrong tool for credentials NICo has to *use*. NICo logs into BMCs with the real password, so it needs reversible encryption (AES-GCM) to get the password back. Hashing fits when you only need to *check* a value. Storing user passwords, which needs a slow, salted hash, comes up in chapter 19.",
+        "analogy": "A hash is like a fingerprint. It identifies a person compactly, the same finger always gives the same print, and you can't rebuild the person from it. Where it breaks down: if a suspect list has only ten people, you can fingerprint all ten and find the match. Hashes of guessable inputs leak those inputs in the same way.",
+        "workedExample": {
+          "title": "Hash, compare and fingerprint a key",
+          "steps": [
+            {
+              "subgoal": "Hash a string",
+              "detail": "```bash\nprintf 'nico' | sha256sum        # macOS: printf 'nico' | shasum -a 256\nprintf 'nicO' | sha256sum        # one letter changed: completely different digest\n```"
+            },
+            {
+              "subgoal": "Watch out for hidden bytes",
+              "detail": "```bash\necho 'nico' | sha256sum          # differs from printf: echo adds a newline\n```\nA hash covers *exact bytes*. Most \"my hashes don't match\" bugs come from a trailing newline or different whitespace."
+            },
+            {
+              "subgoal": "Fingerprint an encryption key",
+              "detail": "```bash\nopenssl rand -base64 32 > flow.key\npython3 -c 'import base64,hashlib; k=base64.b64decode(open(\"flow.key\").read()); print(hashlib.sha256(k).hexdigest())' > flow.key.fp\ncat flow.key.fp\n```\nThis shows the idea behind Flow's key fingerprint. Exactly which bytes Flow hashes isn't documented."
+            },
+            {
+              "subgoal": "Detect a key swap",
+              "detail": "Generate a second key with `openssl rand -base64 32 > other.key` and hash it the same way. The digest differs from `flow.key.fp`, so a program can say \"wrong key\" before it even tries to decrypt."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this startup check, which refuses to run if the loaded key doesn't match the stored fingerprint.",
+          "partialSolution": "import base64, hashlib\n\nstored_fp = open(\"flow.key.fp\").read().strip()\nkey = base64.b64decode(open(\"flow.key\").read())\nif hashlib.___(key).hexdigest() != stored_fp:\n    raise SystemExit(\"wrong key: fingerprint mismatch\")\nprint(\"key matches fingerprint\")",
+          "answer": "`hashlib.sha256(key).hexdigest()`. Use the same algorithm and the same input bytes (the decoded key, not the base64 text) that produced the stored fingerprint."
+        },
+        "independentProblem": {
+          "prompt": "Storing the SHA-256 fingerprint of a 256-bit random key next to the ciphertext is safe. A colleague proposes doing the same for a 6-digit numeric PIN that unlocks a device. Explain the difference and show it concretely with a few lines of Python.",
+          "hints": [
+            "Preimage resistance stops you from inverting the hash. Does it stop you from trying every possible input?",
+            "How many possible 6-digit PINs are there, compared with 2^256 keys?",
+            "Loop over range(1_000_000), hash each zero-padded PIN, and compare it to the target digest."
+          ],
+          "answer": "A 6-digit PIN has only 10^6 possible values, so an attacker simply hashes all of them. A 256-bit key has 2^256, far beyond any search. Demo: `target = hashlib.sha256(b\"042917\").hexdigest()`; then `next(p for p in (f\"{i:06d}\" for i in range(10**6)) if hashlib.sha256(p.encode()).hexdigest() == target)` finds the PIN in about a second. A fingerprint is safe only when the input is high-entropy."
+        },
+        "selfExplanation": "Why does it make sense for Flow to store a hash of its key rather than the key ID alone? What failure does the fingerprint catch that a name like 'kv1' would miss?",
+        "checks": [
+          {
+            "question": "A colleague suggests storing BMC passwords as sha256(password) in the credential store, so they are 'encrypted'. What is the main problem for NICo?",
+            "options": [
+              "SHA-256 output is too long to fit in a database column",
+              "NICo needs the real password to log into the BMC, and a hash can't be reversed; guessable passwords also leak",
+              "SHA-256 is broken, so the passwords are exposed immediately"
+            ],
+            "answer": "NICo needs the real password to log into the BMC, and a hash can't be reversed; guessable passwords also leak",
+            "explanation": "Hashing is one-way, so NICo could never recover the password to send to the BMC. NICo needs reversible authenticated encryption. SHA-256 itself is not broken, and the digest fits easily in a column."
+          },
+          {
+            "question": "Two files have identical SHA-256 digests. What is the reasonable conclusion?",
+            "options": [
+              "The files are almost certainly identical",
+              "The files are the same size but may differ",
+              "Nothing; collisions are common"
+            ],
+            "answer": "The files are almost certainly identical",
+            "explanation": "Collision resistance means finding two different inputs with the same SHA-256 digest is infeasible. That's why digests work as integrity checks. Size has nothing to do with it."
+          },
+          {
+            "question": "Is the SHA-256 fingerprint of Flow's encryption key secret?",
+            "options": [
+              "Yes; anyone who has it can decrypt Flow's data",
+              "No; it identifies the key but can't feasibly be turned back into a random 256-bit key"
+            ],
+            "answer": "No; it identifies the key but can't feasibly be turned back into a random 256-bit key",
+            "explanation": "The docs call it a non-secret fingerprint. Preimage resistance, together with the key's high entropy, makes storing it next to the ciphertext safe."
+          }
+        ],
+        "sources": [
+          "architecture/flow.md"
+        ]
+      },
+      {
+        "concept": "envelope-encryption-and-kek",
+        "prequestions": [
+          {
+            "question": "You encrypted 100,000 credentials directly with one master key, and now you must rotate that key. How much data do you have to re-encrypt?",
+            "answer": "All 100,000 credentials. Envelope encryption cuts this down: you re-encrypt only the small per-credential data keys, and the credential ciphertexts stay as they are."
+          },
+          {
+            "question": "Guess: with NICo's Postgres credential store and the Integrated provider, where is the master key kept?",
+            "answer": "In a Kubernetes Secret (for example `nico-secrets-kek`) in the namespace where nico-api runs. It is exposed to nico-api as an environment variable or a mounted file."
+          }
+        ],
+        "explanation": "**Envelope encryption** uses two layers of keys:\n\n1. For each item, generate a random **data encryption key (DEK)** and encrypt the item with it, using AES-GCM.\n2. Encrypt (**wrap**) the DEK with a master **key encryption key (KEK)**.\n3. Store the ciphertext, the wrapped DEK and the **KEK ID** together. Throw away the plaintext DEK.\n\nTo read, use the stored KEK ID to find the KEK, unwrap the DEK, then decrypt the item.\n\nWhy bother with two layers?\n\n- **Cheap rotation.** To retire a KEK, unwrap each DEK with the old KEK and re-wrap it with the new one. The bulk data is never touched.\n- **Small protected surface.** The KEK is the one secret you must guard and back up. It can live in a KMS such as Vault Transit or a KMIP server, which does the wrap and unwrap itself so the KEK never enters your process.\n- **Key ID = traceability.** Every record says which KEK it needs, so several KEKs can coexist during a rotation.\n\n**In NICo:** the Postgres credential store keeps BMC, UEFI and switch credentials *encrypted per credential*. The KEK wraps the per-credential data keys and is \"the only material an operator must protect\". With the Integrated provider, you put a 256-bit key in a Kubernetes Secret. The Secret's key name, e.g. `site-kek-1`, is the `kek_id`. It appears in the `[secrets]` config and **on every stored row**. At startup, nico-api checks that the key decodes to 32 bytes and that the routing has a `\"/\"` catch-all. Losing the Integrated KEK loses every stored credential, and a database dump is unreadable without every KEK its rows reference, so back the KEK up offline.\n\nMachine identity follows the same pattern. Per-org JWT signing private keys are encrypted at rest with a site master key (KEK) under IDs like `kv1`, selected by `current_encryption_key_id`. Decryption always uses the `key_id` **embedded in each encrypted blob**, so you must keep old key IDs until you have finished re-wrapping.",
+        "analogy": "It's like a hotel. Each room has its own key (the DEK), and all the room keys sit in a locked key cabinet (wrapped by the KEK). To change the master cabinet lock you re-lock one cabinet, not every room door. Where it breaks down: in a hotel the room keys stay in one cabinet. In envelope encryption, each wrapped DEK is stored right next to its own ciphertext, and each one is labelled with the ID of the KEK that wrapped it.",
+        "workedExample": {
+          "title": "Seal, rotate and unseal with a two-key keyring",
+          "steps": [
+            {
+              "subgoal": "Define seal (encrypt + wrap)",
+              "detail": "Save as `envelope_demo.py`:\n```python\nimport os, json, base64\nfrom cryptography.hazmat.primitives.ciphers.aead import AESGCM\n\nb64 = lambda b: base64.b64encode(b).decode()\nunb64 = base64.b64decode\nkeyring = {\"kv1\": AESGCM.generate_key(bit_length=256)}\n\ndef seal(plaintext, kek_id):\n    dek = AESGCM.generate_key(bit_length=256)\n    n1, n2 = os.urandom(12), os.urandom(12)\n    return {\"kek_id\": kek_id,\n            \"wrapped_dek\": b64(n1 + AESGCM(keyring[kek_id]).encrypt(n1, dek, kek_id.encode())),\n            \"ciphertext\": b64(n2 + AESGCM(dek).encrypt(n2, plaintext, None))}\n```\nEach blob stores its nonce in the first 12 bytes. The KEK ID is used as AAD, so a wrapped DEK can't be relabelled with a different key ID."
+            },
+            {
+              "subgoal": "Define unwrap, unseal and rewrap",
+              "detail": "Append:\n```python\ndef unwrap(rec):\n    blob = unb64(rec[\"wrapped_dek\"])\n    return AESGCM(keyring[rec[\"kek_id\"]]).decrypt(blob[:12], blob[12:], rec[\"kek_id\"].encode())\n\ndef unseal(rec):\n    blob = unb64(rec[\"ciphertext\"])\n    return AESGCM(unwrap(rec)).decrypt(blob[:12], blob[12:], None)\n\ndef rewrap(rec, new_id):\n    dek = unwrap(rec)\n    n = os.urandom(12)\n    return {**rec, \"kek_id\": new_id,\n            \"wrapped_dek\": b64(n + AESGCM(keyring[new_id]).encrypt(n, dek, new_id.encode()))}\n```"
+            },
+            {
+              "subgoal": "Seal a credential and inspect the record",
+              "detail": "Append:\n```python\nrec = seal(b\"bmc-root-password\", \"kv1\")\nprint(json.dumps(rec, indent=2))\n```\nThe record holds a key ID, a wrapped DEK and ciphertext. Nothing in it is readable without the KEK."
+            },
+            {
+              "subgoal": "Rotate the KEK and delete the old one",
+              "detail": "Append:\n```python\nold_ct = rec[\"ciphertext\"]\nkeyring[\"kv2\"] = AESGCM.generate_key(bit_length=256)\nrec = rewrap(rec, \"kv2\")\nprint(\"ciphertext unchanged:\", rec[\"ciphertext\"] == old_ct)\ndel keyring[\"kv1\"]\nprint(unseal(rec))\n```\nRun `python3 envelope_demo.py`. It prints `ciphertext unchanged: True`, then `b'bmc-root-password'`. Only the wrapped DEK changed, and the old KEK could be deleted only after the re-wrap."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "These are the read-path functions from envelope_demo.py with parts missing. Fill them in.",
+          "partialSolution": "def unwrap(rec):\n    blob = unb64(rec[\"wrapped_dek\"])\n    kek = keyring[rec[___]]\n    return AESGCM(kek).decrypt(blob[:12], blob[12:], rec[\"kek_id\"].encode())\n\ndef unseal(rec):\n    blob = unb64(rec[\"ciphertext\"])\n    return AESGCM(___).decrypt(blob[:12], blob[12:], None)",
+          "answer": "`kek = keyring[rec[\"kek_id\"]]`, because the KEK is chosen by the ID stored in the record, not by whichever key is current. And `AESGCM(unwrap(rec))`, because the data is decrypted with the unwrapped DEK, not the KEK."
+        },
+        "independentProblem": {
+          "prompt": "Your site has machine identity enabled with `current_encryption_key_id = \"kv1\"`. You add kv2 to `machine_identity.encryption_keys`, change `current_encryption_key_id` to \"kv2\", remove kv1 from the secrets in the same change, and restart nico-api. Which per-org data is now at risk, and why? What is the safe order of operations, at the level of principles?",
+          "hints": [
+            "Which key does decryption use: the site's current key ID, or something stored with each blob?",
+            "Per-org signing private keys encrypted before the change still carry key_id kv1.",
+            "The docs say to keep all key IDs that appear in stored ciphertext until a KEK re-wrap is complete."
+          ],
+          "answer": "Every per-org JWT signing private key encrypted before the change still has key_id kv1 embedded in it, and decryption uses that embedded ID, not current_encryption_key_id. With kv1 removed, those keys can't be decrypted, so those orgs can't sign tokens. Safe order: (1) add kv2 while keeping kv1; (2) switch current_encryption_key_id to kv2 so new writes use kv2; (3) re-wrap the existing blobs to kv2 following the Master Encryption Key Rotation runbook; (4) remove kv1 only after nothing references it, and keep backups until you are sure."
+        },
+        "selfExplanation": "Why does keeping a key ID on every encrypted row make zero-downtime KEK rotation possible? What would rotation look like if rows didn't record which key encrypted them?",
+        "checks": [
+          {
+            "question": "During a KEK rotation in envelope encryption, what gets re-encrypted?",
+            "options": [
+              "Every credential's ciphertext",
+              "Only the wrapped data keys (DEKs)",
+              "Nothing; the new KEK can decrypt old data automatically"
+            ],
+            "answer": "Only the wrapped data keys (DEKs)",
+            "explanation": "Re-wrapping unwraps each small DEK with the old KEK and wraps it with the new one. The bulk ciphertext stays as it is. A new KEK can't decrypt anything wrapped under the old one."
+          },
+          {
+            "question": "You take a database dump of a site that uses the Postgres credential store. What else must you keep to be able to read the credentials later?",
+            "options": [
+              "Nothing; the dump is self-contained",
+              "Every KEK that the dumped rows reference",
+              "Only the newest KEK"
+            ],
+            "answer": "Every KEK that the dumped rows reference",
+            "explanation": "The docs say a dump is unreadable without every KEK its rows reference. Rows still wrapped under an older KEK need that KEK, so keeping only the newest one isn't enough."
+          },
+          {
+            "question": "At startup, nico-api validates the [secrets] section. Which of these causes a boot failure?",
+            "options": [
+              "The KEK decodes to 16 bytes instead of 32",
+              "The KEK Secret is named nico-secrets-kek",
+              "There is a \"/\" entry in [secrets.routing]"
+            ],
+            "answer": "The KEK decodes to 16 bytes instead of 32",
+            "explanation": "The key must decode to 32 bytes (256 bits). The Secret name is your choice, and the \"/\" catch-all is required, not forbidden."
+          }
+        ],
+        "sources": [
+          "getting-started/installation-options/day0-credential-store.md",
+          "getting-started/installation-options/day0-machine-identity.md",
+          "architecture/supernic_lockdown_key_management.md"
+        ]
+      },
+      {
+        "concept": "public-key-cryptography",
+        "prequestions": [
+          {
+            "question": "Can you publish one of your keys to the whole internet and still be secure?",
+            "answer": "Yes, with public-key cryptography. The public key can be shared freely. Only the matching private key must stay secret."
+          },
+          {
+            "question": "To prove a message came from you, which key do you use, and which key does the receiver use?",
+            "answer": "You sign with your private key. The receiver verifies with your public key."
+          }
+        ],
+        "explanation": "Everything so far has been **symmetric**: both sides share the same secret. That raises a problem: how do two parties get a shared secret in the first place, and how can thousands of verifiers check something without each holding a secret that would let them forge it?\n\n**Public-key (asymmetric) cryptography** uses a **key pair**:\n\n- a **private key**, kept secret by its owner\n- a **public key**, derived from the private key and safe to publish\n\nWorking backwards from the public key to the private key is computationally infeasible. The pair supports two operations:\n\n1. **Digital signatures.** The owner hashes the message (see the hashing lesson) and signs the digest with the **private** key. Anyone with the **public** key can verify that this key signed exactly this message. One changed byte gives a different hash, and verification fails. Signatures provide authenticity and integrity, **not** confidentiality: the message stays readable.\n2. **Encryption and key agreement.** Anyone can encrypt to the public key, and only the private-key holder can decrypt. In practice this is used to agree on or send a symmetric key, which then does the bulk encryption with AES-GCM. TLS works this way.\n\nCommon algorithms are RSA, ECDSA and Ed25519. **ES256** means ECDSA on the P-256 curve with SHA-256.\n\n**In NICo:**\n\n- All Site Controller services talk over **mTLS**. Each side proves it holds the private key that matches its certificate. cert-manager and Vault PKI issue those certificates; chapter 19 covers PKI.\n- **Machine identity** signs short-lived JWT-SVIDs with per-org signing keys. `ES256` is the only supported algorithm. The private keys are encrypted at rest with the KEK (previous lesson). Verifiers only need the public keys, which can be published.\n- **SSH key groups** hold tenants' *public* SSH keys, which grant access to the SSH console.\n\nThere is one gap: a public key doesn't say who owns it. Certificates solve this in chapter 19.",
+        "analogy": "A key pair is like a wax seal and the public's knowledge of what your seal looks like. Only you own the signet ring (the private key), but anyone can compare a seal against the known pattern (the public key). Where it breaks down: a wax seal looks the same on every letter, so it could be lifted and copied. A digital signature is computed from the exact message, so it can't be moved to a different one.",
+        "workedExample": {
+          "title": "Sign and verify with an ES256-style key pair",
+          "steps": [
+            {
+              "subgoal": "Generate a P-256 key pair",
+              "detail": "```bash\nopenssl ecparam -name prime256v1 -genkey -noout -out priv.pem\nopenssl ec -in priv.pem -pubout -out pub.pem\ncat pub.pem    # safe to share\n```\n`prime256v1` is P-256, the curve ES256 uses. These commands work with both OpenSSL and macOS LibreSSL."
+            },
+            {
+              "subgoal": "Sign a message",
+              "detail": "```bash\nprintf 'sub=spiffe://example.org/machine/abc;exp=1767225600' > token.txt\nopenssl dgst -sha256 -sign priv.pem -out token.sig token.txt\n```\nThis hashes the file with SHA-256 and signs the digest with the private key."
+            },
+            {
+              "subgoal": "Verify with only the public key",
+              "detail": "```bash\nopenssl dgst -sha256 -verify pub.pem -signature token.sig token.txt\n# Verified OK\n```"
+            },
+            {
+              "subgoal": "Tamper and re-verify",
+              "detail": "```bash\nprintf 'sub=spiffe://example.org/machine/EVIL;exp=1767225600' > token.txt\nopenssl dgst -sha256 -verify pub.pem -signature token.sig token.txt\n# Verification failure\n```\nThe changed message has a different hash, so the old signature no longer verifies. Only the private-key holder could make a valid signature for the new message."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the key file each command needs.",
+          "partialSolution": "openssl dgst -sha256 -sign ___ -out msg.sig msg.txt\nopenssl dgst -sha256 -verify ___ -signature msg.sig msg.txt",
+          "answer": "`-sign priv.pem` (signing needs the private key) and `-verify pub.pem` (verifying needs only the public key)."
+        },
+        "independentProblem": {
+          "prompt": "A tenant runs a service that receives JWT-SVIDs that NICo signed for its machines. (a) Which key does the tenant's service need to verify them, and is that key secret? (b) Why does NICo encrypt the per-org signing private keys at rest with the KEK, but has no need to hide the public keys? (c) If an attacker stole one org's decrypted private signing key, what could they do?",
+          "hints": [
+            "Verifying a signature uses the other half of the pair.",
+            "Think about what each half of the pair lets its holder do.",
+            "Signing is the operation only the private key allows. What would an attacker sign?"
+          ],
+          "answer": "(a) The org's public signing key, which is not secret. It is typically published, for example as JWKS (Day 1 covers JWKS/OIDC verification). (b) The private key lets its holder create valid tokens, so it must be confidential; at rest it is protected by envelope encryption under the KEK. The public key only lets you check tokens, so publishing it gives nothing away. (c) They could forge JWT-SVIDs that claim any SPIFFE ID in that org, and verifiers would accept them until the signing key is rotated (see the JWT Signing Key Rotation runbook). Other orgs, which have their own keys, would be unaffected."
+        },
+        "selfExplanation": "Why does a signature sign a SHA-256 hash of the message instead of the raw message? Connect this to the properties of hashing from earlier in the chapter.",
+        "checks": [
+          {
+            "question": "A verifier wants to check a NICo-issued ES256 token. What does it need?",
+            "options": [
+              "The org's private signing key",
+              "The site KEK",
+              "The org's public signing key"
+            ],
+            "answer": "The org's public signing key",
+            "explanation": "Verification uses the public key. Handing out the private key would let every verifier forge tokens. The KEK only protects the private keys at rest and plays no part in verification."
+          },
+          {
+            "question": "What does a valid digital signature on a message NOT give you?",
+            "options": [
+              "Confidence that the holder of the private key signed it",
+              "Confidence that the message wasn't altered",
+              "Confidentiality of the message contents"
+            ],
+            "answer": "Confidentiality of the message contents",
+            "explanation": "Signatures give authenticity and integrity, but anyone can still read the message. For confidentiality you also need encryption, for example TLS or AES-GCM."
+          },
+          {
+            "question": "NICo key groups store tenants' SSH keys for console access. Which half of each key pair does NICo need to store?",
+            "options": [
+              "The public key",
+              "The private key",
+              "Both halves"
+            ],
+            "answer": "The public key",
+            "explanation": "The server checks that a connecting user can prove possession of the matching private key, so it needs only the public key. Private SSH keys should never leave the user's machine."
+          }
+        ],
+        "sources": [
+          "getting-started/installation-options/day0-machine-identity.md",
+          "overview/what-is-nico.md",
+          "architecture/key_group_sync.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Build minivault: an envelope-encrypted credential store with KEK rotation, HKDF and signed snapshots",
+      "goal": "Write a small Python credential store that encrypts each secret with its own AES-256-GCM data key, wraps that key under a KEK with a recorded key ID and SHA-256 fingerprint, and binds each record to its path with AAD. It also derives SuperNIC-style lockdown keys with HKDF from a stored IKM. You then rotate the KEK, delete the old one safely, and sign the final store with an ECDSA P-256 key.",
+      "whyItMatters": "This is a laptop-sized model of what the Site Controller does with secrets. The Postgres credential store wraps per-credential data keys under a kek_id that is recorded on every row. Machine identity decrypts using the key ID embedded in each blob. Flow uses AES-GCM AAD and key fingerprints. NICo Core derives lockdown keys with HKDF-SHA256 from a versioned IKM. Building it yourself shows why NICo's rules exist: keep every referenced key ID until the re-wrap is done, back up the KEK, and never replace an IKM version that cards still use. This is a teaching model; NICo's real storage format is different.",
+      "setup": [
+        "Linux or macOS with python3 (3.9+) and openssl (macOS LibreSSL is fine)",
+        "An empty working directory: `mkdir minivault && cd minivault`",
+        "A virtualenv with the cryptography package: `python3 -m venv .venv && . .venv/bin/activate && pip install cryptography`",
+        "Optional, without local Python: `docker run --rm -it -v \"$PWD\":/work -w /work python:3.12-slim bash`, then `apt-get update && apt-get install -y openssl && pip install cryptography`"
+      ],
+      "steps": [
+        {
+          "subgoal": "Create the first KEK",
+          "detail": "```bash\numask 077\nmkdir -p keks\nopenssl rand -base64 32 > keks/kek-1\npython3 -c 'import base64,sys; print(len(base64.b64decode(open(sys.argv[1]).read())))' keks/kek-1   # must print 32\n```\nThe file name `kek-1` is the KEK ID, just as the Kubernetes Secret key `site-kek-1` is the `kek_id` in NICo."
+        },
+        {
+          "subgoal": "Write minivault.py",
+          "detail": "Save this as `minivault.py`:\n```python\n#!/usr/bin/env python3\n\"\"\"minivault: a toy envelope-encrypted credential store. Not for production.\"\"\"\nimport base64\nimport hashlib\nimport json\nimport os\nimport sys\nfrom pathlib import Path\n\nfrom cryptography.exceptions import InvalidTag\nfrom cryptography.hazmat.primitives import hashes\nfrom cryptography.hazmat.primitives.ciphers.aead import AESGCM\nfrom cryptography.hazmat.primitives.kdf.hkdf import HKDF\n\nSTORE = Path(os.environ.get(\"MINIVAULT_STORE\", \"store.json\"))\nKEK_DIR = Path(\"keks\")\n\n\ndef b64(data):\n    return base64.b64encode(data).decode()\n\n\ndef unb64(text):\n    return base64.b64decode(text)\n\n\ndef fingerprint(key):\n    return hashlib.sha256(key).hexdigest()[:16]\n\n\ndef load_kek(kek_id):\n    path = KEK_DIR / kek_id\n    if not path.exists():\n        sys.exit(f\"KEK {kek_id} not found, but a record still references it\")\n    key = base64.b64decode(path.read_text().strip())\n    if len(key) != 32:\n        sys.exit(f\"KEK {kek_id} must decode to 32 bytes, got {len(key)}\")\n    return key\n\n\ndef load_store():\n    return json.loads(STORE.read_text()) if STORE.exists() else {}\n\n\ndef save_store(store):\n    STORE.write_text(json.dumps(store, indent=2, sort_keys=True) + \"\\n\")\n\n\ndef wrap(kek_id, dek, path):\n    kek = load_kek(kek_id)\n    nonce = os.urandom(12)\n    aad = f\"wrap:{kek_id}:{path}\".encode()\n    return {\n        \"kek_id\": kek_id,\n        \"kek_fp\": fingerprint(kek),\n        \"wrap_nonce\": b64(nonce),\n        \"wrapped_dek\": b64(AESGCM(kek).encrypt(nonce, dek, aad)),\n    }\n\n\ndef unwrap(rec, path):\n    kek = load_kek(rec[\"kek_id\"])\n    if fingerprint(kek) != rec[\"kek_fp\"]:\n        sys.exit(f\"KEK file {rec['kek_id']} does not match the fingerprint in the record\")\n    aad = f\"wrap:{rec['kek_id']}:{path}\".encode()\n    return AESGCM(kek).decrypt(unb64(rec[\"wrap_nonce\"]), unb64(rec[\"wrapped_dek\"]), aad)\n\n\ndef put(path, secret, kek_id):\n    dek = AESGCM.generate_key(bit_length=256)\n    nonce = os.urandom(12)\n    ciphertext = AESGCM(dek).encrypt(nonce, secret.encode(), f\"data:{path}\".encode())\n    store = load_store()\n    store[path] = {**wrap(kek_id, dek, path), \"nonce\": b64(nonce), \"ciphertext\": b64(ciphertext)}\n    save_store(store)\n\n\ndef get(path):\n    store = load_store()\n    if path not in store:\n        sys.exit(f\"no credential at {path}\")\n    rec = store[path]\n    dek = unwrap(rec, path)\n    plaintext = AESGCM(dek).decrypt(unb64(rec[\"nonce\"]), unb64(rec[\"ciphertext\"]), f\"data:{path}\".encode())\n    return plaintext.decode()\n\n\ndef rewrap(new_kek_id):\n    store = load_store()\n    for path, rec in store.items():\n        dek = unwrap(rec, path)\n        rec.update(wrap(new_kek_id, dek, path))\n    save_store(store)\n    print(f\"re-wrapped {len(store)} records with {new_kek_id}\")\n\n\ndef lockdown_key(ikm_version, mac, machine_id):\n    ikm = get(f\"nic_lockdown_ikm/{ikm_version}\").encode()\n    info = f\"supernic-lock:v1:{mac}:{machine_id}\".encode()\n    hkdf = HKDF(algorithm=hashes.SHA256(), length=8, salt=None, info=info)\n    return hkdf.derive(ikm).hex()\n\n\nUSAGE = \"\"\"usage:\n  minivault.py put PATH SECRET KEK_ID\n  minivault.py get PATH\n  minivault.py rewrap NEW_KEK_ID\n  minivault.py lockdown IKM_VERSION MAC MACHINE_ID\"\"\"\n\n\ndef main():\n    cmd, *args = sys.argv[1:] or [\"help\"]\n    try:\n        if cmd == \"put\" and len(args) == 3:\n            put(*args)\n        elif cmd == \"get\" and len(args) == 1:\n            print(get(args[0]))\n        elif cmd == \"rewrap\" and len(args) == 1:\n            rewrap(args[0])\n        elif cmd == \"lockdown\" and len(args) == 3:\n            print(lockdown_key(*args))\n        else:\n            sys.exit(USAGE)\n    except InvalidTag:\n        sys.exit(\"INTEGRITY FAILURE: ciphertext, nonce or bound context does not match\")\n\n\nif __name__ == \"__main__\":\n    main()\n```\nFind each concept in the code: the AES-GCM DEK and KEK, AAD that binds a record to its path and KEK ID, the SHA-256 KEK fingerprint, and HKDF."
+        },
+        {
+          "subgoal": "Store credentials and read one back",
+          "detail": "```bash\npython3 minivault.py put bmc/host-a/root 'Sup3r-Secret!' kek-1\npython3 minivault.py put nic_lockdown_ikm/v0 \"$(openssl rand -hex 32)\" kek-1\ncat store.json                              # only key IDs, fingerprints, nonces and base64\npython3 minivault.py get bmc/host-a/root    # Sup3r-Secret!\n```\nNote that passing a secret as a command-line argument exposes it in process listings and shell history. NICo's docs give the same warning about `--password` on `credential add-nic-lockdown-ikm`."
+        },
+        {
+          "subgoal": "Derive lockdown keys",
+          "detail": "```bash\npython3 minivault.py lockdown v0 00:11:22:33:44:56 fm100hsdhjkfasjkdhaskjdhasd\npython3 minivault.py lockdown v0 00:11:22:33:44:56 fm100hsdhjkfasjkdhaskjdhasd\npython3 minivault.py lockdown v0 00:11:22:33:44:57 fm100hsdhjkfasjkdhaskjdhasd\n```\nThe first two print the same 16 hex characters. The third prints an unrelated value. The derived keys are never saved anywhere."
+        },
+        {
+          "subgoal": "Rotate the KEK, then retire the old one",
+          "detail": "```bash\nopenssl rand -base64 32 > keks/kek-2\npython3 minivault.py rewrap kek-2          # re-wrapped 2 records with kek-2\ngrep -c '\"kek-1\"' store.json              # 0: nothing references kek-1 any more\nmv keks/kek-1 kek-1.retired-backup         # in production: offline backup, not just a rename\npython3 minivault.py get bmc/host-a/root   # still works\n```\nTo see why the order matters, try a separate experiment: run `put` with kek-1, then remove kek-1 *before* re-wrapping. `get` fails with `KEK kek-1 not found, but a record still references it`."
+        },
+        {
+          "subgoal": "Sign the store snapshot",
+          "detail": "```bash\nopenssl ecparam -name prime256v1 -genkey -noout -out signer.key\nopenssl ec -in signer.key -pubout -out signer.pub\nopenssl dgst -sha256 -sign signer.key -out store.sig store.json\nopenssl dgst -sha256 -verify signer.pub -signature store.sig store.json   # Verified OK\n```\nSign *after* the last change to store.json. Anyone who has `signer.pub` can now check that the snapshot hasn't been altered."
+        },
+        {
+          "subgoal": "Write verify.sh",
+          "detail": "Save as `verify.sh` and run `bash verify.sh`:\n```bash\n#!/usr/bin/env bash\nset -u\ncd \"$(dirname \"$0\")\"\necho \"1. read after rotation:\"; python3 minivault.py get bmc/host-a/root\necho \"2. old KEK retired:\"; test ! -e keks/kek-1 && echo \"kek-1 absent\"; grep -c '\"kek-1\"' store.json\necho \"3. relocation detected:\"\npython3 - <<'EOF'\nimport json\ns = json.load(open(\"store.json\"))\ns[\"bmc/host-b/root\"] = s[\"bmc/host-a/root\"]\njson.dump(s, open(\"tampered.json\", \"w\"), indent=2)\nEOF\nMINIVAULT_STORE=tampered.json python3 minivault.py get bmc/host-b/root\necho \"4. stable, independent lockdown keys:\"\npython3 minivault.py lockdown v0 00:11:22:33:44:56 fm100hsdhjkfasjkdhaskjdhasd\npython3 minivault.py lockdown v0 00:11:22:33:44:56 fm100hsdhjkfasjkdhaskjdhasd\npython3 minivault.py lockdown v0 00:11:22:33:44:57 fm100hsdhjkfasjkdhaskjdhasd\necho \"5. snapshot signature:\"\nopenssl dgst -sha256 -verify signer.pub -signature store.sig store.json\n```\nStep 3 copies host-a's valid record to host-b in a separate file. The AAD includes the path, so decryption refuses it."
+        }
+      ],
+      "verify": "`bash verify.sh` prints, in order: (1) `Sup3r-Secret!`; (2) `kek-1 absent` and `0`; (3) `INTEGRITY FAILURE: ciphertext, nonce or bound context does not match`; (4) two identical 16-hex-character lines followed by a different one; (5) `Verified OK`.",
+      "hints": [
+        "`ModuleNotFoundError: No module named 'cryptography'`: activate the venv (`. .venv/bin/activate`) in the shell where you run the scripts.",
+        "`KEK ... must decode to 32 bytes, got 48`: you created the KEK with `openssl rand -hex 32`. KEK files must be base64, so use `openssl rand -base64 32`. (The IKM credential is hex text, which is fine because it is stored as a secret, not loaded as a KEK.)",
+        "`INTEGRITY FAILURE` on a normal `get`: you probably edited store.json by hand. Any change to a nonce, ciphertext or wrapped key breaks the tag. Delete store.json and put the credentials again.",
+        "`Verification failure` in check 5: store.json changed after you signed it (for example, you ran rewrap again). Re-run the `openssl dgst -sha256 -sign` command.",
+        "`KEK kek-1 not found` during rewrap: you retired kek-1 before re-wrapping. Restore it from `kek-1.retired-backup`, rewrap, then retire it again.",
+        "On macOS without coreutils, use `shasum -a 256` wherever you'd use `sha256sum`."
+      ],
+      "stretch": "Add a `keks-in-use` command that lists every kek_id referenced in the store, and make retirement safe by refusing to proceed while any record still references the KEK. Then add IKM versioning: store `nic_lockdown_ikm/v1`, keep a per-card `current_version` in a small JSON file, and have `lockdown` use each card's tracked version rather than the newest one. Show that deleting v0 while a card still tracks it makes that card's key impossible to derive. For a bigger challenge, replace the file-based KEK with Vault's Transit engine in a dev container (`docker run --cap-add=IPC_LOCK -e VAULT_DEV_ROOT_TOKEN_ID=root -p 8200:8200 hashicorp/vault`) so the KEK never enters your Python process."
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "Step 2 runs `kubectl exec deploy/fake-api ...` immediately after `kubectl apply` with no wait. On a fresh cluster the busybox image may still be pulling, so the exec fails (container not running / pod Pending) and the learner sees an error instead of `threads=2` and `200000 100000`.",
+        "fix": "Add `kubectl rollout status deployment/fake-db deployment/fake-api --timeout=120s` (or `kubectl wait --for=condition=Available deployment/fake-db deployment/fake-api`) before the `get pods` and `exec` lines."
+      },
+      {
+        "where": "tokio-worker-threads",
+        "severity": "minor",
+        "problem": "The explanation says nico-api's request handling and state controllers run as async tasks on the Tokio workers. That claim about nico-api internals isn't in the sizing page, which only says nico-api runs as one process with Tokio worker threads whose count is set through TOKIO_WORKER_THREADS.",
+        "fix": "Soften it to a general statement (e.g. 'much of nico-api's work runs as async tasks on the worker pool') or cite a source that describes nico-api's task model."
+      }
+    ]
+  }
+}

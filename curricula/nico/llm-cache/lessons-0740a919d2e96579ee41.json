@@ -1,0 +1,697 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Chapters 14 and 15 got a NICo site controller running: workloads, Services, storage, Calico and MetalLB. This chapter asks how big a fleet that cluster can carry, and which knobs you turn when it has to carry more. The answers come from NICo's Sizing and Scale Guidance. That page records field data from 33 sites (the largest has 1,930 hosts) and simulated fleets up to 1,112 GB200 NVL72 racks, which is 20,016 hosts and 60,048 machines.\n\nThe lessons come in the order the scale runs hit them. First you'll learn how Kubernetes caps a container's CPU and memory, and why nico-api and the Postgres primary reach their own caps long before their nodes run out of CPU. Then come the tools that work around those caps: pod anti-affinity to keep the two heavy components on different nodes, the right way to read Postgres memory (working set versus `oom_kill`), and Tokio worker threads, so a bigger CPU limit actually gets used.\n\nThe second half is about testing at scale without hardware. NICo's fleet simulator, machine-a-tron, publishes every simulated BMC as a Kubernetes Service `externalIP`. With kube-proxy in IPVS mode, that runs into a hard limit of 65,536 ipset entries per node. That's a limit of the simulator, not of NICo, but you need to know it before planning a large simulated run.\n\nEverything here is about the control plane. You'll apply it in Chapter 42, when you measure fleet-up and time to ready yourself.",
+    "objectives": [
+      "Set CPU and memory requests and limits on a pod and confirm them in the container's cgroup files (`cpu.max`, `memory.max`)",
+      "Write a required pod anti-affinity rule that keeps two workloads off the same node, and explain when NICo's large-fleet runs needed one",
+      "Tell normal page-cache growth apart from real memory pressure by reading `memory.stat` and the `oom_kill` counter in `memory.events`",
+      "Expose a Service on a chosen address with `externalIPs`, and work out how many simulated racks fit in kube-proxy's IPVS ipset",
+      "Match an async runtime's worker thread count to its container CPU limit using an environment variable",
+      "Describe what machine-a-tron simulates and what it doesn't, and size the BMC addresses and Service entries a simulated fleet needs"
+    ],
+    "lessons": [
+      {
+        "concept": "kubernetes-resource-limits",
+        "prequestions": [
+          {
+            "question": "A container has a CPU limit of 2 and tries to use 4 CPUs' worth of work. Does Kubernetes kill it, slow it down, or let it run?",
+            "answer": "It slows it down. The kernel throttles the container to 2 CPUs' worth of time in each scheduling period. CPU over the limit is throttled, never killed. Memory over the limit is what gets a process killed."
+          },
+          {
+            "question": "A server has two 24-core sockets with Hyper-Threading on. How many CPUs does Kubernetes say the node has?",
+            "answer": "96. Kubernetes counts logical CPUs (hyper-threads): 2 × 24 × 2 = 96."
+          }
+        ],
+        "explanation": "Each container in a pod spec can have a `resources` block with two parts:\n\n- **requests**: what the scheduler sets aside for the container when it picks a node. A pod only lands on a node that still has that much unreserved CPU and memory.\n- **limits**: a hard ceiling that the kernel on the node enforces through the container's cgroup (Chapter 2).\n\n**CPU** is measured in **logical CPUs**. A logical CPU is what the OS schedules on. On a server with Hyper-Threading, each hyper-thread is one logical CPU, so `cpu: \"1\"` is one hyper-thread, not one physical core. `500m` (millicores) is half a logical CPU. The limit becomes a quota in `cpu.max`: for example, `150000 100000` means 150 ms of CPU time per 100 ms period. A container that uses up its quota is **throttled**. It waits for the next period. It is not killed.\n\n**Memory** is measured in bytes (`Mi`, `Gi`). The limit becomes `memory.max`. If the container goes over it and the kernel can't reclaim enough memory, the kernel's OOM (out-of-memory) killer kills a process in the container.\n\nIn NICo you set these per component in the Helm chart values. NICo's sizing page gives these numbers:\n\n- Chart defaults: **nico-api 3 CPUs**, **Postgres primary 8 CPUs and 16 GiB**.\n- A baseline site controller node has two 24-core sockets with Hyper-Threading, which is **96 logical CPUs**.\n- In field data, nico-api reaches its 3-CPU limit near **1,500 hosts** and the Postgres primary reaches its 8-CPU limit near **2,500 hosts**, while the nodes still have plenty of spare CPU.\n\nSo the first ceiling at scale is not the hardware. It's the limits written in the chart. A node dashboard can show 70% idle while nico-api is throttled at exactly 3.0 CPUs. For large fleets, the guidance raises the limits: nico-api to 8 CPUs at 250 racks, 32 at 556 racks and 64 at 1,112 racks.",
+        "analogy": "A CPU limit is like a speed limiter on a rental van. The engine (the node) could go faster, but the van is capped at a set speed and simply doesn't go faster. It doesn't crash. A memory limit is more like a van's maximum load: go over it and something gets thrown off. The analogy breaks down because a real speed limiter caps speed all the time. CPU throttling is measured per period: a container can run at full speed for part of each 100 ms window and then sit idle for the rest.",
+        "workedExample": {
+          "title": "Set limits on a pod and read them back from the cgroup",
+          "steps": [
+            {
+              "subgoal": "Start from a working cluster",
+              "detail": "Use any kind cluster from Chapter 14 (`kind create cluster` if you don't have one). Check that `kubectl get nodes` shows `Ready`."
+            },
+            {
+              "subgoal": "Apply a pod with requests and limits",
+              "detail": "```bash\nkubectl apply -f - <<'EOF'\napiVersion: v1\nkind: Pod\nmetadata:\n  name: limits-demo\nspec:\n  containers:\n  - name: demo\n    image: busybox:1.36\n    command: [\"sh\", \"-c\", \"sleep 1000000\"]\n    resources:\n      requests:\n        cpu: 250m\n        memory: 64Mi\n      limits:\n        cpu: 1500m\n        memory: 256Mi\nEOF\nkubectl wait --for=condition=Ready pod/limits-demo\n```"
+            },
+            {
+              "subgoal": "Read the limits the kernel enforces",
+              "detail": "```bash\nkubectl exec limits-demo -- cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max\n```\nExpected output (on a cgroup v2 host):\n```\n150000 100000\n268435456\n```\n1500m becomes 150,000 µs of CPU time per 100,000 µs period. 256Mi becomes 256 × 1024 × 1024 bytes."
+            },
+            {
+              "subgoal": "Push past the CPU limit and watch the throttling",
+              "detail": "Run two busy loops (2 CPUs of demand against a 1.5 limit) for 5 seconds:\n```bash\nkubectl exec limits-demo -- sh -c 'timeout 5 sh -c \"while :; do :; done\" & timeout 5 sh -c \"while :; do :; done\"; wait; cat /sys/fs/cgroup/cpu.stat'\n```\n`nr_throttled` and `throttled_usec` are now above zero. The container was slowed down, and `kubectl get pod limits-demo` still shows `Running` with 0 restarts."
+            },
+            {
+              "subgoal": "Clean up",
+              "detail": "`kubectl delete pod limits-demo`"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "For the 250-rack measurement, the sizing guidance gives nico-api 8 CPUs, and the later large runs kept nico-api's memory at 32 GiB. Fill in the limits block of this container spec.",
+          "partialSolution": "    resources:\n      requests:\n        cpu: \"2\"\n        memory: 8Gi\n      limits:\n        cpu: ___\n        memory: ___",
+          "answer": "`cpu: \"8\"` and `memory: 32Gi`. CPU is in logical CPUs, so 8 means 8 hyper-threads. Quote it so YAML reads it as a string, the way Kubernetes manifests usually write quantities."
+        },
+        "independentProblem": {
+          "prompt": "A container has `limits: {cpu: 2500m, memory: 6Gi}`. What exact values should `/sys/fs/cgroup/cpu.max` and `/sys/fs/cgroup/memory.max` contain inside it? And if the container is busy with 4 CPUs of work, what does `kubectl get pod` show?",
+          "hints": [
+            "The default CFS period is 100,000 µs. The quota is the limit times the period.",
+            "1 Gi = 1024³ bytes.",
+            "cpu.max = `250000 100000`. Now multiply 6 × 1,073,741,824, and remember what happens when a container goes over its CPU limit."
+          ],
+          "answer": "`cpu.max` is `250000 100000` and `memory.max` is `6442450944`. The pod stays `Running` with no restarts. It is throttled to 2.5 CPUs, which you can see as a rising `nr_throttled` in `cpu.stat`."
+        },
+        "selfExplanation": "Why can nico-api become the bottleneck of a 2,000-host site even when every site controller node shows most of its CPU idle?",
+        "checks": [
+          {
+            "question": "On a node with Hyper-Threading on, what does `cpu: \"1\"` in a limit mean?",
+            "options": [
+              "One physical core, both hyper-threads",
+              "One logical CPU (one hyper-thread)",
+              "One CPU socket",
+              "1% of the node's CPU"
+            ],
+            "answer": "One logical CPU (one hyper-thread)",
+            "explanation": "Kubernetes counts logical CPUs. That's why a 2×24-core node with HT shows 96. 'One physical core' is the most common mistake. It would double what you think you're giving the container."
+          },
+          {
+            "question": "A container goes over its CPU limit. What happens?",
+            "options": [
+              "The kernel OOM-kills it",
+              "Kubernetes evicts the pod to another node",
+              "The kernel throttles it until the next CFS period",
+              "Nothing, because limits are only scheduling hints"
+            ],
+            "answer": "The kernel throttles it until the next CFS period",
+            "explanation": "CPU is compressible: going over means waiting, not dying. OOM kills only happen when a container goes over its memory limit. Limits aren't scheduling hints. Requests are what the scheduler uses, and the kernel enforces limits."
+          },
+          {
+            "question": "Per NICo's field fits, which ceiling is reached first as a site grows from 1,000 hosts at chart defaults?",
+            "options": [
+              "Node CPU on the busiest controller node",
+              "The nico-api 3-CPU limit, near 1,500 hosts",
+              "The Postgres 8-CPU limit, near 1,000 hosts",
+              "Database disk space"
+            ],
+            "answer": "The nico-api 3-CPU limit, near 1,500 hosts",
+            "explanation": "The guidance says the component limits are reached before node CPU: nico-api at 3 CPUs near 1,500 hosts, and the Postgres primary at 8 CPUs near 2,500, not 1,000. Disk is explicitly not the scaling constraint."
+          }
+        ],
+        "sources": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "concept": "pod-anti-affinity",
+        "prequestions": [
+          {
+            "question": "nico-api gets a 64-CPU limit and the Postgres primary gets a 48-CPU limit. Each node has 96 logical CPUs. What could go wrong if the scheduler puts both on one node?",
+            "answer": "64 + 48 = 112, which is more than 96. If both get busy at the same time, they compete for CPU that isn't there. Keeping them on separate nodes avoids that."
+          },
+          {
+            "question": "Guess: is there a way to tell Kubernetes 'never put pod A on a node that already runs pod B'?",
+            "answer": "Yes: pod anti-affinity, with `requiredDuringSchedulingIgnoredDuringExecution`."
+          }
+        ],
+        "explanation": "By default the scheduler places a pod on any node with enough unreserved requests. **Pod anti-affinity** adds a rule about *other pods*: \"don't put me where pods matching this label selector already run.\"\n\nThe rule goes under `spec.affinity.podAntiAffinity` and has three parts:\n\n- **labelSelector**: which pods to avoid, for example `app: postgres-primary`.\n- **topologyKey**: what \"same place\" means. It's a node label. `kubernetes.io/hostname` means the same node. A zone label would mean the same zone.\n- **Strength**:\n  - `requiredDuringSchedulingIgnoredDuringExecution` is a hard rule. If no node qualifies, the pod stays `Pending`.\n  - `preferredDuringSchedulingIgnoredDuringExecution` is a weighted preference that the scheduler drops if it has to.\n\n\"IgnoredDuringExecution\" means pods already running aren't evicted if labels change later.\n\nThe scheduler also applies the rule the other way round. If pod A has a required anti-affinity against B and A is already running, B won't be placed on A's node either.\n\n**Why NICo needed it:** the 1,112-rack (20,016-host) simulations gave nico-api 64 CPUs and 64 Tokio worker threads, and the Postgres primary 48 CPUs. Those two limits together come to more than a 96-logical-CPU baseline node, so the runs set a *required* anti-affinity in the nico-api chart values to keep the two on different nodes.\n\nThe sizing page shows why placement matters. In the first run, the scheduler put nico-hardware-health on the same node as the Postgres primary, and that node peaked at 63 logical CPUs. In the second run no node carried two of nico-api, Postgres and hardware-health, and the busiest node peaked at 52.\n\nA 20,000-host site has three components that each want a node of their own. That's one reason the guidance recommends 5 nodes, or nodes with more cores, for large GB200-class sites.",
+        "analogy": "It's like seating rules at a wedding: two people who will both spread out and take the whole table must not share one. You state the rule in terms of who they are (labels), not which table (node). That's why it still holds when the tables change. The analogy breaks down because a seating planner can move guests after the meal starts. Kubernetes only applies the rule when placing a pod and never moves running pods to satisfy it.",
+        "workedExample": {
+          "title": "Watch a required anti-affinity spread pods or block them",
+          "steps": [
+            {
+              "subgoal": "Deploy the 'database'",
+              "detail": "```bash\nkubectl create deployment fake-db --image=busybox:1.36 -- sh -c 'sleep 1000000'\nkubectl get pod -l app=fake-db -o wide\n```\n`kubectl create deployment` labels the pods `app=fake-db`."
+            },
+            {
+              "subgoal": "Deploy an 'API' that refuses to share a node with it",
+              "detail": "```bash\nkubectl apply -f - <<'EOF'\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: fake-api\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: fake-api\n  template:\n    metadata:\n      labels:\n        app: fake-api\n    spec:\n      affinity:\n        podAntiAffinity:\n          requiredDuringSchedulingIgnoredDuringExecution:\n          - labelSelector:\n              matchLabels:\n                app: fake-db\n            topologyKey: kubernetes.io/hostname\n      containers:\n      - name: api\n        image: busybox:1.36\n        command: [\"sh\", \"-c\", \"sleep 1000000\"]\nEOF\n```"
+            },
+            {
+              "subgoal": "Read the outcome",
+              "detail": "`kubectl get pods -o wide`\n\n- **Single-node kind cluster:** fake-api stays `Pending`. Run `kubectl describe pod -l app=fake-api` and you'll see a `FailedScheduling` event mentioning that the pod didn't match pod anti-affinity rules. The hard rule is doing its job.\n- **Multi-worker cluster:** fake-api lands on a different node from fake-db."
+            },
+            {
+              "subgoal": "Relax it to a preference and compare",
+              "detail": "Change `requiredDuringSchedulingIgnoredDuringExecution` to a preferred term (`- weight: 100` with the same selector and topologyKey nested under `podAffinityTerm:`). On a single node, the pod now schedules next to fake-db anyway."
+            },
+            {
+              "subgoal": "Clean up",
+              "detail": "`kubectl delete deployment fake-api fake-db`"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this pod-template fragment so a Postgres primary (pods labelled `role: postgres-primary`) is never scheduled on the same node as nico-api pods (labelled `app: nico-api`).",
+          "partialSolution": "      affinity:\n        podAntiAffinity:\n          requiredDuringSchedulingIgnoredDuringExecution:\n          - labelSelector:\n              matchLabels:\n                app: ___\n            topologyKey: ___",
+          "answer": "`app: nico-api` and `topologyKey: kubernetes.io/hostname`. The selector names the pods to avoid, and the hostname label makes 'same place' mean 'same node'. (These labels are made up for the exercise. Check the real labels in your deployment with `kubectl get pods --show-labels`.)"
+        },
+        "independentProblem": {
+          "prompt": "Three 96-CPU nodes run three heavy components labelled `app: nico-api`, `role: postgres-primary` and `app: hardware-health`. Write one anti-affinity term for the hardware-health pod that keeps it off any node running either of the other two. Then say what happens to hardware-health if a fourth heavy component later takes the only free node.",
+          "hints": [
+            "The two pods use different label keys, so a single `matchLabels` can't match both. You need two terms or `matchExpressions`.",
+            "A required anti-affinity can be a list of terms, and the pod must satisfy every term.",
+            "Use two list items under `requiredDuringSchedulingIgnoredDuringExecution`, one per selector, each with `topologyKey: kubernetes.io/hostname`."
+          ],
+          "answer": "```yaml\naffinity:\n  podAntiAffinity:\n    requiredDuringSchedulingIgnoredDuringExecution:\n    - labelSelector:\n        matchLabels:\n          app: nico-api\n      topologyKey: kubernetes.io/hostname\n    - labelSelector:\n        matchLabels:\n          role: postgres-primary\n      topologyKey: kubernetes.io/hostname\n```\nIf the third node is taken, hardware-health stays running wherever it already is, because the rule is ignored during execution. But a new or rescheduled hardware-health pod would stay `Pending` if no node qualifies. That's part of why the guidance suggests 5 nodes for very large sites."
+        },
+        "selfExplanation": "The 1,112-rack runs used a *required* anti-affinity rather than a *preferred* one. Explain why a preference wouldn't have been enough to protect those runs.",
+        "checks": [
+          {
+            "question": "What does `topologyKey: kubernetes.io/hostname` do in an anti-affinity term?",
+            "options": [
+              "Picks the node the pod must run on",
+              "Defines 'same place' as 'same node' when checking for matching pods",
+              "Makes the pod use the node's hostname as its DNS name",
+              "Restricts the rule to pods in the same namespace"
+            ],
+            "answer": "Defines 'same place' as 'same node' when checking for matching pods",
+            "explanation": "The topology key is a node label that groups nodes into domains. With hostname, each node is its own domain. It doesn't pin the pod to a particular node. That would be nodeSelector or node affinity."
+          },
+          {
+            "question": "A required anti-affinity can't be satisfied by any node. What happens?",
+            "options": [
+              "The scheduler ignores the rule and places the pod",
+              "The pod stays Pending",
+              "The conflicting pod is evicted",
+              "The pod is placed on the control-plane node"
+            ],
+            "answer": "The pod stays Pending",
+            "explanation": "'Required' is a hard filter. Ignoring the rule is what 'preferred' does. Kubernetes doesn't evict existing pods to satisfy anti-affinity."
+          },
+          {
+            "question": "Why did NICo's 20,016-host simulations keep nico-api and the Postgres primary on different nodes?",
+            "options": [
+              "Postgres replication requires it",
+              "Their CPU limits (64 and 48) together exceeded a 96-logical-CPU node",
+              "nico-api cannot reach Postgres on the same node",
+              "Kubernetes forbids two pods with more than 32 CPUs on one node"
+            ],
+            "answer": "Their CPU limits (64 and 48) together exceeded a 96-logical-CPU node",
+            "explanation": "The sizing page gives exactly this reason. The other options are invented: same-node networking works fine, and Kubernetes has no such per-node rule."
+          }
+        ],
+        "sources": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "concept": "kubelet-working-set-and-oom-kill",
+        "prequestions": [
+          {
+            "question": "A Postgres pod's memory graph has sat at 15.9 GiB of a 16 GiB limit for days. Does it need more memory?",
+            "answer": "Not necessarily. Much of that is page cache, which the kernel can reclaim. The real signal is the `oom_kill` count in its cgroup going up."
+          },
+          {
+            "question": "Guess: is the file cache that Linux builds when a process reads files counted against the container's memory limit?",
+            "answer": "Yes. cgroup v2 charges page cache to the cgroup that caused it, so it counts toward `memory.current`. The kernel can reclaim it before it has to kill anything."
+          }
+        ],
+        "explanation": "Chapter 2 covered cgroups. Here's how Kubernetes *reports* container memory, and why that report misleads at scale.\n\nThe kubelet (the agent on each node) reports a container's memory as its **working set**: roughly the cgroup's memory usage minus file cache the kernel considers inactive. NICo's sizing page puts it as **resident memory plus active page cache**.\n\n- **Resident (anonymous) memory** is the process's own heap and stack. The kernel can't drop it without swap.\n- **Page cache** is file data the kernel keeps in RAM after reads and writes. It's charged to the container's cgroup. The kernel can reclaim it under pressure, starting with the inactive part.\n\nPostgres reads its data files through the page cache, so over a long run its working set **grows toward the memory limit by design**. A working set at the limit just means the cache is full. That's not by itself evidence that more memory is needed.\n\nThe real signal is in the container's cgroup file `memory.events`:\n\n- `oom` counts the times the cgroup hit its limit and reclaim failed.\n- `oom_kill` counts processes the kernel's OOM killer actually killed.\n\nA **rising `oom_kill`** is the sign to raise the limit. Kubernetes also records `OOMKilled` as a container's last termination reason.\n\nWhat NICo's data shows:\n\n- **Field data:** the fitted 7-day peak working set crosses the 16 GiB chart default near 480 hosts, and it sits at the 16 GiB limit on 7 of 33 sites.\n- **Simulations:** the 400-rack run and the earlier 556-rack run recorded `oom_kill` 0. The first complete 250-rack run finished at the 16 GiB default.\n- **Guidance:** keep the table in `helm-prereqs/values.yaml`, which gives 16 GiB up to 5,000 hosts and 32 GiB beyond that. Raise it when `oom_kill` in the Postgres cgroup rises, not when the working set reaches the limit.",
+        "analogy": "The working set is like a desk covered in papers. Someone who works at a big desk spreads out to fill it, which doesn't mean they need a bigger desk. The real sign is when they have to shred something they were still using (an OOM kill). The analogy breaks down because papers don't tidy themselves away. The kernel quietly drops inactive cache on its own long before anything is killed.",
+        "workedExample": {
+          "title": "Make page cache fill a limit harmlessly, then trigger real OOM kills",
+          "steps": [
+            {
+              "subgoal": "Fill a 128 MiB container with page cache",
+              "detail": "Write a 400 MiB file to the container's disk-backed `/tmp` under a 128 MiB limit (swap disabled by setting `--memory-swap` equal to `--memory`):\n```bash\ndocker run --rm --memory 128m --memory-swap 128m debian:stable-slim sh -c '\ndd if=/dev/zero of=/tmp/big bs=1M count=400 status=none\necho \"memory.current: $(cat /sys/fs/cgroup/memory.current)\"\ngrep -E \"^(anon|active_file|inactive_file) \" /sys/fs/cgroup/memory.stat\ngrep -E \"^oom_kill \" /sys/fs/cgroup/memory.events'\n```"
+            },
+            {
+              "subgoal": "Read the result",
+              "detail": "`memory.current` is usually tens of MiB and can approach the 128 MiB limit. Most of it shows up as `active_file`/`inactive_file`, `anon` is tiny, and `oom_kill 0`. The exact numbers vary between kernels. The container wrote three times its limit and nothing died, because the kernel reclaimed cache as it went. A dashboard showing the working set here could look 'full'."
+            },
+            {
+              "subgoal": "Now make anonymous memory go over the limit",
+              "detail": "A shell runs a Python child three times. Each time the child tries to hold 200 MiB of real data:\n```bash\ndocker run --rm --memory 64m --memory-swap 64m python:3.12-slim sh -c '\nfor i in 1 2 3; do\n  python3 -c \"x = b\\\"x\\\" * (200*1024*1024)\"\n  echo \"attempt $i exit=$?\"\ndone\ngrep -E \"^oom_kill \" /sys/fs/cgroup/memory.events'\n```"
+            },
+            {
+              "subgoal": "Read the counter",
+              "detail": "Expected:\n```\nattempt 1 exit=137\nattempt 2 exit=137\nattempt 3 exit=137\noom_kill 3\n```\nExit code 137 is 128 + 9 (SIGKILL). The shell (PID 1) survived and the counter went up once per kill. This rising count is the signal the sizing guidance tells you to watch."
+            },
+            {
+              "subgoal": "Map it to Kubernetes",
+              "detail": "In a pod, read the same file with `kubectl exec <pod> -- cat /sys/fs/cgroup/memory.events`, and check `kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'` for `OOMKilled`. Recent kubelets on cgroup v2 kill the whole container on OOM, so expect restarts as well."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "The kubelet's working set is usually computed as usage minus inactive file cache. Fill in the blank so this one-liner prints a container's working set in MiB from inside the container.",
+          "partialSolution": "cur=$(cat /sys/fs/cgroup/memory.current)\ninact=$(awk '$1==\"___\" {print $2}' /sys/fs/cgroup/memory.stat)\necho $(( (cur - inact) / 1024 / 1024 )) MiB",
+          "answer": "`inactive_file`. It's the reclaimable cache the kernel considers inactive. Subtract it from `memory.current` and what's left is resident memory plus active cache."
+        },
+        "independentProblem": {
+          "prompt": "You run a 3,000-host site. Postgres has a 16 GiB limit and its working set has been at 15.8 GiB for a week. `memory.events` shows `oom_kill 0` today and `oom_kill 0` a week ago. The same pod has been primary the whole time. Do you raise the limit now? What would change your answer?",
+          "hints": [
+            "What is most of that 15.8 GiB likely to be?",
+            "Which counter does the guidance say to watch, and has it moved?",
+            "Also compare against the `helm-prereqs/values.yaml` table for 3,000 hosts."
+          ],
+          "answer": "No. A working set at the limit with `oom_kill` flat at 0 is page cache doing its job, and at 3,000 hosts the values table still says 16 GiB (up to 5,000 hosts). Raise the limit if `oom_kill` starts rising, if `OOMKilled` restarts appear, or if the site grows past 5,000 hosts, where the table says 32 GiB."
+        },
+        "selfExplanation": "Why does a Postgres working set naturally creep up to its memory limit over days, and why does that make 'working set at the limit' a poor alert?",
+        "checks": [
+          {
+            "question": "Which observation is NICo's stated signal to raise the Postgres memory limit?",
+            "options": [
+              "The kubelet working set reaches the limit",
+              "A rising oom_kill count in the Postgres container's cgroup",
+              "Node memory above 80%",
+              "Postgres database size above 10 GiB"
+            ],
+            "answer": "A rising oom_kill count in the Postgres container's cgroup",
+            "explanation": "The working set grows toward the limit by design because it includes active page cache. Node memory and database size aren't the signal the guidance names."
+          },
+          {
+            "question": "What does the kubelet working set include, per the sizing page?",
+            "options": [
+              "Only the process heap",
+              "Resident memory plus active page cache",
+              "Resident memory plus swap",
+              "All memory on the node"
+            ],
+            "answer": "Resident memory plus active page cache",
+            "explanation": "That's why it keeps growing as Postgres reads data. Heap only would leave out the cache. Swap isn't part of it, and the figure is per container, not per node."
+          },
+          {
+            "question": "A process inside a container is OOM-killed. What exit code does its parent usually see?",
+            "options": [
+              "1",
+              "137",
+              "143",
+              "255"
+            ],
+            "answer": "137",
+            "explanation": "137 = 128 + 9 (SIGKILL), and SIGKILL is what the OOM killer sends. 143 is 128 + 15 (SIGTERM), a polite shutdown."
+          }
+        ],
+        "sources": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "concept": "kubernetes-service-externalip",
+        "prequestions": [
+          {
+            "question": "You need 70 Services, each answering on its own fixed, made-up address (10.250.0.1, 10.250.0.2, …), and you don't want a load balancer controller picking the addresses. Which Service feature might do that?",
+            "answer": "`spec.externalIPs`: you list the address yourself, and kube-proxy accepts traffic for it on every node."
+          },
+          {
+            "question": "Guess: if you put 10.250.0.5 in a Service's externalIPs, does Kubernetes announce that address to your network (ARP or BGP) like MetalLB does?",
+            "answer": "No. Kubernetes only programs the nodes to accept and forward traffic for it. Getting packets to a node is your job."
+          }
+        ],
+        "explanation": "Chapter 14 covered ClusterIP, NodePort and LoadBalancer Services. Chapter 15 showed MetalLB allocating LoadBalancer VIPs and announcing them with ARP.\n\n**`spec.externalIPs`** is simpler than any of those. It's a list of addresses *you* choose. On every node, kube-proxy programs rules so that a packet addressed to `<externalIP>:<port>` reaches the Service's endpoints, the same way traffic to its ClusterIP does.\n\nWhat Kubernetes does **not** do with an externalIP:\n\n- It doesn't allocate it or check it against a pool.\n- It doesn't announce it with ARP or BGP.\n- It doesn't check that nobody else owns it.\n\nPackets reach it only if something routes them to a node: a static route, a router, or a client that's already inside the cluster. Because any user who can create Services can claim any address this way, many clusters restrict `externalIPs` with an admission policy. That's worth knowing on a shared cluster.\n\n**Why NICo cares:** machine-a-tron, NICo's fleet simulator, publishes **every simulated BMC and switch NVOS address as a Service `externalIP`**. nico-api's site explorer then probes those addresses as if they were real BMCs on the BMC network. The simulator controller creating each pod's Services is part of the definition of **fleet-up**: every simulator pod Ready, the protocol gateway answering, and every pod's Services published so every simulated BMC address is reachable.\n\nThe cost is that a large simulated fleet means tens of thousands of externalIPs, and every node's kube-proxy has to track all of them. The IPVS lesson covers the ceiling that creates.",
+        "analogy": "An externalIP is like telling your office's front desk: 'any mail addressed to Suite 500, give it to Alice.' The front desk will do that reliably. But nobody told the post office that Suite 500 exists, so mail only arrives if something already brings it to the building. The analogy breaks down because a real post office would reject a made-up suite. Kubernetes doesn't check that the address belongs to you.",
+        "workedExample": {
+          "title": "Expose a pod on a made-up address and reach it from inside the cluster",
+          "steps": [
+            {
+              "subgoal": "Run a backend",
+              "detail": "```bash\nkubectl create deployment web --image=nginx:1.27\nkubectl wait --for=condition=Available deployment/web\n```"
+            },
+            {
+              "subgoal": "Create a Service with an externalIP",
+              "detail": "Pick a range that doesn't overlap kind's pod (10.244.0.0/16) or service (10.96.0.0/12) ranges:\n```bash\nkubectl apply -f - <<'EOF'\napiVersion: v1\nkind: Service\nmetadata:\n  name: web-ext\nspec:\n  selector:\n    app: web\n  externalIPs:\n  - 10.250.0.10\n  ports:\n  - port: 80\n    targetPort: 80\nEOF\nkubectl get svc web-ext\n```\nThe `EXTERNAL-IP` column shows `10.250.0.10`. Nothing allocated it: you did."
+            },
+            {
+              "subgoal": "Reach it from a pod",
+              "detail": "```bash\nkubectl run curl --rm -i --restart=Never --image=curlimages/curl -- -s -o /dev/null -w '%{http_code}\\n' http://10.250.0.10/\n```\nPrints `200`. The packet left the pod for its node, and kube-proxy's rules matched the externalIP and forwarded it to the nginx pod."
+            },
+            {
+              "subgoal": "See that nothing announces it",
+              "detail": "From your laptop, `curl --max-time 3 http://10.250.0.10/` times out: your laptop has no route to it. (Optional, Linux only: `sudo ip route add 10.250.0.0/24 via $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' kind-control-plane)` makes it reachable, which proves that routing is up to you. Remove it afterwards with `sudo ip route del 10.250.0.0/24`.)"
+            },
+            {
+              "subgoal": "Clean up",
+              "detail": "`kubectl delete svc web-ext; kubectl delete deployment web`"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this Service so a simulated BMC pod (label `app: bmc-sim`, listening on 8443) answers HTTPS on 10.250.1.7, port 443.",
+          "partialSolution": "apiVersion: v1\nkind: Service\nmetadata:\n  name: bmc-7\nspec:\n  selector:\n    app: bmc-sim\n  ___:\n  - 10.250.1.7\n  ports:\n  - port: 443\n    targetPort: ___",
+          "answer": "`externalIPs` and `8443`. `port` is what clients dial on the externalIP, and `targetPort` is the port the container listens on."
+        },
+        "independentProblem": {
+          "prompt": "Two teammates disagree. One says: 'Use type: LoadBalancer with MetalLB for the 39,476 simulated BMC addresses, it's the same thing.' The other says externalIPs are a better fit. Give two concrete differences that matter for a simulator publishing tens of thousands of fixed BMC addresses.",
+          "hints": [
+            "Who picks the address in each case?",
+            "Who announces the address on the network, and does a simulator need that?",
+            "With MetalLB, think about pool size and ARP announcements multiplied by tens of thousands."
+          ],
+          "answer": "(1) With externalIPs the simulator chooses each address, so it can match the BMC address it assigned in NICo's BMC network. A LoadBalancer gets its address from a controller's pool. (2) externalIPs need no announcement: the site explorer runs inside the cluster, so kube-proxy's per-node rules are enough. MetalLB would allocate from a pool and send ARP for each VIP, which adds machinery the simulator doesn't need. Either way every node still tracks every address, so neither escapes kube-proxy's per-node limits."
+        },
+        "selfExplanation": "In your own words, explain why an externalIP works from inside the cluster with no extra setup but is unreachable from your laptop until you add a route.",
+        "checks": [
+          {
+            "question": "What does Kubernetes do when you add an address to a Service's externalIPs?",
+            "options": [
+              "Allocates it from the cluster's service CIDR",
+              "Announces it to the LAN with gratuitous ARP",
+              "Programs every node's kube-proxy to forward traffic for that IP and port to the Service",
+              "Assigns it to the pod's network interface"
+            ],
+            "answer": "Programs every node's kube-proxy to forward traffic for that IP and port to the Service",
+            "explanation": "That's all it does. Announcing addresses is what MetalLB does (Chapter 15). The service CIDR is for ClusterIPs, and the pod's interface keeps its own pod IP."
+          },
+          {
+            "question": "How does machine-a-tron make each simulated BMC address reachable?",
+            "options": [
+              "One MetalLB VIP per BMC",
+              "A Service externalIP per simulated BMC and switch NVOS address",
+              "A separate kind cluster per rack",
+              "A NodePort per BMC on the control-plane node"
+            ],
+            "answer": "A Service externalIP per simulated BMC and switch NVOS address",
+            "explanation": "The sizing page says the simulator publishes every simulated BMC and switch NVOS address as a Service externalIP. The other options are plausible designs, but they aren't what it does."
+          }
+        ],
+        "sources": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "concept": "tokio-worker-threads",
+        "prequestions": [
+          {
+            "question": "You raise nico-api's CPU limit from 16 to 32, but it still never uses more than about 16 CPUs. What might cap it, other than the limit?",
+            "answer": "The number of threads the async runtime runs tasks on. If there are only 16 worker threads, at most 16 tasks run at the same moment, no matter how much CPU the limit allows."
+          },
+          {
+            "question": "Inside a container started with `docker run --cpus=2`, what does `nproc` print on an 8-core laptop?",
+            "answer": "8 (all the host's logical CPUs). `--cpus` sets a cgroup quota and doesn't change which CPUs the container can see."
+          }
+        ],
+        "explanation": "nico-api is written in async Rust and runs on **Tokio**, the most widely used Rust async runtime. Chapter 2 covered async/await: a task gives up control at each `.await` so others can run.\n\nWith Tokio's multi-threaded runtime, the tasks run on a fixed pool of OS threads called **worker threads**. Each worker picks ready tasks off a queue and runs them until they reach an `.await`. Idle workers steal work from busy ones.\n\nThat gives a simple ceiling: **at any instant, at most N tasks are running on the CPU, where N is the worker thread count.** (Blocking work goes to a separate blocking pool, but nico-api's request handling and state controllers run as async tasks on the workers.) So:\n\n- **Fewer workers than the CPU limit**: the extra CPU you granted sits unused.\n- **Many more workers than the limit**: threads compete for the quota, and you get throttling and context switches.\n\nTokio decides the default count from the CPUs it detects. As the prequestion shows, what a process detects in a container doesn't always match the cgroup quota. Don't rely on the default: **set it explicitly.** Tokio's runtime reads the `TOKIO_WORKER_THREADS` environment variable.\n\nNICo's sizing guidance says to **raise the nico-api CPU limit and its Tokio worker thread count together**. The scale runs set `TOKIO_WORKER_THREADS` through the nico-api chart's `extraEnv` to match the CPU limit:\n\n- 32 CPUs with 32 workers at 556 racks.\n- 64 CPUs with 64 workers at 1,112 racks.\n\nIn the 556-rack run, the workers were 49% busy over the run and 59–68% while machines went `ready`, and nico-api peaked at 18.9 CPUs. The headroom was real and could be used. (That run also had other scaling fixes, so the faster time is a combined effect.)\n\nOne process, one pool: nico-api runs as a single process, so the thread count really does limit how much CPU it can use.",
+        "analogy": "Worker threads are the checkout lanes that are staffed, and the CPU limit is how many lanes the building has. Building 32 lanes doesn't help if only 16 cashiers turn up, and hiring 64 cashiers for 32 lanes just has them queuing for tills. The analogy breaks down because Tokio's workers are interchangeable and steal work from each other instantly. Real cashiers can't take over a customer halfway through.",
+        "workedExample": {
+          "title": "See that a CPU limit doesn't change what a process detects, then pin the thread count",
+          "steps": [
+            {
+              "subgoal": "Compare visible CPUs with the quota",
+              "detail": "```bash\nnproc\ndocker run --rm --cpus=2 debian:stable-slim sh -c 'echo nproc=$(nproc); cat /sys/fs/cgroup/cpu.max'\n```\nOn an 8-CPU host: `nproc=8`, then `200000 100000`. The quota says 2 CPUs, but the container can see 8. (`--cpuset-cpus` would change `nproc`, but Kubernetes CPU limits use quotas, not cpusets.)"
+            },
+            {
+              "subgoal": "Decide the target",
+              "detail": "Rule from the sizing guidance: worker threads = nico-api CPU limit. For a 32-CPU limit that's 32."
+            },
+            {
+              "subgoal": "Set it as a container env var",
+              "detail": "In plain Kubernetes this is an `env` entry next to `resources`:\n```yaml\n      containers:\n      - name: api\n        env:\n        - name: TOKIO_WORKER_THREADS\n          value: \"32\"\n        resources:\n          limits:\n            cpu: \"32\"\n```\nFor nico-api itself, the scale runs passed this variable through the chart's `extraEnv` value. Check the chart's values file for the exact shape before you edit."
+            },
+            {
+              "subgoal": "Verify inside the running container",
+              "detail": "`kubectl exec <pod> -- printenv TOKIO_WORKER_THREADS` should print the same number as the CPU limit, and `cat /sys/fs/cgroup/cpu.max` should print `<limit×100000> 100000`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "You're moving nico-api to the 1,112-rack settings. Fill in the blanks so the thread count matches the CPU limit from the guidance.",
+          "partialSolution": "        env:\n        - name: ___\n          value: \"64\"\n        resources:\n          limits:\n            cpu: ___\n            memory: 64Gi",
+          "answer": "`TOKIO_WORKER_THREADS` and `\"64\"`. The 20,016-host row gives nico-api 64 CPUs and 64 GiB with 64 Tokio worker threads."
+        },
+        "independentProblem": {
+          "prompt": "Hard-coding the thread count means two numbers you must remember to change together. Use a Kubernetes feature to make `TOKIO_WORKER_THREADS` follow the container's CPU limit automatically. Write the env entry.",
+          "hints": [
+            "The Downward API can expose a container's own resource values as env vars.",
+            "Look for `valueFrom.resourceFieldRef`.",
+            "`resource: limits.cpu` with the default divisor of 1 gives whole CPUs (rounded up)."
+          ],
+          "answer": "```yaml\n        env:\n        - name: TOKIO_WORKER_THREADS\n          valueFrom:\n            resourceFieldRef:\n              resource: limits.cpu\n```\nWith `cpu: \"32\"` the variable becomes `32`. A fractional limit such as `2500m` rounds up to `3`. This is a generic Kubernetes technique. Check whether your nico-api chart's `extraEnv` accepts `valueFrom` before relying on it there."
+        },
+        "selfExplanation": "Explain why giving nico-api 32 CPUs while leaving it on 16 worker threads would waste most of the increase, even though nico-api is 'async' and handles thousands of requests at once.",
+        "checks": [
+          {
+            "question": "What sets how many async tasks nico-api can run on the CPU at the same instant?",
+            "options": [
+              "Its memory limit",
+              "The number of Tokio worker threads",
+              "The number of Postgres connections",
+              "The node's total logical CPUs"
+            ],
+            "answer": "The number of Tokio worker threads",
+            "explanation": "Tasks run on worker threads, and the thread count caps parallelism. The node's CPU count and the CPU limit cap it from outside, but if threads are fewer than the limit, the threads are the bottleneck. DB connections cap parallel queries, not CPU-bound task execution."
+          },
+          {
+            "question": "How did NICo's large simulated runs set nico-api's worker thread count?",
+            "options": [
+              "A `--threads` flag on nico-api",
+              "The TOKIO_WORKER_THREADS environment variable through the chart's extraEnv, matching the CPU limit",
+              "Kubernetes sets it automatically from the CPU limit",
+              "A key in the [api_admission_control] table"
+            ],
+            "answer": "The TOKIO_WORKER_THREADS environment variable through the chart's extraEnv, matching the CPU limit",
+            "explanation": "That's what the sizing page describes. Kubernetes doesn't set it automatically (you could wire that up with the Downward API yourself). Admission control limits requests, not threads. No `--threads` flag is documented."
+          }
+        ],
+        "sources": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "concept": "kube-proxy-ipvs-mode",
+        "prequestions": [
+          {
+            "question": "One simulated GB200 rack needs 89 Service address-and-port entries. If each node can hold at most 65,536 such entries, roughly how many racks fit?",
+            "answer": "65,536 ÷ 89 ≈ 736 racks."
+          },
+          {
+            "question": "If you spread simulator pods across more nodes, does each node then hold fewer entries?",
+            "answer": "No. kube-proxy on every node programs every Service, so each node holds the full set no matter where the pods run."
+          }
+        ],
+        "explanation": "**kube-proxy** runs on every node and turns Services into kernel packet-forwarding rules. It has modes:\n\n- **iptables**: chains of iptables rules.\n- **nftables**: newer, on recent releases.\n- **ipvs**: uses **IP Virtual Server (IPVS)**, the Linux kernel's built-in layer-4 load balancer.\n\nIn IPVS mode, kube-proxy on each node:\n\n1. creates a dummy interface, `kube-ipvs0`, and binds every Service ClusterIP and externalIP to it, so the node treats those addresses as local;\n2. creates an IPVS *virtual server* for each address:port, with the Service's endpoints as *real servers*;\n3. keeps **ipsets** (kernel hash sets of addresses) so a handful of iptables rules can match whole groups of Service addresses at once. One set records the externalIP-and-port pairs.\n\nThe catch for NICo's simulator: that set holds **at most 65,536 entries**, a value compiled into kube-proxy. Every node holds the whole set, because every node's kube-proxy programs every Service. Adding nodes doesn't help.\n\nThe numbers from NICo's sizing page:\n\n- A GB200 NVL72 rack with 2 DPUs per tray costs **89 entries**.\n- 65,536 ÷ 89 ≈ **736 racks** for a stock simulator.\n- Above that, the set fills, part of the fleet is unreachable from some nodes, and machine creation stalls.\n\nThe 1,112-rack runs used a kube-proxy **rebuilt with a larger set**. They also needed **longer calico-node probes**, because calico-node's BIRD daemon went over its default probe timeout with about 89,000 addresses on each node's IPVS interface.\n\nThis is a **simulator limit, not a NICo limit**. A real site's BMCs are real hosts on the BMC network, not Services, so they never enter kube-proxy's tables. Recent Kubernetes releases favour nftables mode, so you may see a deprecation notice for IPVS mode.",
+        "analogy": "The ipset is like a fixed-size guest list at every entrance of a building. Every door keeps a copy of the whole list, so adding doors doesn't make room for more guests. You need a bigger list format. The analogy breaks down because a full guest list just turns new people away at the door. A full ipset fails silently for some nodes, and the symptom shows up far away, as machine creation stalling.",
+        "workedExample": {
+          "title": "Run kind with kube-proxy in IPVS mode and watch externalIPs land on kube-ipvs0",
+          "steps": [
+            {
+              "subgoal": "Create an IPVS-mode cluster",
+              "detail": "```bash\ncat > kind-ipvs.yaml <<'EOF'\nkind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: ipvs-demo\nnetworking:\n  kubeProxyMode: \"ipvs\"\nEOF\nkind create cluster --config kind-ipvs.yaml\n```"
+            },
+            {
+              "subgoal": "Confirm the mode",
+              "detail": "```bash\ndocker exec ipvs-demo-control-plane curl -s localhost:10249/proxyMode; echo\n```\nPrints `ipvs`. (Fallback: `kubectl -n kube-system get cm kube-proxy -o jsonpath='{.data.config\\.conf}' | grep mode`.)"
+            },
+            {
+              "subgoal": "Create 10 Services with externalIPs",
+              "detail": "```bash\nkubectl create deployment web --image=nginx:1.27\nfor i in $(seq 1 10); do\n  kubectl expose deployment web --name=ext-$i --port=80 --external-ip=10.250.0.$i\ndone\n```"
+            },
+            {
+              "subgoal": "Count them on the node",
+              "detail": "```bash\ndocker exec ipvs-demo-control-plane ip -4 -o addr show kube-ipvs0 | grep -c ' 10\\.250\\.0\\.'\n```\nPrints `10`. Each externalIP is bound locally on every node. If your kube-proxy image includes `ipset`, `kubectl -n kube-system exec ds/kube-proxy -- ipset list KUBE-EXTERNAL-IP | grep -i entries` shows the IP-and-port entries that count against the 65,536 cap."
+            },
+            {
+              "subgoal": "Scale the arithmetic",
+              "detail": "10 entries out of 65,536 is nothing. A rack costs 89. 736 racks × 89 = 65,504, which fits. 737 × 89 = 65,593, which doesn't. Clean up with `kind delete cluster --name ipvs-demo`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the kind config so kube-proxy runs in the mode whose ipset limits the simulator, with two worker nodes.",
+          "partialSolution": "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnetworking:\n  kubeProxyMode: ___\nnodes:\n- role: control-plane\n- role: ___\n- role: worker",
+          "answer": "`\"ipvs\"` and `worker`."
+        },
+        "independentProblem": {
+          "prompt": "You plan simulated GB200 NVL72 fleets (2 DPUs per tray) of 400, 556 and 1,112 racks on a stock kube-proxy in IPVS mode. For each fleet, how many externalIP entries does each node need, and does it fit? Which fleets need the rebuilt kube-proxy?",
+          "hints": [
+            "Use 89 entries per rack.",
+            "Compare each product with 65,536.",
+            "400 × 89 = 35,600. Do the other two."
+          ],
+          "answer": "400 racks = 35,600, which fits. 556 racks = 49,484, which fits. 1,112 racks = 98,968, which doesn't fit (above 736 racks), so only the 1,112-rack fleet needs the larger set. That run also needed longer calico-node probes."
+        },
+        "selfExplanation": "Why does adding more Kubernetes nodes, or more simulator pods, do nothing to raise the ~736-rack ceiling?",
+        "checks": [
+          {
+            "question": "Where does the 65,536-entry limit live?",
+            "options": [
+              "In NICo's site explorer configuration",
+              "In kube-proxy's IPVS ipset, compiled into kube-proxy, once per node",
+              "In the BMC network's /16 subnet",
+              "In Calico's IP pool"
+            ],
+            "answer": "In kube-proxy's IPVS ipset, compiled into kube-proxy, once per node",
+            "explanation": "65,536 is also the size of a /16, which is why the BMC subnet option is tempting. That's a separate sizing input (78,952 BMC addresses needed two /16 segments). The kube-proxy limit is a property of the simulator setup, not of NICo."
+          },
+          {
+            "question": "Does a real site with 1,112 GB200 racks hit this limit?",
+            "options": [
+              "Yes, it needs the rebuilt kube-proxy too",
+              "No, real BMCs are hosts on the BMC network, not Service externalIPs",
+              "Only if Calico is used",
+              "Only on arm64 nodes"
+            ],
+            "answer": "No, real BMCs are hosts on the BMC network, not Service externalIPs",
+            "explanation": "The sizing page calls it a simulator limit that a site with real hardware does not share."
+          },
+          {
+            "question": "Besides a larger ipset, what other cluster change did the 1,112-rack simulation need?",
+            "options": [
+              "Disabling Calico",
+              "Longer calico-node probes, because BIRD timed out with ~89,000 addresses on the IPVS interface",
+              "Switching kube-proxy to iptables mode",
+              "A second Kubernetes cluster"
+            ],
+            "answer": "Longer calico-node probes, because BIRD timed out with ~89,000 addresses on the IPVS interface",
+            "explanation": "That's what the documented runs did. Switching modes or adding clusters aren't what they did."
+          }
+        ],
+        "sources": [
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "concept": "machine-a-tron",
+        "prequestions": [
+          {
+            "question": "You want to know whether NICo's control plane can bring 20,000 hosts to `ready`, but you have no racks. What would you need to fake?",
+            "answer": "Everything NICo talks to: BMCs (Redfish), host and DPU agents, and the external services it calls (for example rack management and NVLink controllers). The control plane itself runs for real."
+          },
+          {
+            "question": "Guess: would a simulated run tell you how long firmware flashing takes on real hardware?",
+            "answer": "No. Simulation exercises the control plane, not device timing or firmware flashing."
+          }
+        ],
+        "explanation": "**Machine-a-tron** is NICo's fleet simulator. It runs **simulated BMCs and agents in Kubernetes pods**, behind a **protocol gateway**, so the real NICo control plane can be scale-tested with no hardware.\n\nEach simulated BMC is published as a Service `externalIP` (earlier lesson). nico-api's site explorer probes those addresses the same way it would probe real BMCs over Redfish (Chapter 6).\n\nNICo's \"Simulation\" rows used more fakes alongside machine-a-tron: the **DOCA Platform Framework (DPF) simulator** for DPU provisioning, a **Rack Management Service (RMS) mock** for rack setup, and an **NMX Controller (NMX-C) mock** for NVLink partitions.\n\n**What it exercises:** discovery, machine creation, the state controllers, rack setup and NVLink partition creation.\n\n**What it doesn't:** device timing, firmware flashing, the DPU data plane (HBN), GPU health and telemetry, or tenant workloads.\n\n**Fleet-up** is the clock the scale figures use. It starts when every simulator pod is Ready, the protocol gateway answers, and the controller has published every pod's Services.\n\nSizing a simulated fleet means counting endpoints. A GB200 NVL72 rack with 2 DPUs per tray has 18 host + 36 DPU + 9 switch tray + 8 power shelf BMCs. That's **71 endpoints** and **54 machines** (hosts plus DPUs). For the 1,112-rack runs:\n\n- 78,952 BMC addresses, more than one `/16` holds, so BMC leases were split between two `/16` segments;\n- **45 simulator pods**;\n- the rebuilt kube-proxy from the last lesson.\n\nOne simulator quirk: every simulated agent presents **one client identity**, so nico-api's per-client admission limits apply to the whole fleet at once. A 556-rack run with admission control enabled at raised limits rejected 86% of calls and stalled with no rack `ready`. The guidance is to **disable admission control for a simulated fleet and keep it enabled on real hardware**. The nico-api chart value `apiAdmissionControl.enabled` switches it.\n\nThe repo can build the simulator's development images: `make images-dev DEV_TARGET=machine-a-tron` and `DEV_TARGET=mat-protocol-gateway`.",
+        "analogy": "Machine-a-tron is like a flight simulator for air-traffic controllers: thousands of fake planes on the radar, all answering on the radio, so the controllers' procedures get tested at full volume. The analogy breaks down because a flight simulator models physics carefully. Machine-a-tron deliberately doesn't model device timing, so a simulated time-to-ready is a control-plane number, not a promise for real hardware.",
+        "workedExample": {
+          "title": "Plan the resources for a 556-rack simulated fleet",
+          "steps": [
+            {
+              "subgoal": "Count endpoints and machines",
+              "detail": "71 endpoints × 556 racks = **39,476** BMC addresses. 54 machines × 556 = **30,024** machines (10,008 hosts + 20,016 DPUs). Both match the sizing table."
+            },
+            {
+              "subgoal": "Check the BMC address space",
+              "detail": "A /16 has 65,536 addresses, so 39,476 fits in one /16. (1,112 racks would need 78,952 and two /16 segments.)"
+            },
+            {
+              "subgoal": "Check the kube-proxy ipset",
+              "detail": "89 entries × 556 = 49,484, under 65,536, so a stock IPVS kube-proxy is fine."
+            },
+            {
+              "subgoal": "Set the simulator-only switches",
+              "detail": "Disable API admission control for this run (`apiAdmissionControl.enabled` in the nico-api chart). Leave it enabled for real hardware and watch `carbide_api_admission_rejected_total` there."
+            },
+            {
+              "subgoal": "Build the simulator images (if you have the repo)",
+              "detail": "From the infra-controller repo root, with a Linux amd64/arm64 Docker daemon that supports BuildKit:\n```bash\nmake images-dev DEV_TARGET=machine-a-tron\nmake images-dev DEV_TARGET=mat-protocol-gateway\n```\nThis produces `nico-dev-machine-a-tron:latest` and `nico-dev-mat-protocol-gateway:latest` locally. It doesn't push, load into kind or deploy anything."
+            },
+            {
+              "subgoal": "Know what the result will and won't mean",
+              "detail": "A time-to-`ready` from this run measures discovery, machine creation and the state controllers. It says nothing about firmware flash times or the HBN data plane."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks for a 250-rack GB200 NVL72 simulated fleet (2 DPUs per tray).",
+          "partialSolution": "BMC endpoints = 71 × 250 = ___\nmachines      = 54 × 250 = 13,500\nipset entries = 89 × 250 = 22,250  -> stock kube-proxy OK? ___",
+          "answer": "17,750 endpoints (it matches the sizing page's 250-rack BMC address figure), and yes: 22,250 is well under 65,536."
+        },
+        "independentProblem": {
+          "prompt": "A colleague's simulated run finishes in 6 hours, and they want to tell a customer 'your 400-rack site will be ready in 6 hours'. They also ran it with admission control enabled 'to be realistic', and it stalled. Write a short reply that covers both points.",
+          "hints": [
+            "List what the simulation doesn't exercise.",
+            "How many client identities does a simulated fleet present, and what does that do to per-client limits?",
+            "Recommend the setting for simulation and the setting (plus counter to watch) for real hardware."
+          ],
+          "answer": "Something like: 'The simulation measures the control plane (discovery, machine creation, state controllers) from fleet-up. It doesn't include device timing, firmware flashing, the DPU data plane or tenant workloads, so 6 hours is a lower bound for that part, not a promise for real racks. And the stall is a simulator artefact: every simulated agent shares one client identity, so the per-client admission limits throttle the whole fleet at once. Disable admission control for simulations. On real hardware keep it enabled, since each agent has its own identity, and watch `carbide_api_admission_rejected_total` as the fleet grows.'"
+        },
+        "selfExplanation": "Why is it valuable to scale-test the control plane against fake BMCs at all, given everything a simulation leaves out?",
+        "checks": [
+          {
+            "question": "Which of these does a machine-a-tron simulation exercise?",
+            "options": [
+              "Firmware flashing duration",
+              "HBN data-plane throughput on DPUs",
+              "Machine discovery and state controller progress to ready",
+              "GPU telemetry collection"
+            ],
+            "answer": "Machine discovery and state controller progress to ready",
+            "explanation": "The sizing page lists discovery, machine creation, state controllers, rack setup and NVLink partition creation as exercised. Firmware flashing, the DPU data plane and GPU telemetry aren't."
+          },
+          {
+            "question": "Why should API admission control be disabled for a simulated fleet?",
+            "options": [
+              "The simulator doesn't speak gRPC",
+              "Every simulated agent presents one client identity, so per-client limits throttle the whole fleet",
+              "Admission control only works on arm64",
+              "It doubles Postgres memory use"
+            ],
+            "answer": "Every simulated agent presents one client identity, so per-client limits throttle the whole fleet",
+            "explanation": "That's the documented cause of the 86% rejection rate and the stalled run. On real hardware each agent has its own identity, so keep admission control enabled there."
+          },
+          {
+            "question": "When does the 'fleet-up' clock start?",
+            "options": [
+              "When nico-api starts",
+              "When every simulator pod is Ready, the protocol gateway answers, and every pod's Services are published",
+              "When the first machine reaches ready",
+              "When the kind cluster is created"
+            ],
+            "answer": "When every simulator pod is Ready, the protocol gateway answers, and every pod's Services are published",
+            "explanation": "All the simulated time figures count from that point, so time spent creating the cluster or starting nico-api isn't included."
+          }
+        ],
+        "sources": [
+          "getting-started/sizing-and-scale.md",
+          "manuals/building_nico_containers.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "A mini scale lab: fake BMC fleet, anti-affinity, matched threads and OOM signals on kind",
+      "goal": "On a 3-node kind cluster with kube-proxy in IPVS mode, run a 'fake-api' and 'fake-db' that must sit on different nodes, with a worker-thread env var tied to the API's CPU limit. Also run one simulator pod that answers Redfish-style JSON for 20 BMC addresses published as Service externalIPs. Then show the difference between page-cache growth and a real OOM kill.",
+      "whyItMatters": "This is a laptop-sized model of the settings behind NICo's 10,000- and 20,000-host runs. Limits cap nico-api and Postgres. A required anti-affinity separates them. TOKIO_WORKER_THREADS has to match the CPU limit. You judge memory by oom_kill, not by the working set. A simulator publishes every BMC as an externalIP that every node's IPVS kube-proxy has to track. Machine-a-tron does this for real at a much larger scale. The fake BMC server here is a stand-in to show the mechanism, not machine-a-tron itself.",
+      "setup": [
+        "Docker (Docker Desktop on macOS or Docker Engine on Linux), with at least 4 GiB of RAM for the VM on macOS",
+        "kind (v0.20 or later) and kubectl",
+        "A cgroup v2 host (any current Linux distro or Docker Desktop). Check with `docker info | grep -i cgroup`",
+        "Linux hosts: IPVS kernel modules available (`sudo modprobe ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh` if needed)",
+        "Internet access to pull busybox:1.36, python:3.12-slim, debian:stable-slim and curlimages/curl"
+      ],
+      "steps": [
+        {
+          "subgoal": "Create the IPVS cluster",
+          "detail": "```bash\ncat > kind-scale.yaml <<'EOF'\nkind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: scale-lab\nnetworking:\n  kubeProxyMode: \"ipvs\"\nnodes:\n- role: control-plane\n- role: worker\n- role: worker\nEOF\nkind create cluster --config kind-scale.yaml\ndocker exec scale-lab-worker curl -s localhost:10249/proxyMode; echo\n```\nThe last command should print `ipvs`."
+        },
+        {
+          "subgoal": "Deploy fake-db and fake-api with limits, anti-affinity and matched threads",
+          "detail": "```bash\nkubectl apply -f - <<'EOF'\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: fake-db\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: fake-db\n  template:\n    metadata:\n      labels:\n        app: fake-db\n    spec:\n      containers:\n      - name: db\n        image: busybox:1.36\n        command: [\"sh\", \"-c\", \"sleep 1000000\"]\n        resources:\n          requests:\n            cpu: 100m\n            memory: 64Mi\n          limits:\n            cpu: \"1\"\n            memory: 128Mi\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: fake-api\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: fake-api\n  template:\n    metadata:\n      labels:\n        app: fake-api\n    spec:\n      affinity:\n        podAntiAffinity:\n          requiredDuringSchedulingIgnoredDuringExecution:\n          - labelSelector:\n              matchLabels:\n                app: fake-db\n            topologyKey: kubernetes.io/hostname\n      containers:\n      - name: api\n        image: busybox:1.36\n        command: [\"sh\", \"-c\", \"sleep 1000000\"]\n        env:\n        - name: TOKIO_WORKER_THREADS\n          valueFrom:\n            resourceFieldRef:\n              resource: limits.cpu\n        resources:\n          requests:\n            cpu: 100m\n            memory: 64Mi\n          limits:\n            cpu: \"2\"\n            memory: 256Mi\nEOF\nkubectl get pods -l 'app in (fake-api,fake-db)' -o wide\nkubectl exec deploy/fake-api -- sh -c 'echo threads=$TOKIO_WORKER_THREADS; cat /sys/fs/cgroup/cpu.max'\n```\nExpect the two pods on different workers, `threads=2` and `200000 100000`."
+        },
+        {
+          "subgoal": "Run one simulator pod for many fake BMCs",
+          "detail": "One pod answers for every address and works out which 'BMC' it is from the HTTP Host header, the way one simulator pod hosts many BMCs:\n```bash\nkubectl apply -f - <<'EOF'\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: fake-bmc-sim\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: fake-bmc-sim\n  template:\n    metadata:\n      labels:\n        app: fake-bmc-sim\n    spec:\n      containers:\n      - name: sim\n        image: python:3.12-slim\n        command: [\"python3\", \"-u\", \"-c\"]\n        args:\n        - |\n          import http.server, json\n          class H(http.server.BaseHTTPRequestHandler):\n              def do_GET(self):\n                  host = (self.headers.get(\"Host\") or \"unknown\").split(\":\")[0]\n                  body = json.dumps({\"@odata.id\": \"/redfish/v1\", \"Id\": \"RootService\", \"Name\": \"simulated BMC \" + host}).encode()\n                  self.send_response(200)\n                  self.send_header(\"Content-Type\", \"application/json\")\n                  self.send_header(\"Content-Length\", str(len(body)))\n                  self.end_headers()\n                  self.wfile.write(body)\n          http.server.ThreadingHTTPServer((\"\", 8000), H).serve_forever()\n        ports:\n        - containerPort: 8000\n        resources:\n          requests:\n            cpu: 50m\n            memory: 64Mi\n          limits:\n            cpu: 500m\n            memory: 128Mi\nEOF\nkubectl wait --for=condition=Available deployment/fake-bmc-sim --timeout=180s\n```"
+        },
+        {
+          "subgoal": "Publish 20 BMC addresses as externalIPs",
+          "detail": "```bash\nfor i in $(seq 1 20); do\ncat <<EOF\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: bmc-$i\n  labels:\n    lab: fake-bmc\nspec:\n  selector:\n    app: fake-bmc-sim\n  externalIPs:\n  - 10.250.0.$i\n  ports:\n  - port: 80\n    targetPort: 8000\nEOF\ndone | kubectl apply -f -\n\nkubectl run curl --rm -i --restart=Never --image=curlimages/curl -- -s http://10.250.0.7/redfish/v1\ndocker exec scale-lab-worker ip -4 -o addr show kube-ipvs0 | grep -c ' 10\\.250\\.0\\.'\n```\nYou should see `{\"@odata.id\": \"/redfish/v1\", \"Id\": \"RootService\", \"Name\": \"simulated BMC 10.250.0.7\"}` and the count `20`. Run the same `docker exec` against `scale-lab-worker2`: it also shows 20, because every node holds every address."
+        },
+        {
+          "subgoal": "Contrast page cache with a real OOM kill",
+          "detail": "```bash\nkubectl apply -f - <<'EOF'\napiVersion: v1\nkind: Pod\nmetadata:\n  name: cache\nspec:\n  containers:\n  - name: cache\n    image: debian:stable-slim\n    command: [\"sh\", \"-c\", \"dd if=/dev/zero of=/tmp/big bs=1M count=300 status=none; sleep 1000000\"]\n    resources:\n      limits:\n        memory: 128Mi\n---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: hog\nspec:\n  containers:\n  - name: hog\n    image: python:3.12-slim\n    command: [\"python3\", \"-c\", \"import time; x = b'x' * (200*1024*1024); time.sleep(3600)\"]\n    resources:\n      limits:\n        memory: 64Mi\nEOF\nsleep 60\nkubectl get pods cache hog\nkubectl exec cache -- sh -c 'cat /sys/fs/cgroup/memory.current; grep -E \"^(anon|active_file|inactive_file) \" /sys/fs/cgroup/memory.stat; grep -E \"^oom_kill \" /sys/fs/cgroup/memory.events'\n```\n`cache` should be `Running`, with mostly file memory and `oom_kill 0`, even though it wrote 300 MiB under a 128 MiB limit. `hog` should show `OOMKilled` or `CrashLoopBackOff`, and its restart count goes up each time you check."
+        },
+        {
+          "subgoal": "Run the verification script",
+          "detail": "Save this as `verify.sh` and run `bash verify.sh`:\n```bash\n#!/usr/bin/env bash\nset -u\npass=0; fail=0\ncheck() { if eval \"$2\"; then echo \"PASS $1\"; pass=$((pass+1)); else echo \"FAIL $1\"; fail=$((fail+1)); fi; }\ncheck \"kube-proxy in ipvs mode\" '[ \"$(docker exec scale-lab-worker curl -s localhost:10249/proxyMode)\" = ipvs ]'\napi_node=$(kubectl get pod -l app=fake-api -o jsonpath='{.items[0].spec.nodeName}')\ndb_node=$(kubectl get pod -l app=fake-db -o jsonpath='{.items[0].spec.nodeName}')\ncheck \"api and db on different nodes ($api_node / $db_node)\" '[ -n \"$api_node\" ] && [ \"$api_node\" != \"$db_node\" ]'\ncheck \"TOKIO_WORKER_THREADS matches CPU limit\" '[ \"$(kubectl exec deploy/fake-api -- printenv TOKIO_WORKER_THREADS)\" = 2 ]'\ncheck \"20 externalIPs on kube-ipvs0\" '[ \"$(docker exec scale-lab-worker ip -4 -o addr show kube-ipvs0 | grep -c \" 10\\.250\\.0\\.\")\" -eq 20 ]'\ncheck \"fake BMC answers on 10.250.0.7\" 'kubectl run vcurl --rm -i --restart=Never --image=curlimages/curl -- -s --max-time 5 http://10.250.0.7/redfish/v1 2>/dev/null | grep -q \"simulated BMC 10.250.0.7\"'\ncheck \"hog was OOM killed\" '[ \"$(kubectl get pod hog -o jsonpath=\"{.status.containerStatuses[0].lastState.terminated.reason}\")\" = OOMKilled ]'\ncheck \"cache pod survived with oom_kill 0\" 'kubectl exec cache -- grep -qx \"oom_kill 0\" /sys/fs/cgroup/memory.events'\necho \"$pass passed, $fail failed\"\n```"
+        }
+      ],
+      "verify": "`bash verify.sh` prints 7 PASS lines and ends with `7 passed, 0 failed`.",
+      "hints": [
+        "`proxyMode` prints nothing or kube-proxy pods crash-loop: IPVS kernel modules are missing on a Linux host. Run `sudo modprobe ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh nf_conntrack`, then delete and recreate the cluster. Read `kubectl -n kube-system logs ds/kube-proxy` for the exact error. A deprecation warning about IPVS mode is harmless.",
+        "`curl` isn't found in the kind node: check the mode with `kubectl -n kube-system get cm kube-proxy -o jsonpath='{.data.config\\.conf}' | grep mode` instead, and edit the first check in verify.sh to match.",
+        "fake-api is Pending: run `kubectl describe pod -l app=fake-api`. If it mentions anti-affinity, you probably created the cluster without two workers. `kubectl get nodes` should list scale-lab-worker and scale-lab-worker2.",
+        "The curl to 10.250.0.7 times out: run `kubectl get endpoints bmc-7`. If it's empty, the sim pod isn't Ready yet (python:3.12-slim can take a while to pull). Check `kubectl logs deploy/fake-bmc-sim`.",
+        "`hog` shows Running instead of being OOM killed: swap may be enabled on the node and absorbing the allocation. Raise the allocation in the command to 400 MiB, or check `docker info` for swap settings. The lastState check only passes after the first kill, so wait about 30 seconds.",
+        "`/sys/fs/cgroup/memory.events` doesn't exist: the host uses cgroup v1. Use a current Linux distro or Docker Desktop, or read `memory.oom_control` instead and adjust the check.",
+        "Using Podman: set `KIND_EXPERIMENTAL_PROVIDER=podman` and replace `docker exec` with `podman exec` in the commands and script."
+      ],
+      "stretch": "Add a second port (443 → 8000) to every bmc-* Service. Then show that the address count on kube-ipvs0 stays at 20 while the IPVS entries double. Use `kubectl -n kube-system exec <kube-proxy pod on scale-lab-worker> -- ipset list KUBE-EXTERNAL-IP | grep -i entries` if the image has ipset, or otherwise count lines in `ipvsadm -Ln` installed in a privileged debug pod with host networking. From your per-BMC cost, work out how many such fake 'racks' of 71 BMCs a stock 65,536-entry set would hold, and compare it with the documented 89 entries and roughly 736 racks per GB200 rack."
+    }
+  }
+}

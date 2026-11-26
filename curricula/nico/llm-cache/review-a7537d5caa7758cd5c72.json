@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "Step 'Rotate the KEK, then retire the old one' suggests a 'separate experiment': run `put` with kek-1, then remove kek-1 before re-wrapping. At that point kek-1 has already been moved to kek-1.retired-backup, so `put ... kek-1` fails at once, and the message ('KEK kek-1 not found, but a record still references it') is misleading because no record is involved yet. If the learner restores kek-1 to do the experiment, it writes a kek-1 record into the real store.json. verify.sh check 2 then prints 1 instead of 0, and check 5 fails because store.json changed after signing.",
+        "fix": "Run the experiment in isolation, for example in a copy of the directory or with `MINIVAULT_STORE=experiment.json` and a KEK that is only for the experiment. Alternatively, move the experiment before the rotation and tell the learner to delete the extra record afterwards. Also tell them to re-sign or rerun from scratch if they experimented on store.json."
+      },
+      {
+        "where": "public-key-cryptography",
+        "severity": "minor",
+        "problem": "The explanation says 'The owner hashes the message and signs the digest' and lists Ed25519 as a common algorithm. Ed25519 (PureEdDSA) signs the message itself; any hashing is internal to the algorithm. The selfExplanation prompt repeats this generalisation.",
+        "fix": "Scope the claim: 'ECDSA (including ES256) and RSA signatures sign a hash of the message.' Alternatively, note that Ed25519 handles hashing internally."
+      }
+    ]
+  }
+}

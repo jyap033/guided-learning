@@ -1,0 +1,711 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "In Chapters 14–16 you learned what a Kubernetes cluster is made of, how traffic reaches it through MetalLB VIPs, and how much CPU and memory a NICo site controller needs. This chapter covers how NICo gets installed on that cluster and kept up to date.\n\nNICo isn't one container. It is a stack: storage provisioners, a Postgres operator, MetalLB, cert-manager, Vault (optional), External Secrets, the DPF stack, RMS, NICo Core, NICo REST, Flow and the site-agent. Each piece ships as Kubernetes manifests, and the stack only works if they go in the right order with the right settings for your site. The tools that do this are **Helm** (packages called charts, configured by values files), **helmfile** (manages many Helm releases at once), **Kustomize** (layers site-specific changes over base manifests) and, optionally, **GitOps with ArgoCD** (a controller that keeps the cluster matching what's in Git).\n\nOn top of these tools, NICo provides `helm-prereqs/setup.sh`. This script installs everything in numbered phases. Before it changes anything, it runs `preflight.sh` to check your environment. You'll also look at PostgreSQL, deployed through the Zalando operator, because it holds all NICo state. It's the component you most need to size correctly and protect.\n\nThe chapter ends with a build where you write a small `setup.sh` of your own on a laptop `kind` cluster. It has a preflight check, helmfile releases, a Kustomize overlay and a Postgres database with NICo's two required extensions. Running it a second time must change nothing.",
+    "objectives": [
+      "Install, render, diff and upgrade Helm charts with helm and helmfile, and explain how values files and --set combine",
+      "Write a Kustomize base and overlay and predict the manifests it renders",
+      "Explain how a GitOps controller such as ArgoCD syncs a cluster from Git, and why secrets must not be committed",
+      "Describe NICo's PostgreSQL deployment (Zalando operator, nico_system_nico, btree_gin and pg_trgm) and which sizing signal means it needs more memory",
+      "Plan a setup.sh run for a given site (environment variables, skip flags, -y) and upgrade a site by re-running it",
+      "Read preflight.sh results and decide whether setup will stop, prompt or continue"
+    ],
+    "lessons": [
+      {
+        "concept": "helm-and-helmfile",
+        "prequestions": [
+          {
+            "question": "You need to install the same application on 20 clusters, each with a different hostname and replica count. Would you rather keep 20 copies of the YAML, or one template plus 20 small settings files? What could go wrong with each approach?",
+            "answer": "Most teams pick one template plus small settings files. Twenty copies drift apart, and a fix has to be made twenty times. The template approach has its own cost: you need a tool that renders the template, and you have to understand which setting wins when settings overlap. Helm is that tool."
+          },
+          {
+            "question": "If you run the same install command twice, what should happen the second time?",
+            "answer": "Ideally nothing. A well-behaved install is idempotent. Helm's `upgrade --install` and helmfile's `apply` are built so that a repeat run either does nothing or changes only what differs."
+          }
+        ],
+        "explanation": "**Helm** is the package manager for Kubernetes. Its package is a **chart**, a directory containing:\n\n- `Chart.yaml`: the chart's name and version.\n- `values.yaml`: the default settings.\n- `templates/`: Kubernetes manifests (Deployments, Services, and so on) with Go-template placeholders such as `{{ .Values.replicaCount }}`.\n\nWhen you install a chart, Helm merges your **values** (YAML settings) into the templates, renders plain manifests and applies them. The installed instance is called a **release**. It has a name, a namespace and a revision number that increases with each upgrade, which makes `helm rollback` possible.\n\nCommands you'll use all the time:\n\n| Command | What it does |\n|---|---|\n| `helm template NAME CHART -f vals.yaml` | Render to stdout without touching a cluster |\n| `helm upgrade --install NAME CHART -n NS` | Install if missing, upgrade if present (idempotent) |\n| `helm list -n NS` / `helm history NAME -n NS` | See releases and revisions |\n| `helm diff upgrade ...` | Show what would change (needs the **helm-diff** plugin) |\n\nA real site runs many releases: MetalLB, cert-manager, the Postgres operator, Vault and more. Running `helm` by hand for each one is error-prone. **helmfile** fixes this by letting you list all releases in one declarative `helmfile.yaml`, including their chart, namespace and values files:\n\n- `helmfile diff` uses helm-diff to show pending changes.\n- `helmfile apply` diffs first, then upgrades only the releases that changed.\n- `helmfile sync` upgrades every release regardless.\n\n**In NICo:** the machine where you run `setup.sh` needs `helm` 3.12 or later, `helmfile` 0.162 or later and the `helm-diff` plugin. The docs state plainly that helmfile requires helm-diff. `setup.sh` installs prerequisites such as MetalLB 0.14.5, cert-manager, postgres-operator 1.11.0, Vault and external-secrets as Helm charts. NICo Core and REST are Helm charts too (`../helm`, `../helm/rest/nico-rest`). The teardown script `clean.sh` removes \"all helmfile releases\". The Reference Installation describes `setup.sh` as \"a thin wrapper over the Helm charts and kustomize manifests\".",
+        "analogy": "Helm is like a mail-merge. The chart is the letter template, the values file is the spreadsheet row and the release is the printed letter you sent. helmfile is the mailing list that says which letters go to whom. The analogy breaks down after printing: a letter, once sent, stays the same. A Helm release keeps a revision history you can diff, upgrade and roll back.",
+        "workedExample": {
+          "title": "From chart to helmfile on a laptop",
+          "steps": [
+            {
+              "subgoal": "Check the toolchain",
+              "detail": "```bash\nhelm version          # v3.12+ (or v4)\nhelmfile --version    # 0.162+\nhelm plugin list      # should show 'diff'\n# if missing (Helm v3):\nhelm plugin install https://github.com/databus23/helm-diff\n# Helm v4: add --verify=false\n```"
+            },
+            {
+              "subgoal": "Create a chart and look inside",
+              "detail": "```bash\nhelm create demo\nls demo            # Chart.yaml  charts/  templates/  values.yaml\ngrep -n replicaCount demo/values.yaml demo/templates/deployment.yaml\n```\nYou'll see `replicaCount: 1` in values.yaml and `replicas: {{ .Values.replicaCount }}` in the template."
+            },
+            {
+              "subgoal": "Render without a cluster",
+              "detail": "```bash\nhelm template web ./demo --set replicaCount=2 | grep -n 'replicas:'\n```\nThe output shows `replicas: 2`. Rendering is safe and fast, and it's the first thing to try when a chart misbehaves."
+            },
+            {
+              "subgoal": "Install, then repeat the same command",
+              "detail": "```bash\nkind create cluster --name helm-lab\nhelm upgrade --install web ./demo -n demo --create-namespace\nhelm upgrade --install web ./demo -n demo   # same command again\nhelm history web -n demo                    # REVISION 1 and 2\n```\nHelm records a new revision even when nothing changed. Next you'll see how helmfile avoids that."
+            },
+            {
+              "subgoal": "Move to helmfile and diff",
+              "detail": "Create `values/demo.yaml` containing `replicaCount: 2`, then `helmfile.yaml`:\n```yaml\nreleases:\n  - name: web\n    namespace: demo\n    chart: ./demo\n    values:\n      - values/demo.yaml\n```\n```bash\nhelmfile diff    # shows replicas 1 -> 2\nhelmfile apply   # upgrades web (revision 3)\nhelmfile apply   # no changes, so no new revision\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Your directory has a chart at `./charts/demo` and a values file at `values/demo.yaml`. Fill in the blanks so that `helmfile apply` installs a release called `web` into namespace `demo`.",
+          "partialSolution": "releases:\n  - name: web\n    namespace: demo\n    chart: ___\n    values:\n      - ___",
+          "answer": "releases:\n  - name: web\n    namespace: demo\n    chart: ./charts/demo\n    values:\n      - values/demo.yaml"
+        },
+        "independentProblem": {
+          "prompt": "A teammate changes `replicaCount` from 2 to 3 in `values/demo.yaml` and opens a pull request. Before merging, you want to see exactly which Kubernetes fields will change on the cluster, without changing anything. Which command do you run, what does it need installed, and what happens if you then run `helmfile apply` twice?",
+          "hints": [
+            "One helmfile subcommand only shows changes.",
+            "That subcommand depends on a Helm plugin, the same one NICo's quick start tells you to install.",
+            "`apply` runs a diff first and upgrades only releases that differ."
+          ],
+          "answer": "Run `helmfile diff`. It needs the helm-diff plugin and shows `replicas: 2 -> 3` on the Deployment. The first `helmfile apply` upgrades the `web` release (new revision). The second finds no difference and leaves it alone, so no new revision is recorded."
+        },
+        "selfExplanation": "Why does a multi-component install like NICo's use helmfile and a diff step instead of a shell script that calls `helm install` for each chart?",
+        "checks": [
+          {
+            "question": "Which command renders a chart's manifests locally without contacting a cluster?",
+            "options": [
+              "helm template",
+              "helm install --dry-run=server",
+              "helm list",
+              "helmfile sync"
+            ],
+            "answer": "helm template",
+            "explanation": "`helm template` renders entirely client-side. `--dry-run=server` contacts the API server to validate. `helm list` shows existing releases. `helmfile sync` actually applies changes."
+          },
+          {
+            "question": "NICo's quick start lists the helm-diff plugin as a required tool. Why?",
+            "options": [
+              "helmfile needs it to compute the diff behind `helmfile diff` and `helmfile apply`",
+              "Helm cannot install charts without it",
+              "It encrypts values files",
+              "It is used to roll back failed releases"
+            ],
+            "answer": "helmfile needs it to compute the diff behind `helmfile diff` and `helmfile apply`",
+            "explanation": "The docs state that helmfile requires helm-diff. Helm installs charts and rolls back without the plugin, and helm-diff does no encryption."
+          },
+          {
+            "question": "What is a Helm release?",
+            "options": [
+              "A named, versioned installation of a chart in a namespace",
+              "The chart's version number in Chart.yaml",
+              "A tarball pushed to a registry",
+              "A values file"
+            ],
+            "answer": "A named, versioned installation of a chart in a namespace",
+            "explanation": "The chart is the package and the release is an installed instance of it, with a revision history. Chart.yaml's version describes the package, not the installation."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md",
+          "getting-started/prerequisites/software.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "concept": "kustomize",
+        "prequestions": [
+          {
+            "question": "You have a working Deployment YAML from upstream and need to add a label and a memory limit for your site, without editing the upstream file. How could you describe only the difference?",
+            "answer": "Keep the upstream file as a base and write a small patch containing only the fields you want to change. A tool then merges the patch on top. That is how Kustomize works."
+          }
+        ],
+        "explanation": "**Kustomize** customises Kubernetes YAML without templates. It's built into `kubectl`: `kubectl kustomize DIR` renders, and `kubectl apply -k DIR` renders and applies.\n\nIt uses two ideas:\n\n- **Base**: a directory of ordinary manifests plus a `kustomization.yaml` that lists them under `resources:`.\n- **Overlay**: another directory whose `kustomization.yaml` points at the base (`resources: - ../../base`) and adds changes on top.\n\nCommon overlay fields:\n\n| Field | Effect |\n|---|---|\n| `namespace:` | Sets the namespace on every resource |\n| `labels:` | Adds labels |\n| `namePrefix:` | Prefixes every resource name |\n| `replicas:` | Overrides a Deployment's replica count by name |\n| `patches:` | Merges partial YAML onto matching resources (a strategic merge patch: write only the fields you change, and named list items such as containers are matched by `name`) |\n\nHelm and Kustomize differ in one way. Helm exposes only the knobs the chart author put in `values.yaml`. Kustomize can change any field of any manifest, but it has no release history and no rollback.\n\n**In NICo:**\n\n- `setup.sh --site-overlay <dir>` applies a site Kustomize overlay after Phase 6 (NICo Core).\n- `--metallb-config <path>` accepts either a plain MetalLB manifest file or a Kustomize directory.\n- The NICo REST stack under `rest-api/` ships Kustomize bases that `setup.sh` uses for Phase 7.\n\nSite-specific changes can therefore live in your own overlay directory instead of inside the repository's files, which keeps upgrades clean.",
+        "analogy": "A base is a printed form and an overlay is a transparent sheet laid on top with a few fields filled in differently. Swap the sheet for another site and the form underneath is unchanged. The analogy breaks down because a Kustomize patch only works if it addresses the right resource by kind and name. A typo in the name silently fails to match, or causes an error. A transparent sheet always lines up.",
+        "workedExample": {
+          "title": "Base plus site overlay, rendered locally",
+          "steps": [
+            {
+              "subgoal": "Write the base",
+              "detail": "```bash\nmkdir -p kz/base kz/overlays/site && cd kz\ncat > base/deployment.yaml <<'EOF'\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: web\n  template:\n    metadata:\n      labels:\n        app: web\n    spec:\n      containers:\n        - name: web\n          image: nginx:1.27\nEOF\ncat > base/kustomization.yaml <<'EOF'\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - deployment.yaml\nEOF\n```"
+            },
+            {
+              "subgoal": "Write a patch with only the changed fields",
+              "detail": "```bash\ncat > overlays/site/limits.yaml <<'EOF'\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  template:\n    spec:\n      containers:\n        - name: web\n          resources:\n            limits:\n              memory: 256Mi\nEOF\n```\nThe container is matched by `name: web`, so its `image` is kept."
+            },
+            {
+              "subgoal": "Write the overlay kustomization",
+              "detail": "```bash\ncat > overlays/site/kustomization.yaml <<'EOF'\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: site-a\nresources:\n  - ../../base\nreplicas:\n  - name: web\n    count: 3\npatches:\n  - path: limits.yaml\nEOF\n```"
+            },
+            {
+              "subgoal": "Render and inspect",
+              "detail": "```bash\nkubectl kustomize overlays/site\n```\nIn the output, check for `namespace: site-a`, `replicas: 3`, `image: nginx:1.27` (from the base) and `memory: 256Mi` (from the patch). To apply it to a cluster: `kubectl apply -k overlays/site`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so the overlay builds on `../../base` and applies the patch file `limits.yaml`.",
+          "partialSolution": "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: site-a\nresources:\n  - ___\npatches:\n  - path: ___",
+          "answer": "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: site-a\nresources:\n  - ../../base\npatches:\n  - path: limits.yaml"
+        },
+        "independentProblem": {
+          "prompt": "Add a second overlay, `overlays/lab`, that reuses the same base but deploys into namespace `lab` with 1 replica and no memory limit. Render it and confirm. Then explain why a NICo operator would keep site changes in a directory passed to `setup.sh --site-overlay` instead of editing files in the checked-out repo.",
+          "hints": [
+            "The overlay needs only a kustomization.yaml. Leave out patches you don't want.",
+            "`resources: - ../../base`, `namespace: lab`, and either omit `replicas:` (the base already has 1) or set `count: 1`.",
+            "Think about what happens to your local edits when you `git checkout` the next release tag to upgrade."
+          ],
+          "answer": "`overlays/lab/kustomization.yaml`:\n```yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: lab\nresources:\n  - ../../base\n```\n`kubectl kustomize overlays/lab` shows namespace `lab`, `replicas: 1` and no `resources:` block. Keeping site changes in a separate overlay means upgrading is just checking out the new release and re-running `setup.sh` with the same `--site-overlay`. Your changes aren't mixed into upstream files, where they would conflict or get lost."
+        },
+        "selfExplanation": "Why might a project use Helm for its own components but accept a Kustomize overlay for site-specific tweaks, instead of exposing every possible field as a Helm value?",
+        "checks": [
+          {
+            "question": "In a strategic merge patch on a Deployment, how does Kustomize know which container to modify?",
+            "options": [
+              "It matches list items by the container's `name`",
+              "It patches the first container in the list",
+              "It replaces the whole containers list",
+              "It matches by image"
+            ],
+            "answer": "It matches list items by the container's `name`",
+            "explanation": "For containers, strategic merge uses `name` as the merge key. That's why the image from the base survives. Replacing the whole list is what a plain JSON merge or a Helm values list override does."
+          },
+          {
+            "question": "Which setup.sh option applies a site Kustomize overlay, and when?",
+            "options": [
+              "--site-overlay <dir>, after Phase 6",
+              "--metallb-config <dir>, before Phase 0",
+              "--core-values <file>, during Phase 7",
+              "--site-overlay <dir>, before preflight"
+            ],
+            "answer": "--site-overlay <dir>, after Phase 6",
+            "explanation": "The quick start says `--site-overlay` applies a site kustomize overlay after Phase 6. `--metallb-config` also accepts a kustomize directory, but only for the MetalLB config. `--core-values` takes a Helm values file."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md"
+        ]
+      },
+      {
+        "concept": "gitops-with-argocd",
+        "prequestions": [
+          {
+            "question": "Someone fixes a production problem by running `kubectl edit` on a Deployment. A month later the cluster is rebuilt from the repo. What happens to their fix?",
+            "answer": "It's lost, because it only existed in the live cluster. GitOps addresses this by making Git the source of truth and having a controller continuously reconcile the cluster to match it."
+          },
+          {
+            "question": "Is it safe to commit a database password to the Git repo that a GitOps controller deploys from?",
+            "answer": "No. Anyone with read access to the repo, or its history, gets the password. Commit a reference to the secret instead, and let a tool such as External Secrets Operator create the real Kubernetes Secret inside the cluster."
+          }
+        ],
+        "explanation": "**GitOps** is a way of doing continuous delivery. The desired state of the cluster (manifests, Helm charts, values) lives in a Git repository, and a controller running *inside* the cluster keeps the live state matching it. You change the cluster by merging a commit, not by running `kubectl` or `helm` from a laptop. Git then gives you review, audit history and rollback (`git revert`) for free.\n\n**ArgoCD** is a popular GitOps controller. You describe what to deploy with an `Application` custom resource:\n\n- **source**: a Git repo URL, a revision (branch or tag) and a path. The path can hold plain YAML, a Kustomize directory or a Helm chart, and for Helm you can list `valueFiles`.\n- **destination**: which cluster and namespace to deploy into.\n- **syncPolicy**: whether to sync automatically. `prune` deletes objects that were removed from Git. `selfHeal` reverts manual changes made in the cluster, which are called **drift**.\n\nArgoCD repeatedly renders the source, compares it with the live objects and reports each Application as *Synced* or *OutOfSync* and as *Healthy* or *Degraded*.\n\n**Secrets** are the hard part. Git is the wrong place for plaintext credentials. The usual pattern is to commit objects that *refer to* secrets and let an operator create the actual Kubernetes Secret in the cluster. NICo already does this: External Secrets Operator (ESO) copies the `site-root` CA bundle and the database credentials into NICo namespaces as Kubernetes Secrets.\n\n**In NICo:** the docs list ArgoCD as an *optional* prerequisite for \"GitOps-based continuous delivery for deploying and updating NICo components\". The supported automated path is `setup.sh`. Separately, `setup.sh` installs `argo-cd` as part of the DPF stack for DPU provisioning (skipped with `--skip-dpf`). The docs don't describe a NICo-specific ArgoCD repo layout, so treat the example below as generic ArgoCD.",
+        "analogy": "GitOps is like a thermostat. Git holds the set temperature and the controller keeps adjusting the room to match. If someone opens a window (a manual `kubectl edit`), self-heal closes it again. The analogy breaks down in one place: a thermostat never deletes furniture, but ArgoCD with `prune` will delete objects that disappear from Git. A bad commit can therefore remove real resources.",
+        "workedExample": {
+          "title": "Reading an ArgoCD Application and tracing one change",
+          "steps": [
+            {
+              "subgoal": "Read the Application",
+              "detail": "```yaml\napiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: demo-web\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://git.example.com/infra/site-a.git\n    targetRevision: main\n    path: charts/demo\n    helm:\n      valueFiles:\n        - values-site-a.yaml\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: demo\n  syncPolicy:\n    automated:\n      prune: true\n      selfHeal: true\n    syncOptions:\n      - CreateNamespace=true\n```\nThis renders the Helm chart at `charts/demo` with `values-site-a.yaml` and deploys it into the same cluster ArgoCD runs in."
+            },
+            {
+              "subgoal": "Make a change the GitOps way",
+              "detail": "Edit `values-site-a.yaml` (for example `replicaCount: 3`), open a pull request, get review and merge to `main`. Nobody runs `helm upgrade`."
+            },
+            {
+              "subgoal": "Watch the controller reconcile",
+              "detail": "ArgoCD notices that `main` moved, renders the chart, finds the Deployment differs (OutOfSync) and, because `automated` is set, syncs it. The Application returns to Synced/Healthy."
+            },
+            {
+              "subgoal": "Observe drift being reverted",
+              "detail": "Someone runs `kubectl scale deploy/demo-web -n demo --replicas=1`. With `selfHeal: true`, ArgoCD reapplies 3. Without self-heal, it reports OutOfSync and waits for a manual sync."
+            },
+            {
+              "subgoal": "Handle the secret",
+              "detail": "The chart needs a DB password. Instead of committing it, the repo holds an ExternalSecret (or similar) that the in-cluster operator turns into a real Secret. ESO plays this role for NICo's database credentials and root CA bundle."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the Application so it deploys the Kustomize overlay at `overlays/site-a` and automatically reverts manual changes made in the cluster.",
+          "partialSolution": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: site-a\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://git.example.com/infra/site-a.git\n    targetRevision: main\n    path: ___\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: site-a\n  syncPolicy:\n    automated:\n      prune: true\n      ___: true",
+          "answer": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: site-a\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://git.example.com/infra/site-a.git\n    targetRevision: main\n    path: overlays/site-a\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: site-a\n  syncPolicy:\n    automated:\n      prune: true\n      selfHeal: true"
+        },
+        "independentProblem": {
+          "prompt": "Your team adopts ArgoCD for an application stack. List three things that change for operators compared with running `helm upgrade` from a laptop. For each, say whether it is a benefit or a new risk. Include one point about secrets.",
+          "hints": [
+            "Think about who can change the cluster, and how.",
+            "Think about what `prune` and `selfHeal` do when Git is wrong, or when someone hot-fixes the cluster.",
+            "Where does the database password come from if it can't live in Git?"
+          ],
+          "answer": "Possible answers:\n1. Changes go through Git review and history (benefit: audit trail and `git revert` rollback).\n2. Manual hot-fixes are reverted by self-heal (benefit: no silent drift; risk: an emergency `kubectl edit` disappears unless it's also committed).\n3. With `prune`, deleting a file from Git deletes the live object (risk: a bad commit can remove resources).\n4. Secrets can't be committed as plaintext. The repo holds references, and an in-cluster operator such as ESO creates the Kubernetes Secrets (new design work, but it keeps credentials out of Git history)."
+        },
+        "selfExplanation": "Why does GitOps put the controller inside the cluster pulling from Git, instead of having a CI job push changes into the cluster?",
+        "checks": [
+          {
+            "question": "In NICo's documentation, what is ArgoCD's status as a prerequisite for deploying NICo?",
+            "options": [
+              "Optional; GitOps-based delivery for deploying and updating NICo components",
+              "Required; setup.sh refuses to run without it",
+              "Required only for NICo REST",
+              "Replaced by Temporal"
+            ],
+            "answer": "Optional; GitOps-based delivery for deploying and updating NICo components",
+            "explanation": "The prerequisite list marks ArgoCD as optional. setup.sh is the supported automated path. Temporal is a workflow engine, not a delivery tool. (argo-cd does appear inside the DPF stack, but that doesn't make it a requirement for deploying NICo.)"
+          },
+          {
+            "question": "An Application has `selfHeal: true`. An operator runs `kubectl scale` to change the replica count. What happens?",
+            "options": [
+              "ArgoCD reapplies the replica count from Git",
+              "ArgoCD commits the new replica count back to Git",
+              "Nothing; selfHeal only applies to deleted objects",
+              "The Application is deleted"
+            ],
+            "answer": "ArgoCD reapplies the replica count from Git",
+            "explanation": "Self-heal reverts live drift to the Git state. ArgoCD doesn't write back to Git. Deleting objects removed from Git is what `prune` does, a separate setting."
+          },
+          {
+            "question": "How does NICo get database credentials into its namespaces without putting them in a values file?",
+            "options": [
+              "External Secrets Operator copies them into Kubernetes Secrets in each namespace",
+              "They are hard-coded in the nico-api image",
+              "Temporal passes them as workflow inputs",
+              "ArgoCD decrypts them from Git"
+            ],
+            "answer": "External Secrets Operator copies them into Kubernetes Secrets in each namespace",
+            "explanation": "The software prerequisites page says ESO copies the database credentials and the site-root CA bundle into NICo namespaces through ClusterSecretStores. The other options aren't described anywhere, and they would be insecure."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md",
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "helm-chart-values",
+        "prequestions": [
+          {
+            "question": "The chart default is `replicaCount: 1`. File A sets 2, file B sets 3, and you pass `-f A -f B --set replicaCount=4`. Which value wins?",
+            "answer": "4. `--set` beats files, and among files the later one (B) beats the earlier one (A). Without `--set`, the result would be 3."
+          },
+          {
+            "question": "Your override file sets a list called `extraEnv` with one entry. The base values file already had two entries. How many entries end up in the deployment?",
+            "answer": "One. Helm deep-merges maps, but a list is replaced as a whole. You must repeat any base entries you want to keep."
+          }
+        ],
+        "explanation": "Every Helm chart has defaults in its own `values.yaml`. You override them with your own **values files** (`-f file.yaml`, or the `values:` list in helmfile) and, for one-off tweaks, `--set key=value`. Helm merges them in a fixed order, and later sources win:\n\n1. Chart defaults (`values.yaml` inside the chart)\n2. `-f` files, in the order given\n3. `--set` / `--set-string`\n\nTwo merge rules cause most surprises:\n\n- **Maps merge key by key.** Setting `podAnnotations.size` in one file and `podAnnotations.team` in another gives you both.\n- **Lists are replaced whole.** A list in a later file throws away the earlier list completely.\n\nTwo more things to know:\n\n- **Umbrella charts.** A chart can bundle subcharts. Values for a subchart sit under the subchart's name, which is why NICo's `values/nico-core.yaml` has top-level keys such as `nico-api:`, `nico-dhcp:` and `nico-dns:`.\n- **Types matter.** Kubernetes annotations must be strings. The quick start warns that an unquoted `true` or number in an annotation is rejected at apply time. Write `\"true\"`.\n\nUseful commands: `helm show values CHART` (see the defaults), `helm get values RELEASE` (see what you supplied) and `helm template ... -f a -f b` (preview the merge).\n\n**In NICo:**\n\n- `helm-prereqs/values.yaml` sets `siteName` and the `postgresql` block (instances, volumeSize, resources). It also contains the Postgres memory sizing table: 16 GiB up to 5,000 hosts and 32 GiB beyond that.\n- `values/nico-core.yaml` holds Core settings, `values/nico-rest.yaml` holds REST settings and `values/metallb-config.yaml` holds the MetalLB config.\n- For large fleets NICo ships `helm-prereqs/values/nico-core-10k-hosts.yaml` and `nico-core-20k-hosts.yaml`.\n- `setup.sh --core-values <file>` points Phase 6 at site-specific Core values.\n- The scale runs set `TOKIO_WORKER_THREADS` through the nico-api chart's `extraEnv` so the thread count matches the CPU limit.",
+        "analogy": "Layered values are like CSS. Defaults come first, your stylesheets override them in order and an inline style (`--set`) beats everything. The analogy breaks down on lists: in CSS you can add one more rule to a set, but a Helm list in a later file wipes out the earlier list instead of appending.",
+        "workedExample": {
+          "title": "Watching the merge rules in rendered output",
+          "steps": [
+            {
+              "subgoal": "Start from the demo chart",
+              "detail": "```bash\nhelm create demo   # skip if you have it\nhelm show values ./demo | grep -nE 'replicaCount|podAnnotations|tolerations'\n```"
+            },
+            {
+              "subgoal": "Write a site file and a sizing file",
+              "detail": "```bash\ncat > values-site.yaml <<'EOF'\nreplicaCount: 2\npodAnnotations:\n  team: \"infra\"\ntolerations:\n  - key: \"dedicated\"\n    operator: \"Equal\"\n    value: \"control-plane\"\n    effect: \"NoSchedule\"\nEOF\ncat > values-large.yaml <<'EOF'\nreplicaCount: 3\npodAnnotations:\n  size: \"large\"\ntolerations:\n  - key: \"big-node\"\n    operator: \"Exists\"\n    effect: \"NoSchedule\"\nEOF\n```"
+            },
+            {
+              "subgoal": "Render with both files and a --set",
+              "detail": "```bash\nhelm template web ./demo -f values-site.yaml -f values-large.yaml \\\n  --set replicaCount=4 | sed -n '/kind: Deployment/,$p'\n```"
+            },
+            {
+              "subgoal": "Read the result against the rules",
+              "detail": "- `replicas: 4`: `--set` beat both files.\n- Annotations contain both `team: infra` and `size: large`, because maps merge.\n- Tolerations contain **only** `big-node`, because the later list replaced the earlier one."
+            },
+            {
+              "subgoal": "Apply the rule to NICo",
+              "detail": "The Day 0 guide adds a `nico-api.extraEnv` entry for `NICO_SECRETS_KEK`. If a later sizing file sets `nico-api.extraEnv` to only `TOKIO_WORKER_THREADS`, the KEK variable disappears, because that list is replaced too. Keep every entry in the final list."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Following the scale guidance, you're giving nico-api 32 CPUs and want 32 Tokio worker threads to match. Fill in the override so the variable is set through the nico-api chart's `extraEnv`. The value must be a string.",
+          "partialSolution": "nico-api:\n  extraEnv:\n    - name: ___\n      value: ___",
+          "answer": "nico-api:\n  extraEnv:\n    - name: TOKIO_WORKER_THREADS\n      value: \"32\""
+        },
+        "independentProblem": {
+          "prompt": "Your site's `values/nico-core.yaml` already has this (from the Day 0 credential-store setup):\n```yaml\nnico-api:\n  extraEnv:\n    - name: NICO_SECRETS_KEK\n      valueFrom:\n        secretKeyRef:\n          name: nico-secrets-kek\n          key: site-kek-1\n```\nYou put the `TOKIO_WORKER_THREADS` override from the previous problem in a separate file that is layered *after* it. What goes wrong at runtime, and how do you write the override file correctly?",
+          "hints": [
+            "What type is `extraEnv`: a map or a list?",
+            "Lists in later values files replace earlier lists entirely.",
+            "The final file must contain both entries."
+          ],
+          "answer": "`extraEnv` is a list, so the later file replaces it. nico-api starts without `NICO_SECRETS_KEK`. Its `[secrets]` config locates the key with `env = \"NICO_SECRETS_KEK\"`, so the Integrated KEK can't be loaded and nico-api fails to boot. The correct override repeats both entries:\n```yaml\nnico-api:\n  extraEnv:\n    - name: NICO_SECRETS_KEK\n      valueFrom:\n        secretKeyRef:\n          name: nico-secrets-kek\n          key: site-kek-1\n    - name: TOKIO_WORKER_THREADS\n      value: \"32\"\n```\nRun `helm template` (or `helmfile diff`) to confirm before applying."
+        },
+        "selfExplanation": "Why do you think Helm replaces lists instead of merging them? What would go wrong if it appended list items automatically?",
+        "checks": [
+          {
+            "question": "Order of precedence, lowest to highest, for Helm values:",
+            "options": [
+              "chart values.yaml < -f files in order < --set",
+              "--set < -f files < chart values.yaml",
+              "-f files < chart values.yaml < --set",
+              "All sources are merged and conflicts are errors"
+            ],
+            "answer": "chart values.yaml < -f files in order < --set",
+            "explanation": "Chart defaults are the base, files override them in the order given and --set wins. Helm doesn't raise an error on conflicts; the later source silently wins."
+          },
+          {
+            "question": "Why do NICo's Core values have top-level keys like `nico-api:` and `nico-dhcp:`?",
+            "options": [
+              "They are subcharts of an umbrella chart, and subchart values are keyed by subchart name",
+              "They are Kubernetes namespaces",
+              "They are helmfile release names",
+              "They are required by Kustomize"
+            ],
+            "answer": "They are subcharts of an umbrella chart, and subchart values are keyed by subchart name",
+            "explanation": "An umbrella chart passes the block under each subchart's name to that subchart. They aren't namespaces (Core services run in nico-system), and they have nothing to do with Kustomize."
+          },
+          {
+            "question": "An annotation value in your values file is written as `force-ssl-redirect: true` (unquoted). What happens, per the quick start?",
+            "options": [
+              "Apply fails, because annotations must be strings",
+              "Helm converts it to a string automatically",
+              "The annotation is silently dropped",
+              "It works only with Contour"
+            ],
+            "answer": "Apply fails, because annotations must be strings",
+            "explanation": "Annotations are map[string]string. The docs show the error `cannot unmarshal bool into Go struct field ObjectMeta.metadata.annotations of type string`. Quote the value."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md",
+          "getting-started/sizing-and-scale.md",
+          "getting-started/installation-options/day0-credential-store.md"
+        ]
+      },
+      {
+        "concept": "postgresql",
+        "prequestions": [
+          {
+            "question": "Several NICo services need hardware inventory. Should they all connect to the database directly, or go through one service? What does your choice cost or gain?",
+            "answer": "NICo routes everything through one service: only the API Service reads and writes PostgreSQL, and other services call it over mTLS/gRPC. That keeps schema, state machines and locking in one place, at the cost of making nico-api and Postgres the components that bottleneck at scale."
+          },
+          {
+            "question": "What extra job does a Kubernetes 'operator' do for a database, beyond what a plain StatefulSet does?",
+            "answer": "An operator watches a custom resource that describes the database you want (instances, volume size, users, databases). It then creates and manages the pods, replication, failover and credentials Secrets, applying operational knowledge that a StatefulSet doesn't have."
+          }
+        ],
+        "explanation": "**PostgreSQL** holds *all* NICo system state: machines, network segments, resource pools, state machine progress and, on sites configured for it, encrypted credentials. The data lives in the `nico_system_nico` database, and **only the API Service (nico-api) reads and writes it**. Every other component asks nico-api.\n\nThe reference deployment uses the **Zalando Postgres Operator** (v1.11.0) with the **Spilo-15** image (Postgres 15). An operator is a controller that watches a custom resource and does the operational work for you. Here the custom resource is `kind: postgresql` (API group `acid.zalan.do`), and you list in it the number of instances, the volume size, the users and the databases. The operator then:\n\n- creates a StatefulSet of Spilo pods, which bundle Postgres with Patroni for leader election and failover,\n- creates a Service for the primary,\n- generates a credentials Secret for each user.\n\nNICo's cluster is `nico-pg-cluster` in the `postgres` namespace, exposed as a ClusterIP Service on port 5432. ESO then copies its credentials into NICo namespaces under names such as `nico-system.nico.nico-pg-cluster.credentials`.\n\n**Required extensions:** `btree_gin` and `pg_trgm`. They ship with standard Postgres (contrib), and you enable them per database with `CREATE EXTENSION IF NOT EXISTS ...`.\n\n- `pg_trgm` adds trigram matching, for fast `LIKE` and fuzzy text search with GIN indexes.\n- `btree_gin` lets plain scalar columns such as integers join text columns in a single GIN index.\n\n**Sizing:**\n\n- `helm-prereqs/values.yaml` has `postgresql.instances` (3 for HA), `volumeSize` (10Gi by default) and resources.\n- The scale guide says the Postgres primary's CPU limit is hit before node CPU. At the 8-CPU default this happens near 2,500 hosts.\n- For memory, the sizing table gives 16 GiB up to 5,000 hosts and 32 GiB beyond. A kubelet working set sitting *at* the limit is normal, because page cache fills it. The signal to raise memory is a rising `oom_kill` count in the Postgres cgroup.",
+        "analogy": "The operator is like a property manager. You sign a lease saying \"3-bedroom, 10 Gi storage\" (the CR), and they handle plumbers, keys and replacing a broken boiler (pods, Secrets, failover). The analogy breaks down because the property manager doesn't fully own your data: backups and the right memory limit are still your decisions.",
+        "workedExample": {
+          "title": "See why NICo needs btree_gin and pg_trgm (Docker)",
+          "steps": [
+            {
+              "subgoal": "Start Postgres 15",
+              "detail": "```bash\ndocker run -d --name pg -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=nico_system_nico postgres:15\nsleep 5\ndocker exec -it pg psql -U postgres -d nico_system_nico\n```"
+            },
+            {
+              "subgoal": "Create a table and try a mixed GIN index without the extensions",
+              "detail": "```sql\nCREATE TABLE hosts (id serial PRIMARY KEY, name text, rack int);\nINSERT INTO hosts(name, rack)\n  SELECT 'rack' || (g % 50) || '-node' || g, g % 50 FROM generate_series(1, 5000) g;\nCREATE INDEX ON hosts USING gin (rack, name);\n```\nThis fails: neither `integer` nor `text` has a default operator class for GIN in core Postgres."
+            },
+            {
+              "subgoal": "Enable the extensions, idempotently",
+              "detail": "```sql\nCREATE EXTENSION IF NOT EXISTS btree_gin;\nCREATE EXTENSION IF NOT EXISTS pg_trgm;\nCREATE EXTENSION IF NOT EXISTS pg_trgm;   -- running it again is a no-op (NOTICE)\n\\dx\n```\nThese are the same statements NICo's prerequisites page tells you to run on an existing Postgres."
+            },
+            {
+              "subgoal": "Build the index and query",
+              "detail": "```sql\nCREATE INDEX hosts_rack_name ON hosts USING gin (rack, name gin_trgm_ops);\nSELECT name, similarity(name, 'rack7-node1007') AS s\n  FROM hosts WHERE rack = 7 AND name % 'rack7-node1007'\n  ORDER BY s DESC LIMIT 3;\n```\n`btree_gin` makes `rack` indexable by GIN. `pg_trgm` provides `gin_trgm_ops`, `%` and `similarity()`."
+            },
+            {
+              "subgoal": "Connect it to the operator",
+              "detail": "On a NICo site you don't `docker run` Postgres. The Zalando operator runs it from a `postgresql` custom resource, `setup.sh` Phase 1b installs the operator and Phase 5 creates `nico-pg-cluster`. Clean up with `docker rm -f pg`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Here is a generic Zalando `postgresql` resource (not NICo's exact rendering) for a highly available Postgres 15 cluster. Fill in the instance count that gives HA in the reference deployment, and the major version that matches Spilo-15.",
+          "partialSolution": "apiVersion: acid.zalan.do/v1\nkind: postgresql\nmetadata:\n  name: demo-pg-cluster\n  namespace: postgres\nspec:\n  teamId: demo\n  numberOfInstances: ___\n  volume:\n    size: 10Gi\n  users:\n    app: []\n  databases:\n    appdb: app\n  postgresql:\n    version: \"___\"",
+          "answer": "apiVersion: acid.zalan.do/v1\nkind: postgresql\nmetadata:\n  name: demo-pg-cluster\n  namespace: postgres\nspec:\n  teamId: demo\n  numberOfInstances: 3\n  volume:\n    size: 10Gi\n  users:\n    app: []\n  databases:\n    appdb: app\n  postgresql:\n    version: \"15\""
+        },
+        "independentProblem": {
+          "prompt": "A 3,000-host site's Grafana shows the Postgres primary's working set flat at its 16 GiB limit for a week. The cgroup `oom_kill` counter is 0 and the same pod has stayed primary all week. A colleague wants to double memory right away. Using NICo's sizing guidance, what do you recommend, and what would change your mind?",
+          "hints": [
+            "What makes up the kubelet working set, and does it naturally grow toward the limit?",
+            "What does the helm-prereqs/values.yaml table say for sites up to 5,000 hosts?",
+            "Which counter does the guide name as the real signal?"
+          ],
+          "answer": "Don't raise it yet. The working set includes active page cache and grows toward the limit by design, so being at 16 GiB isn't evidence that more is needed. The sizing table gives 16 GiB up to 5,000 hosts, and 3,000 is within that. Raise memory (32 GiB is the next step in the table) if the `oom_kill` counter starts rising, if the primary keeps getting restarted, or if the site grows past 5,000 hosts. CPU is a separate concern: the 8-CPU default is reached near 2,500 hosts, so check the primary's CPU at this site too."
+        },
+        "selfExplanation": "Why is it a reasonable design for only nico-api to talk to PostgreSQL, even though it makes nico-api and the Postgres primary the scaling bottleneck?",
+        "checks": [
+          {
+            "question": "Which NICo component reads from and writes to PostgreSQL?",
+            "options": [
+              "Only the API Service (nico-api)",
+              "Every Site Controller service",
+              "nico-api and the DPU Agent",
+              "The Site Agent, through Temporal"
+            ],
+            "answer": "Only the API Service (nico-api)",
+            "explanation": "The docs state that the API Service is the only service that reads from and writes to PostgreSQL. The DPU Agent polls nico-api over gRPC, and the Site Agent syncs through Temporal to NICo REST."
+          },
+          {
+            "question": "Which two Postgres extensions does NICo require?",
+            "options": [
+              "btree_gin and pg_trgm",
+              "pgcrypto and uuid-ossp",
+              "postgis and hstore",
+              "pg_stat_statements and citext"
+            ],
+            "answer": "btree_gin and pg_trgm",
+            "explanation": "The software prerequisites list exactly btree_gin and pg_trgm. The others are common extensions but are not listed as requirements."
+          },
+          {
+            "question": "Per the scale guide, what is the signal to raise the Postgres memory limit?",
+            "options": [
+              "A rising oom_kill count in the Postgres cgroup",
+              "The working set reaching the limit",
+              "Database size above 10 GB",
+              "More than 1,000 connections"
+            ],
+            "answer": "A rising oom_kill count in the Postgres cgroup",
+            "explanation": "The working set grows toward the limit by design, so reaching it isn't the signal. The guide says to treat rising oom_kill as the signal and notes that disk is not the scaling constraint."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "getting-started/prerequisites/software.md",
+          "getting-started/quick-start.md",
+          "getting-started/sizing-and-scale.md"
+        ]
+      },
+      {
+        "concept": "setup-sh-orchestrator",
+        "prequestions": [
+          {
+            "question": "Vault, cert-manager and Postgres all need to exist before nico-api starts. If you wrote an installer, how would you make sure a failure halfway through doesn't leave you stuck?",
+            "answer": "Install in dependency order and make each step idempotent: create-or-update, never 'create and fail if it exists'. After a failure, you fix the cause and re-run the whole thing. setup.sh works this way."
+          },
+          {
+            "question": "How would you upgrade a system whose installer is idempotent?",
+            "answer": "Check out the new version, change the image tags and run the installer again. Each step upgrades its component in place."
+          }
+        ],
+        "explanation": "`helm-prereqs/setup.sh` is NICo's automated installer. It wraps the Helm charts, helmfile releases and Kustomize manifests and applies them in **numbered phases**, in dependency order:\n\n| Phase | Installs |\n|---|---|\n| 0 | DNS check |\n| 1, 1b, 1c, 1d | local-path-provisioner, Zalando postgres-operator, MetalLB plus site config, optional Contour |\n| 2 | cert-manager plus site CA bootstrap |\n| 3, 4 | Vault (HA Raft), then init/unseal, `nico-system` namespace, SSH host key |\n| 5, 5b, 5c | external-secrets, nico-prereqs and nico-pg-cluster; DPF stack; RMS |\n| 6 | **NICo Core** |\n| 7a–7g, 7h, 7i | NICo REST (Keycloak, Temporal, REST services), Flow, site-agent |\n\n**Inputs** are environment variables plus the values files from the previous lessons.\n\n- `NICO_IMAGE_REGISTRY` is required unless you pass both `--skip-core` and `--skip-rest`. `NICO_CORE_IMAGE_TAG` and `NICO_REST_IMAGE_TAG` are each required unless their component is skipped.\n- DPF is on by default and needs `NICO_DPF_DPU_INTERFACE` and `NICO_DPF_DPU_CLUSTER_VIP`, unless you pass `--skip-dpf`.\n- RMS is on by default and needs `NICO_RMS_IMAGE_TAG`, unless you pass `--skip-rms`.\n\n**Common flags:**\n\n- `-y` accepts routine prompts and preflight warnings. Preflight *errors* still stop setup.\n- `--skip-vault` (or `NICO_SKIP_VAULT=true`) installs without Vault. The choice is **not stored**, so pass it on every run.\n- `--skip-core`, `--skip-rest`, `--skip-dpf` and `--skip-rms` leave out those components.\n- `--core-values`, `--metallb-config` and `--site-overlay` point at site files.\n- `--install-contour` adds an ingress controller.\n- `--with-observability` adds the metrics, logs and traces stack.\n- `--debug` turns on shell tracing, which **may print secrets**.\n\n**Idempotent:** each phase creates or upgrades in place, so running it again is safe. **Upgrading** means checking out the target release and re-running `setup.sh` with the new image tags. Vault state, PostgreSQL data, the MetalLB config and the site UUID are preserved. `./clean.sh` tears everything down.\n\nThe idempotent pattern in shell looks like this:\n```bash\nkubectl create namespace demo --dry-run=client -o yaml | kubectl apply -f -\nhelm upgrade --install web ./demo -n demo\n```\nBoth lines succeed whether or not the object already exists.",
+        "analogy": "setup.sh is like a pre-flight-to-landing checklist that a pilot can restart at the top at any time, because every item says \"ensure X\" instead of \"do X\". The analogy breaks down because some items aren't purely \"ensure\": some choices, such as skipping Vault, aren't remembered between runs, so you must give the same answers each time.",
+        "workedExample": {
+          "title": "Plan an install for a lab site with no DPUs, no Vault and no RMS",
+          "steps": [
+            {
+              "subgoal": "Decide components and matching flags",
+              "detail": "- No DPUs (or still on iPXE): `--skip-dpf`, so no DPF variables are needed.\n- Credentials in Postgres, no Vault: `--skip-vault`. This also requires the Core values contract from the helm-prereqs README.\n- No rack management: `--skip-rms`, so no `NICO_RMS_IMAGE_TAG` is needed.\n- Core and REST are wanted, so their image variables are required."
+            },
+            {
+              "subgoal": "Set the environment",
+              "detail": "```bash\nexport NICO_IMAGE_REGISTRY=my-registry.example.com/nico   # no https:// scheme\nexport NICO_CORE_IMAGE_TAG=v2.0.0\nexport NICO_REST_IMAGE_TAG=v2.0.0\n# export KUBECONFIG=~/.kube/lab   # only if the current context is wrong\n```"
+            },
+            {
+              "subgoal": "Validate before changing anything",
+              "detail": "```bash\ncd helm-prereqs/\nsource ./preflight.sh\n```\nFix every error before continuing (next lesson)."
+            },
+            {
+              "subgoal": "Run interactively the first time",
+              "detail": "```bash\n./setup.sh --skip-dpf --skip-vault --skip-rms\n```\nIt prompts before deploying NICo Core and NICo REST. Once you trust the config, add `-y` for unattended runs."
+            },
+            {
+              "subgoal": "Upgrade later by re-running",
+              "detail": "```bash\ngit checkout <new-release-tag>\nexport NICO_CORE_IMAGE_TAG=<new> NICO_REST_IMAGE_TAG=<new>\n./setup.sh --skip-dpf --skip-vault --skip-rms -y\n```\nUse the same skip flags. Check the Upgrading NICo guide for version-specific notes first."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "A site has DPUs (DPF on), uses the default Vault and RMS, and its cluster has no ingress controller. You want a fully unattended run. Fill in the blanks.",
+          "partialSolution": "export NICO_IMAGE_REGISTRY=my-registry.example.com/nico\nexport NICO_CORE_IMAGE_TAG=v2.0.0\nexport NICO_REST_IMAGE_TAG=v2.0.0\nexport NICO_RMS_IMAGE_TAG=YOUR_RMS_TAG\nexport NICO_DPF_DPU_INTERFACE=enp65s0f0np0\nexport ___=10.180.126.200\ncd helm-prereqs/\n./setup.sh ___ --install-contour",
+          "answer": "export NICO_IMAGE_REGISTRY=my-registry.example.com/nico\nexport NICO_CORE_IMAGE_TAG=v2.0.0\nexport NICO_REST_IMAGE_TAG=v2.0.0\nexport NICO_RMS_IMAGE_TAG=YOUR_RMS_TAG\nexport NICO_DPF_DPU_INTERFACE=enp65s0f0np0\nexport NICO_DPF_DPU_CLUSTER_VIP=10.180.126.200\ncd helm-prereqs/\n./setup.sh -y --install-contour"
+        },
+        "independentProblem": {
+          "prompt": "A site was installed last quarter with `./setup.sh --skip-vault -y`. Today a colleague upgrades it with a new shell, new tags and `./setup.sh -y`. What goes wrong, and what is the correct upgrade command? Also: they want `--debug` to diagnose a failure. What precaution applies?",
+          "hints": [
+            "Does setup.sh remember the Vault choice between runs?",
+            "What does setup.sh do about Vault by default?",
+            "Read what the docs say about `--debug` output."
+          ],
+          "answer": "The Vault choice is not stored, and Vault installs by default. Without `--skip-vault` (or `NICO_SKIP_VAULT=true` in the environment), the upgrade would install and configure Vault on a site designed to run without it, and deploy components with the Vault-based settings. The correct upgrade is: check out the release, export the new tags, then run `./setup.sh --skip-vault -y`. `--debug` enables shell tracing that may print secrets, so protect or securely delete those logs and don't paste them into tickets."
+        },
+        "selfExplanation": "Why does making every phase idempotent let NICo use one script for first install, recovery after a failure and upgrade?",
+        "checks": [
+          {
+            "question": "What is NICo's documented way to upgrade an existing installation?",
+            "options": [
+              "Check out the target release and re-run setup.sh with the new image tags",
+              "Run clean.sh, then setup.sh",
+              "helm upgrade each chart manually in reverse order",
+              "Edit image tags in running Deployments with kubectl"
+            ],
+            "answer": "Check out the target release and re-run setup.sh with the new image tags",
+            "explanation": "setup.sh is idempotent and upgrades each phase in place, preserving Postgres data, Vault state, MetalLB config and the site UUID. clean.sh deletes everything, including released PersistentVolumes."
+          },
+          {
+            "question": "You run `./setup.sh -y` and preflight reports an error. What happens?",
+            "options": [
+              "Setup stops; -y does not override preflight errors",
+              "Setup continues because -y accepts everything",
+              "Setup prompts you to continue",
+              "Setup skips the failing phase"
+            ],
+            "answer": "Setup stops; -y does not override preflight errors",
+            "explanation": "-y accepts routine prompts and preflight warnings only. Continuing past ordinary errors needs the explicit `--ignore-preflight-errors`, and database safety errors stay fatal even then."
+          },
+          {
+            "question": "In which phase is NICo Core deployed?",
+            "options": [
+              "Phase 6",
+              "Phase 1b",
+              "Phase 5c",
+              "Phase 7i"
+            ],
+            "answer": "Phase 6",
+            "explanation": "1b is the Zalando postgres-operator, 5c is RMS and 7i is the REST site-agent. Core comes after all its prerequisites, in Phase 6."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/reference-install.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "concept": "preflight-checks",
+        "prequestions": [
+          {
+            "question": "setup.sh fails in Phase 6 because a node can't resolve cluster DNS, after 20 minutes of installing other things. What would have been cheaper?",
+            "answer": "Checking DNS, along with every other precondition you can verify cheaply, before installing anything, and stopping with a clear message. That is what preflight.sh does."
+          }
+        ],
+        "explanation": "`preflight.sh` is the validation script that runs **automatically at the start of every `setup.sh` invocation**. You can also run it on its own from `helm-prereqs/`, with `source ./preflight.sh` or `bash ./preflight.sh`. It checks everything first and then reports all problems together, so you can fix them in one pass. What it checks:\n\n| Category | Examples |\n|---|---|\n| Environment variables | Image variables set where required; registry has no `https://` scheme; `NICO_SITE_UUID` valid if set; `KUBECONFIG` path exists |\n| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen`; Python 3 with PyYAML for the Core VIP check |\n| Vault-free values (`--skip-vault` only) | Core values contain nothing that still needs Vault |\n| `values/metallb-config.yaml` | Exists, valid YAML, at least one IPAddressPool, exactly one of BGP or L2 active, no leftover example hostnames |\n| Cluster | API server reachable; at least **three schedulable nodes** |\n| Per node | `net.bridge.bridge-nf-call-iptables=1`, `net.ipv4.ip_forward=1`, `kubernetes.default.svc.cluster.local` resolves |\n| Registry | Registry host answers an HTTPS probe |\n| Source tree | `rest-api/` is present |\n\nResults come in three severities:\n\n- **Errors** return exit code 1 and stop setup, even with `-y`. `--ignore-preflight-errors` continues past ordinary errors, but **database safety errors stay fatal**. The Vault-free values errors also stop setup even with `--ignore-preflight-errors`.\n- **Warnings alone** prompt for confirmation, unless `-y` is set.\n\nThe per-node checks run a `busybox:1.36` pod on each node. On air-gapped clusters, set `PREFLIGHT_CHECK_IMAGE` to a local mirror.\n\nThe same idea works for any installer: check cheaply and early, gather every problem, then fail loudly.",
+        "analogy": "Preflight is a pilot's walk-around before take-off: tyres, fuel, flaps, all checked on the ground where fixing things is cheap. The analogy breaks down because a pilot can't override a missing wing. NICo's `--ignore-preflight-errors` does let you skip ordinary errors, though not database safety errors.",
+        "workedExample": {
+          "title": "Reproduce three preflight checks by hand on a kind cluster",
+          "steps": [
+            {
+              "subgoal": "Create a cluster that resembles NICo's shape",
+              "detail": "```bash\ncat > kind3.yaml <<'EOF'\nkind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n  - role: control-plane\n  - role: worker\n  - role: worker\n  - role: worker\nEOF\nkind create cluster --name pf --config kind3.yaml\n```\nkind keeps the NoSchedule taint on the control-plane node in multi-node clusters, so you need three workers to get three *schedulable* nodes."
+            },
+            {
+              "subgoal": "Check required tools",
+              "detail": "```bash\nfor t in helm helmfile kubectl jq ssh-keygen; do\n  command -v \"$t\" >/dev/null && echo \"ok   $t\" || echo \"ERROR $t missing\"\ndone\n```"
+            },
+            {
+              "subgoal": "Count schedulable, Ready nodes",
+              "detail": "```bash\nkubectl get nodes -o json | jq '[.items[]\n  | select(((.spec.taints // []) | any(.effect == \"NoSchedule\" or .effect == \"NoExecute\")) | not)\n  | select(any(.status.conditions[]; .type == \"Ready\" and .status == \"True\"))\n] | length'\n```\nThis prints `3`. With a single-node kind cluster it prints `1`, which preflight would treat as an error."
+            },
+            {
+              "subgoal": "Check a kernel parameter on every node",
+              "detail": "```bash\nfor n in $(kind get nodes --name pf); do\n  echo \"$n ip_forward=$(docker exec \"$n\" cat /proc/sys/net/ipv4/ip_forward)\"\ndone\n```\nNICo's preflight checks this and `bridge-nf-call-iptables` with a busybox pod per node instead."
+            },
+            {
+              "subgoal": "Check cluster DNS from a pod",
+              "detail": "```bash\nkubectl run dnscheck --rm -i --restart=Never --image=busybox:1.36 -- \\\n  nslookup kubernetes.default.svc.cluster.local\n```\nThis is the same image NICo's per-node checks pull by default."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this mini check so it errors when there are fewer schedulable, Ready nodes than NICo requires.",
+          "partialSolution": "N=$(kubectl get nodes -o json | jq '[.items[]\n  | select(((.spec.taints // []) | any(.effect == \"NoSchedule\" or .effect == \"NoExecute\")) | not)\n  | select(any(.status.conditions[]; .type == \"___\" and .status == \"True\"))\n] | length')\nif [ \"$N\" -lt ___ ]; then echo \"ERROR: only $N schedulable nodes\"; exit 1; fi",
+          "answer": "N=$(kubectl get nodes -o json | jq '[.items[]\n  | select(((.spec.taints // []) | any(.effect == \"NoSchedule\" or .effect == \"NoExecute\")) | not)\n  | select(any(.status.conditions[]; .type == \"Ready\" and .status == \"True\"))\n] | length')\nif [ \"$N\" -lt 3 ]; then echo \"ERROR: only $N schedulable nodes\"; exit 1; fi"
+        },
+        "independentProblem": {
+          "prompt": "For each preflight result, say whether `./setup.sh -y` stops, prompts or continues, and what you'd do:\n(a) `values/metallb-config.yaml` has both the BGPAdvertisement and the L2Advertisement sections active.\n(b) Only warnings were reported.\n(c) `NICO_IMAGE_REGISTRY=https://my-registry.example.com/nico`.\n(d) The cluster is air-gapped and per-node checks fail to pull their image.",
+          "hints": [
+            "Errors vs warnings: which one does -y override?",
+            "Look at the metallb and environment-variable rows of the preflight table.",
+            "There's a variable for the per-node check image."
+          ],
+          "answer": "(a) Error: exactly one advertisement mode must be active. Setup stops even with -y. Comment out one mode (BGP or L2) and re-run.\n(b) With -y, warnings are accepted and setup continues. Without -y, it would prompt.\n(c) Error: the registry must have no URL scheme. Setup stops. Use `my-registry.example.com/nico`.\n(d) The per-node checks pull `busybox:1.36` by default and fail, which stops setup. Set `PREFLIGHT_CHECK_IMAGE` to a mirrored image and re-run."
+        },
+        "selfExplanation": "Why does preflight collect every problem and report them together, instead of exiting on the first failure? And why are some errors, such as database safety errors, not overridable at all?",
+        "checks": [
+          {
+            "question": "When does preflight.sh run?",
+            "options": [
+              "Automatically at the start of every setup.sh invocation, and on demand",
+              "Only when you pass --preflight",
+              "Only after Phase 6",
+              "Only on first install, not on upgrades"
+            ],
+            "answer": "Automatically at the start of every setup.sh invocation, and on demand",
+            "explanation": "The quick start says preflight runs automatically at the start of every setup.sh invocation. You can also run `source ./preflight.sh` yourself. Upgrades are setup.sh runs, so they include it."
+          },
+          {
+            "question": "Which of these is not something preflight checks, according to the docs?",
+            "options": [
+              "That each BMC on the OOB network answers Redfish",
+              "At least three schedulable nodes",
+              "net.ipv4.ip_forward=1 on every node",
+              "The registry host responds to an HTTPS probe"
+            ],
+            "answer": "That each BMC on the OOB network answers Redfish",
+            "explanation": "Preflight validates the deployment environment: variables, tools, MetalLB config, cluster, nodes, DNS, registry and source tree. BMC discovery happens much later, through Site Explorer after ingestion."
+          },
+          {
+            "question": "Which flag lets setup continue past ordinary preflight errors?",
+            "options": [
+              "--ignore-preflight-errors",
+              "-y",
+              "--debug",
+              "--skip-core"
+            ],
+            "answer": "--ignore-preflight-errors",
+            "explanation": "-y only accepts warnings and routine prompts. --ignore-preflight-errors continues past ordinary errors, but database safety errors stay fatal."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Build a mini setup.sh: preflight, helmfile, Kustomize overlay and Postgres with NICo's extensions",
+      "goal": "On a laptop kind cluster, write a small phased installer that mirrors NICo's setup.sh. It runs a preflight, installs a Helm release through helmfile, applies a Postgres database through a Kustomize site overlay and enables the btree_gin and pg_trgm extensions. A second run must succeed and change nothing.",
+      "whyItMatters": "NICo's setup.sh combines exactly these pieces: preflight, helmfile-managed Helm releases, Kustomize manifests, PostgreSQL with btree_gin and pg_trgm, and idempotent re-runs for upgrades. After building a small version yourself, you'll be able to read the real script's output, debug a failed phase and predict what a re-run will change.",
+      "setup": [
+        "Docker (or Podman with kind's Podman provider), with about 4 GB of RAM free",
+        "kind (`brew install kind`, or the binary from kind.sigs.k8s.io)",
+        "kubectl 1.26+ (Kustomize is built in via `kubectl apply -k`)",
+        "helm 3.12+ (or v4) and helmfile 0.162+",
+        "helm-diff plugin: `helm plugin install https://github.com/databus23/helm-diff` (add `--verify=false` on Helm v4)",
+        "jq, curl and openssl"
+      ],
+      "steps": [
+        {
+          "subgoal": "Create a 3-schedulable-node cluster",
+          "detail": "```bash\nmkdir mini-site && cd mini-site\ncat > kind.yaml <<'EOF'\nkind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n  - role: control-plane\n  - role: worker\n  - role: worker\n  - role: worker\nEOF\nkind create cluster --name mini --config kind.yaml\nkubectl get nodes\n```"
+        },
+        {
+          "subgoal": "Create the chart and helmfile",
+          "detail": "```bash\nhelm create charts/hello\nmkdir -p values\ncat > values/hello.yaml <<'EOF'\nreplicaCount: 2\nservice:\n  type: ClusterIP\n  port: 80\nEOF\ncat > helmfile.yaml <<'EOF'\nreleases:\n  - name: hello\n    namespace: mini-site\n    createNamespace: true\n    chart: ./charts/hello\n    values:\n      - values/hello.yaml\nEOF\nhelmfile diff   # should show a new release\n```"
+        },
+        {
+          "subgoal": "Write the Postgres Kustomize base",
+          "detail": "```bash\nmkdir -p db/base db/overlays/site\ncat > db/base/deployment.yaml <<'EOF'\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: postgres\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: postgres\n  template:\n    metadata:\n      labels:\n        app: postgres\n    spec:\n      containers:\n        - name: postgres\n          image: postgres:15\n          env:\n            - name: POSTGRES_PASSWORD\n              valueFrom:\n                secretKeyRef:\n                  name: postgres-admin\n                  key: password\n            - name: POSTGRES_DB\n              value: appdb\n          ports:\n            - containerPort: 5432\n          readinessProbe:\n            exec:\n              command: [\"pg_isready\", \"-h\", \"127.0.0.1\", \"-U\", \"postgres\"]\n            initialDelaySeconds: 5\n            periodSeconds: 5\nEOF\ncat > db/base/service.yaml <<'EOF'\napiVersion: v1\nkind: Service\nmetadata:\n  name: postgres\nspec:\n  type: ClusterIP\n  selector:\n    app: postgres\n  ports:\n    - port: 5432\n      targetPort: 5432\nEOF\ncat > db/base/kustomization.yaml <<'EOF'\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - deployment.yaml\n  - service.yaml\nEOF\n```\nThe readiness probe uses TCP (`-h 127.0.0.1`) because the image's temporary init server listens only on a Unix socket. The pod is reported Ready only once the real server is up."
+        },
+        {
+          "subgoal": "Write the site overlay",
+          "detail": "```bash\ncat > db/overlays/site/patch-db.yaml <<'EOF'\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: postgres\nspec:\n  template:\n    spec:\n      containers:\n        - name: postgres\n          env:\n            - name: POSTGRES_DB\n              value: nico_system_nico\n          resources:\n            requests:\n              cpu: 100m\n              memory: 256Mi\n            limits:\n              memory: 512Mi\nEOF\ncat > db/overlays/site/kustomization.yaml <<'EOF'\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: mini-site\nresources:\n  - ../../base\nlabels:\n  - pairs:\n      site: laptop\n    includeSelectors: false\npatches:\n  - path: patch-db.yaml\nEOF\nkubectl kustomize db/overlays/site | grep -nE 'namespace|nico_system_nico|site: laptop|memory'\n```\nThe `env` entry is merged by `name`, so `POSTGRES_PASSWORD` from the base survives."
+        },
+        {
+          "subgoal": "Write preflight.sh",
+          "detail": "```bash\ncat > preflight.sh <<'EOF'\n#!/usr/bin/env bash\n# Exit 0 = clean, 1 = errors, 3 = warnings only. Run with bash, not source.\nset -u\nERRORS=0; WARNINGS=0\nerr()  { echo \"ERROR: $*\"; ERRORS=$((ERRORS+1)); }\nwarn() { echo \"WARN:  $*\"; WARNINGS=$((WARNINGS+1)); }\nok()   { echo \"ok:    $*\"; }\nCLUSTER=\"${KIND_CLUSTER:-mini}\"\n\n# Environment variables\nif [ -z \"${SITE_NAME:-}\" ]; then err \"SITE_NAME is not set\"; else ok \"SITE_NAME=$SITE_NAME\"; fi\n\n# Required tools\nfor t in kubectl helm helmfile jq kind docker curl openssl; do\n  if command -v \"$t\" >/dev/null 2>&1; then ok \"$t found\"; else err \"$t not in PATH\"; fi\ndone\nif helm plugin list 2>/dev/null | grep -q '^diff'; then ok \"helm-diff plugin\"; else err \"helm-diff plugin missing\"; fi\n\n# Cluster reachability and node count\nif kubectl get --raw /readyz --request-timeout=5s >/dev/null 2>&1; then\n  ok \"API server reachable\"\n  N=$(kubectl get nodes -o json | jq '[.items[]\n    | select(((.spec.taints // []) | any(.effect == \"NoSchedule\" or .effect == \"NoExecute\")) | not)\n    | select(any(.status.conditions[]; .type == \"Ready\" and .status == \"True\"))\n  ] | length')\n  if [ \"$N\" -ge \"${MIN_NODES:-3}\" ]; then ok \"$N schedulable nodes\"; else err \"only $N schedulable nodes (need ${MIN_NODES:-3})\"; fi\nelse\n  err \"cannot reach the Kubernetes API server\"\nfi\n\n# Per-node kernel parameters (kind nodes are Docker containers)\nfor n in $(kind get nodes --name \"$CLUSTER\" 2>/dev/null); do\n  v=$(docker exec \"$n\" cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)\n  [ \"$v\" = 1 ] && ok \"$n ip_forward=1\" || err \"$n ip_forward=$v\"\n  b=$(docker exec \"$n\" cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null)\n  [ \"$b\" = 1 ] && ok \"$n bridge-nf-call-iptables=1\" || warn \"$n bridge-nf-call-iptables=${b:-missing}\"\ndone\n\n# Cluster DNS\nif kubectl run \"dnscheck-$$\" --rm -i --quiet --restart=Never --image=busybox:1.36 \\\n     -- nslookup kubernetes.default.svc.cluster.local >/dev/null 2>&1; then\n  ok \"cluster DNS resolves\"\nelse\n  err \"kubernetes.default.svc.cluster.local does not resolve from a pod\"\nfi\n\n# Registry connectivity (any HTTP answer counts)\nif curl -sS -o /dev/null --max-time 5 https://registry-1.docker.io/v2/; then ok \"registry answers HTTPS\"; else err \"registry unreachable\"; fi\n\necho \"preflight: $ERRORS error(s), $WARNINGS warning(s)\"\n[ \"$ERRORS\" -gt 0 ] && exit 1\n[ \"$WARNINGS\" -gt 0 ] && exit 3\nexit 0\nEOF\nSITE_NAME=laptop bash preflight.sh; echo \"exit=$?\"\nbash preflight.sh; echo \"exit=$?\"   # without SITE_NAME: an ERROR line and exit=1\n```"
+        },
+        {
+          "subgoal": "Write the phased, idempotent setup.sh",
+          "detail": "```bash\ncat > setup.sh <<'EOF'\n#!/usr/bin/env bash\nset -euo pipefail\ncd \"$(dirname \"$0\")\"\nASSUME_YES=false; SKIP_DB=false\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    -y) ASSUME_YES=true ;;\n    --skip-db) SKIP_DB=true ;;\n    *) echo \"unknown option: $arg\"; exit 2 ;;\n  esac\ndone\nNS=mini-site\nconfirm() {\n  if $ASSUME_YES; then return 0; fi\n  read -r -p \"$1 [y/N] \" a\n  [ \"$a\" = y ] || [ \"$a\" = Y ]\n}\n\necho \"== Phase 0: preflight\"\nset +e; bash ./preflight.sh; rc=$?; set -e\nif [ \"$rc\" -eq 1 ]; then echo \"preflight errors: stopping\"; exit 1; fi\nif [ \"$rc\" -eq 3 ] && ! confirm \"Preflight warnings. Continue?\"; then exit 1; fi\n\necho \"== Phase 1: namespace\"\nkubectl create namespace \"$NS\" --dry-run=client -o yaml | kubectl apply -f -\n\necho \"== Phase 2: helm releases\"\nhelmfile apply\n\nif ! $SKIP_DB; then\n  echo \"== Phase 3: database (kustomize overlay)\"\n  kubectl -n \"$NS\" get secret postgres-admin >/dev/null 2>&1 || \\\n    kubectl -n \"$NS\" create secret generic postgres-admin \\\n      --from-literal=password=\"$(openssl rand -hex 16)\"\n  if confirm \"Apply database overlay?\"; then\n    kubectl apply -k db/overlays/site\n    kubectl -n \"$NS\" rollout status deploy/postgres --timeout=180s\n    echo \"== Phase 3b: extensions\"\n    kubectl -n \"$NS\" exec deploy/postgres -- psql -U postgres -d nico_system_nico \\\n      -v ON_ERROR_STOP=1 \\\n      -c 'CREATE EXTENSION IF NOT EXISTS btree_gin;' \\\n      -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm;'\n  fi\nfi\necho \"== Done\"\nEOF\nexport SITE_NAME=laptop\nbash setup.sh -y\n```"
+        },
+        {
+          "subgoal": "Re-run and prove idempotency",
+          "detail": "```bash\nhelm history hello -n mini-site     # note the latest REVISION\nbash setup.sh -y                    # second run\nhelm history hello -n mini-site     # same REVISION: helmfile apply found no diff\nhelmfile diff                       # no changes reported\n```\nAlso try `bash setup.sh` without `-y` to see the prompt, and `unset SITE_NAME; bash setup.sh -y` to see preflight stop the run even with `-y`."
+        }
+      ],
+      "verify": "Run `kubectl -n mini-site exec deploy/postgres -- psql -U postgres -d nico_system_nico -tAc \"SELECT extname FROM pg_extension ORDER BY 1\"`. It must print `btree_gin`, `pg_trgm` and `plpgsql`. In addition: `helm list -n mini-site` shows `hello` as deployed; `kubectl -n mini-site get deploy postgres --show-labels` includes `site=laptop`; a second `bash setup.sh -y` exits 0 and leaves the `hello` revision in `helm history` unchanged; and `unset SITE_NAME; bash setup.sh -y` exits non-zero at Phase 0.",
+      "hints": [
+        "`Error: unknown command \"diff\" for \"helm\"` means the helm-diff plugin is missing. On Helm v4 install it with `--verify=false`.",
+        "If preflight counts only 0 or 1 schedulable nodes, you probably made a single-node cluster, or the workers are still NotReady. Wait for `kubectl get nodes` to show Ready. kind keeps the NoSchedule taint on the control-plane in multi-node clusters.",
+        "On macOS or some Linux hosts, `bridge-nf-call-iptables` may be missing inside kind nodes. The script treats that as a warning, so `-y` continues and an interactive run prompts.",
+        "The first run pulls busybox:1.36 and postgres:15. If `rollout status` times out, check `kubectl -n mini-site describe pod -l app=postgres` for image pull or memory problems, then re-run setup.sh. It's safe to repeat.",
+        "If psql reports `database \"nico_system_nico\" does not exist`, the pod first initialised with the base value `appdb`, because the base was applied without the overlay. Delete the pod (`kubectl -n mini-site delete pod -l app=postgres`). It has no persistent volume, so it reinitialises with the overlay's database name.",
+        "`kubectl run ... --rm -i` can fail if an earlier dnscheck pod got stuck. Remove it with `kubectl delete pod -l run --field-selector=status.phase!=Running` or by name."
+      ],
+      "stretch": "Replace the plain Postgres Deployment with the Zalando operator, as NICo does. Add a helmfile release for chart `postgres-operator` from repo `https://opensource.zalando.com/postgres-operator/charts/postgres-operator` (add a `repositories:` entry), then a Phase 3 that applies a `kind: postgresql` resource (`teamId: nico`, name `nico-pg-cluster`, `numberOfInstances: 3`, `postgresql.version: \"15\"`) in a `postgres` namespace, and create the two extensions on its primary. Then add a `values/hello-large.yaml` sizing file layered after `values/hello.yaml` and use `helmfile diff` to predict its effect before applying."
+    }
+  }
+}

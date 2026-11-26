@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "helm-and-helmfile",
+        "severity": "minor",
+        "problem": "The second prequestion's answer says Helm's `upgrade --install` and helmfile's `apply` are built so that a repeat run 'either does nothing or changes only what differs'. The worked example then correctly shows that plain `helm upgrade --install` records a new revision (revision 2) even when nothing changed. The two statements contradict each other and can confuse learners.",
+        "fix": "Reword the answer: repeating `helm upgrade --install` leaves the Kubernetes objects unchanged but still records a new revision. Only `helmfile apply`, which diffs first, skips releases that haven't changed."
+      },
+      {
+        "where": "postgresql",
+        "severity": "minor",
+        "problem": "The lesson and its prequestion answer say that only nico-api reads and writes PostgreSQL and that every other component asks nico-api. That's true of the `nico_system_nico` database, but the docs also show the site-agent connecting directly to `nico-pg-cluster` (DB_DATABASE nico_rest) and Flow persisting its tasks in PostgreSQL. Learners may conclude that no other component touches Postgres at all.",
+        "fix": "Limit the statement to the `nico_system_nico` database (NICo Core state). Add that NICo REST, the site-agent and Flow use their own databases on the same nico-pg-cluster."
+      }
+    ]
+  }
+}

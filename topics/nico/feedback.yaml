@@ -159,3 +159,23 @@ chapters:
       schemas), the Calico v3.28.1 and MetalLB v0.14.5 manifest URLs and all
       their images exist, and the app=metallb label and bird.ctl path the
       steps rely on are present. Needs a real run on a laptop.
+  16:
+    - >-
+      Not yet run end to end (2026-11-26): kind can't run on the test machine.
+      Statically checked: the 5 inline manifests are valid against Kubernetes
+      1.31, verify.sh passes bash -n and shellcheck, and all images exist.
+      Needs a real run on a laptop (it relies on IPVS kernel modules and
+      cgroup v2).
+  17:
+    - >-
+      Partly tested 2026-11-26: the Kustomize overlay builds offline and is
+      schema-valid (adds site=laptop); preflight.sh and setup.sh pass bash -n
+      and shellcheck; setup.sh's Postgres phase, run against postgres:15 with
+      the overlay's env, creates btree_gin and pg_trgm, is idempotent on a
+      second run, and the verify query prints btree_gin, pg_trgm, plpgsql.
+      The kind/helmfile parts need a real run on a laptop.
+  18:
+    - >-
+      Tested 2026-11-26: minivault works as written; verify.sh prints all five
+      expected results, and the side experiment (removing kek-1 before
+      re-wrapping) fails with the predicted message. Keep it.

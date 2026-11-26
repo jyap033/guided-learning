@@ -25,11 +25,12 @@ answers hidden until clicked. It ends with a build task you can do on a laptop.
 An AI review pass checks each chapter against the docs; major problems trigger
 one rewrite, and remaining notes are listed at the end of the chapter.
 
-NICo chapters written so far: [1–15](curricula/nico/chapters/README.md). The
-build tasks of chapters 1–13 were worked through by hand (Docker 29, plain
-Python, a standard Debian kernel for the VLAN/VRF labs, QEMU for network boot)
-and pass as written. Chapters 14–15 (kind clusters) are statically checked only:
-the test machine can't run nested containers.
+NICo chapters written so far: [1–18](curricula/nico/chapters/README.md). The
+build tasks of chapters 1–13 and 18 were worked through by hand (Docker 29,
+plain Python, a standard Debian kernel for the VLAN/VRF labs, QEMU for network
+boot) and pass as written. Chapters 14–17 need kind clusters, which the test
+machine can't run; they are statically checked (and 17's database phase run),
+but not tested end to end. See `topics/nico/feedback.yaml`.
 Findings from that testing live in `topics/nico/feedback.yaml` and are fed into
 writing and review. Existing chapters are skipped unless you pass `--force`.
 

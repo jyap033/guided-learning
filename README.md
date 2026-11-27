@@ -25,8 +25,8 @@ answers hidden until clicked. It ends with a build task you can do on a laptop.
 An AI review pass checks each chapter against the docs; major problems trigger
 one rewrite, and remaining notes are listed at the end of the chapter.
 
-NICo chapters written so far: [1–21](curricula/nico/chapters/README.md). The
-build tasks of chapters 1–13 and 18–21 were worked through by hand (Docker 29,
+NICo chapters written so far: [1–24](curricula/nico/chapters/README.md). The
+build tasks of chapters 1–13 and 18–24 were worked through by hand (Docker 29,
 plain Python, a standard Debian kernel for the VLAN/VRF labs, QEMU for network
 boot) and pass as written. Chapters 14–17 need kind clusters, which the test
 machine can't run; they are statically checked (and 17's database phase run),

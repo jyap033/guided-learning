@@ -206,3 +206,22 @@ chapters:
       Tested 2026-11-27: SPIFFE/mTLS identity lab works as written; verify.sh
       prints exactly "200 403 200 000 200 200 200 429 429 200" and the KMIP
       directory OK line; the swapped-key check reports the mismatch. Keep it.
+  22:
+    - >-
+      Tested 2026-11-27: mini Site Explorer works as written; step 6 output
+      matches line for line (SERIAL-2 DEFERRED with MT2333X00003 missing),
+      step 7 makes it INGESTABLE, and the SERIAL-X negative test prints
+      MISMATCH. Keep it.
+  23:
+    - >-
+      Tested 2026-11-27: the DPU-enforced isolation lab works as written in a
+      privileged debian:stable-slim container (red-red reachable, red-blue
+      100% loss even after the host flushes nftables, anti-spoof and final
+      drop counters both 2 packets, monitor output matches step 5 exactly,
+      fix/break/flip and the reset-and-verify sequence all behave as
+      described). Keep it.
+  24:
+    - >-
+      Tested 2026-11-27: multi-plane planner works as written (acme gets
+      ...00f1 and ...00b2, globex ...0031 and ...0042 with the DOWN-port
+      WARNING, all three plane files differ, leaf01.yaml: OK). Keep it.

@@ -1,0 +1,817 @@
+{
+  "intro": "Chapter 18 gave you the primitives: hashes, KDFs, symmetric encryption, envelope encryption and public-key signatures. This chapter builds the two trust systems NICo puts on top of them. One is **identity for callers**: who is calling the REST API, and how do they prove it? The other is **identity for services**: how does `nico-api` know the process connecting to it really is the site agent or RMS, and not something else on the network?\n\nThe first half covers tokens. You'll see why a key is only as strong as the randomness it came from, how an OIDC identity provider such as Keycloak issues signed JWTs, how a machine gets a token through the OAuth2 client credentials flow (the way you'll authenticate to NICo REST in later chapters), and how token exchange lets one token be swapped for another at an external STS.\n\nThe second half covers certificates. You'll build a small PKI with `openssl`, learn exactly which hostnames a certificate covers (wildcards included), run mutual TLS, and see how cert-manager automates all of it inside Kubernetes. NICo says plainly that *all control-plane services communicate over mTLS/gRPC*, so when a NICo pod can't reach another pod, the cause is often a certificate problem rather than a network one.\n\nEverything here runs on a laptop with `openssl`, Python, Docker or Podman, and optionally `kind`. The build task wires the pieces into a tiny zero-trust API: it accepts a request only when the caller presents both a client certificate signed by your CA and a valid Keycloak-issued JWT.",
+  "objectives": [
+    "Estimate the entropy of a secret and explain why HKDF cannot rescue weak input key material from offline guessing",
+    "Obtain a JWT with the OAuth2 client credentials flow, decode its claims, and diagnose an `iss` mismatch that makes an API reject it",
+    "Describe what an RFC 8693 token exchange request contains and which NICo site settings constrain token delegation",
+    "Build a root CA, an intermediate and leaf certificates with openssl, and predict which hostnames a SAN list (including wildcards) covers",
+    "Run and troubleshoot a mutual-TLS connection, and explain how NICo services such as nico-api and RMS trust each other",
+    "Use cert-manager Issuers and Certificates to issue and rotate certificates in a Kubernetes cluster"
+  ],
+  "lessons": [
+    {
+      "concept": "entropy-and-offline-guessing",
+      "prequestions": [
+        {
+          "question": "You feed a 4-digit PIN into HKDF-SHA256 and get a 256-bit key. How many guesses does an attacker need, at most, to find that key?",
+          "answer": "10,000. The output looks like 256 bits, but HKDF is deterministic. The attacker just runs HKDF on each of the 10,000 possible PINs and checks each result."
+        },
+        {
+          "question": "What is the difference between an attacker guessing your password at a login page and guessing it 'offline'?",
+          "answer": "At a login page every guess goes through your server, which can slow it down, lock the account or raise an alert. Offline, the attacker already holds something to test guesses against (a hash, a ciphertext, a derived key), so they can try billions of guesses on their own hardware and you never see it."
+        }
+      ],
+      "explanation": "**Entropy** measures how unpredictable a secret is, in bits. A secret picked uniformly at random from *N* possibilities has log2(N) bits. A 4-digit PIN has log2(10,000) ≈ 13.3 bits. Six random lowercase letters have 6 × log2(26) ≈ 28 bits. Thirty-two bytes from a cryptographically secure random generator have 256 bits. Each extra bit doubles the attacker's work.\n\n**Offline guessing** is the attack that makes entropy matter. If an attacker gets anything that lets them check a guess without talking to you, such as a stolen key, a ciphertext with a known structure, a hash, or a signed token, they can try guesses as fast as their GPUs allow. Nothing rate-limits them, nothing locks them out, and nothing logs the attempts. At a billion guesses per second, 13 bits falls in microseconds, about 40 bits in minutes, and 256 bits never.\n\nIn chapter 18 you met KDFs. **HKDF** takes *input key material* (IKM) and produces well-formed keys of any length, with different keys for different purposes via the `info` string. It is deterministic: the same IKM always gives the same output. So HKDF **adds no entropy**. If the IKM has 13 bits, the 256-bit output still has 13 bits, because the attacker simply runs HKDF on every candidate IKM. Password-hashing KDFs (Argon2, scrypt, PBKDF2) make each guess slower by a constant factor. They still don't add entropy, and HKDF isn't even slow.\n\nThe practical rule: **any IKM you derive keys from must already be full-entropy random**. Later (chapter 35) you'll derive per-device keys from an IKM. If one derived key, say a card key, ever leaks, an attacker can test IKM guesses against it offline. A weak IKM then exposes every key derived from it.\n\nNICo's Day 0 guides generate key material this way: `openssl rand -base64 32` gives 256 random bits. The Integrated KEK provider checks that the key *decodes to 32 bytes*. Note what that check can't do: 32 bytes of the letter `a` pass the length check and have essentially zero entropy. Length is not unpredictability, so always generate keys and never type them.",
+      "analogy": "A combination lock with a very long dial readout but only one working digit wheel. The readout looks like it has millions of combinations, but a thief only has to spin the single real wheel. HKDF is the long readout: it makes the key look big without adding real wheels. Where it breaks down: a physical lock is guessed one try at a time by hand, while an offline attacker tries billions of combinations per second in parallel, so even 'pretty good' locks of 40 bits fall.",
+      "workedExample": {
+        "title": "Brute-forcing an HKDF key derived from a PIN",
+        "steps": [
+          {
+            "subgoal": "Measure the entropy of each candidate secret",
+            "detail": "```bash\npython3 -c 'import math; print(\"PIN:\", math.log2(10**4)); print(\"6 lowercase:\", 6*math.log2(26)); print(\"32 random bytes:\", 32*8)'\n```\nYou get about 13.3, 28.2 and 256 bits."
+          },
+          {
+            "subgoal": "Derive a key from a weak IKM",
+            "detail": "Save as `hkdf_pin.py` (standard library only; this is RFC 5869 HKDF-SHA256):\n```python\nimport hmac, hashlib, time\n\ndef hkdf_sha256(ikm, salt=b\"\", info=b\"\", length=32):\n    prk = hmac.new(salt or b\"\\x00\" * 32, ikm, hashlib.sha256).digest()\n    okm, block, counter = b\"\", b\"\", 1\n    while len(okm) < length:\n        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()\n        okm += block\n        counter += 1\n    return okm[:length]\n\nsecret_pin = b\"4831\"\nleaked = hkdf_sha256(secret_pin, info=b\"card-key\")\nprint(\"derived key:\", leaked.hex())\n\nstart = time.time()\nfor n in range(10000):\n    guess = f\"{n:04d}\".encode()\n    if hkdf_sha256(guess, info=b\"card-key\") == leaked:\n        print(f\"recovered PIN {guess.decode()} in {time.time() - start:.3f}s\")\n        break\n```"
+          },
+          {
+            "subgoal": "Play the attacker",
+            "detail": "Run `python3 hkdf_pin.py`. The derived key prints as 64 random-looking hex characters, and the loop still recovers `4831` in a fraction of a second. The attacker only needed the leaked key and the public algorithm (HKDF-SHA256 with `info=card-key`)."
+          },
+          {
+            "subgoal": "Generate a full-entropy key the way NICo's Day 0 guides do",
+            "detail": "```bash\nopenssl rand -base64 32          # 32 bytes = 256 bits from the OS CSPRNG\nopenssl rand -base64 32 | base64 -d | wc -c   # prints 32\n```\nA 256-bit search space can't be enumerated, so offline guessing is no longer a realistic threat. The `wc -c` check confirms the length, which is also what the Integrated KEK provider checks. It tells you nothing about randomness."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete the script so it prints the entropy of a 4-digit PIN and of a key from `openssl rand -base64 32`.",
+        "partialSolution": "import math\nprint(\"4-digit PIN:\", math.log2(___), \"bits\")\nprint(\"openssl rand -base64 32:\", ___ * 8, \"bits\")",
+        "answer": "import math\nprint(\"4-digit PIN:\", math.log2(10000), \"bits\")\nprint(\"openssl rand -base64 32:\", 32 * 8, \"bits\")\n\nThe PIN has 10,000 equally likely values (about 13.3 bits). The `32` in the openssl command is a byte count, before base64 encoding, so the key has 256 bits. The 44-character base64 string carries the same 256 bits."
+      },
+      "independentProblem": {
+        "prompt": "A teammate proposes deriving a site KEK with HKDF from a passphrase of 4 words chosen at random from the 7,776-word Diceware list, so that operators can remember it. Estimate the entropy, estimate how long an offline attacker doing 10^9 HKDF guesses per second needs to search the whole space, and recommend what to do instead.",
+        "hints": [
+          "Entropy is log2 of the number of equally likely passphrases. How many 4-word combinations are there?",
+          "7776^4 ≈ 3.66 × 10^15, so log2 is about 51.7 bits. Divide the number of combinations by 10^9 to get seconds.",
+          "About 3.66 × 10^6 seconds is roughly 42 days for the full space, and about 21 days on average. Compare that with `openssl rand -base64 32`."
+        ],
+        "answer": "Entropy is 4 × log2(7776) ≈ 51.7 bits, about 3.66 × 10^15 combinations. At 10^9 guesses per second the whole space takes about 3.66 × 10^6 s ≈ 42 days, and on average half that. A determined attacker with several GPUs can do it, and HKDF adds no cost per guess. Recommendation: don't derive the KEK from anything memorable. Generate 32 random bytes (`openssl rand -base64 32`, or straight into a Kubernetes Secret as the Day 0 credential-store guide shows) and protect that key with backups and access control rather than human memory."
+      },
+      "selfExplanation": "In your own words, explain why running a weak secret through HKDF produces a key that looks 256 bits strong but isn't. What exactly does the attacker do to get around it?",
+      "checks": [
+        {
+          "question": "You run HKDF-SHA256 on a password made of 6 random lowercase letters and get a 256-bit key. Roughly how much entropy does the key have?",
+          "options": [
+            "256 bits",
+            "About 28 bits",
+            "512 bits, because HKDF uses HMAC twice",
+            "It depends on the length of the `info` string"
+          ],
+          "answer": "About 28 bits",
+          "explanation": "Entropy can't grow through a deterministic function: 6 × log2(26) ≈ 28 bits. The 256-bit output length is just the size of the key. HMAC's internal structure and the public `info` string add no unpredictability, because the attacker knows both."
+        },
+        {
+          "question": "Which of these is offline guessing?",
+          "options": [
+            "An attacker tries 5 passwords per minute against the NICo REST login and gets locked out",
+            "An attacker who copied a database dump tests candidate passwords against stored hashes on their own GPUs",
+            "An attacker floods the Keycloak token endpoint until it is rate-limited",
+            "An attacker phishes an operator for their password"
+          ],
+          "answer": "An attacker who copied a database dump tests candidate passwords against stored hashes on their own GPUs",
+          "explanation": "Offline means guesses are checked against material the attacker already holds, with no server in the loop to rate-limit or log them. The login and token-endpoint attacks are online guessing, which the server can throttle. Phishing doesn't guess at all."
+        },
+        {
+          "question": "NICo's Integrated KEK provider refuses to start unless the key decodes to 32 bytes. What does that check guarantee?",
+          "options": [
+            "The key has 256 bits of entropy",
+            "The key has the right length, but nothing about how random it is",
+            "The key was produced by `openssl rand`",
+            "The key has never been used before"
+          ],
+          "answer": "The key has the right length, but nothing about how random it is",
+          "explanation": "A length check can't measure randomness. 32 bytes of `a` pass it. You get the entropy only by generating the key with a CSPRNG, which is why the docs pipe `openssl rand -base64 32` straight into the Secret."
+        }
+      ],
+      "sources": [
+        "getting-started/installation-options/day0-credential-store.md",
+        "getting-started/installation-options/day0-machine-identity.md"
+      ]
+    },
+    {
+      "concept": "oidc-jwt-authentication",
+      "prequestions": [
+        {
+          "question": "A JWT is three base64url strings joined by dots. If someone intercepts one, can they read what's inside?",
+          "answer": "Yes. Base64url is an encoding, not encryption. Anyone can decode the header and payload. The signature stops people from *changing* the token, not from reading it."
+        },
+        {
+          "question": "To check a token signed by Keycloak, does the API server need to call Keycloak on every request?",
+          "answer": "No. The server fetches Keycloak's public signing keys once and caches them, then checks each token's signature locally. That's public-key cryptography doing its job."
+        }
+      ],
+      "explanation": "**Authentication** answers 'who are you?'. Instead of every service storing passwords, an **identity provider (IdP)** does the login once and hands out proof. **OAuth 2.0** is the standard framework for issuing access tokens. **OpenID Connect (OIDC)** is a layer on top of OAuth 2.0 that standardises identity: login flows, ID tokens, and a discovery document at `<issuer>/.well-known/openid-configuration` that lists the IdP's `token_endpoint` and `jwks_uri` (where its public keys live).\n\n**Keycloak** is an open-source IdP. A Keycloak **realm** is an isolated space of users and clients, and its issuer URL has the form `<base-url>/realms/<realm>`.\n\nThe tokens are **JWTs (JSON Web Tokens)**: `header.payload.signature`, each part base64url-encoded.\n- The header names the algorithm (`RS256`, `ES256`) and a `kid` (key id).\n- The payload holds **claims**: `iss` (issuer, meaning who signed it), `sub` (subject, meaning who it's about), `aud` (audience, meaning who it's for), `exp` (expiry), `iat` (issued at), and often `azp` (the client it was issued to).\n- The signature is the IdP's private-key signature over the first two parts.\n\nA service that accepts JWTs (a *resource server*) verifies four things:\n1. The signature checks out with the IdP public key matching `kid`, fetched from the JWKS.\n2. `iss` equals the issuer it's configured to trust.\n3. `aud` contains its own audience.\n4. `exp` hasn't passed.\n\nIf any check fails, it rejects the token. Because verification only needs the public key, no per-request call to the IdP is needed. JWTs are signed, not encrypted, so never put secrets in claims, and treat the token itself as a secret: whoever holds it can use it.\n\n**In NICo:** orchestrators and admins reach NICo REST (the JSON API) over HTTP with JWTs. The API Service's debug web UI at `/admin` uses OIDC login. Keycloak is an optional prerequisite, and `setup.sh` deploys a dev instance with a `nico` realm. In `helm-prereqs/values/nico-rest.yaml` you can point `nico-rest-api` at your own Keycloak (`baseURL`, `realm`, `clientID`) or disable Keycloak and list generic OIDC `issuers`, each with an `issuer` and `audience`. Those two values are exactly checks 2 and 3 above.",
+      "analogy": "A festival wristband with a hologram. Security at each stage doesn't phone the ticket office; they check the hologram (signature), the festival name (issuer), the stage it's valid for (audience) and the date (expiry). Where it breaks down: anyone can photocopy and read a JWT perfectly, and a stolen one works for whoever holds it until it expires. A wristband is at least attached to one wrist.",
+      "workedExample": {
+        "title": "Sign, decode, verify and tamper with a JWT",
+        "steps": [
+          {
+            "subgoal": "Install the libraries",
+            "detail": "```bash\npython3 -m venv jwtlab && . jwtlab/bin/activate\npip install \"pyjwt[crypto]\"\n```"
+          },
+          {
+            "subgoal": "Act as the IdP: sign a token",
+            "detail": "Save as `jwt_demo.py`:\n```python\nimport base64, json, time, jwt\nfrom cryptography.hazmat.primitives.asymmetric import ec\n\nidp_key = ec.generate_private_key(ec.SECP256R1())\nISSUER = \"https://idp.example.com/realms/ops\"\nnow = int(time.time())\nclaims = {\"iss\": ISSUER, \"sub\": \"svc-123\", \"aud\": \"nico-api\", \"iat\": now, \"exp\": now + 300}\ntoken = jwt.encode(claims, idp_key, algorithm=\"ES256\", headers={\"kid\": \"key-1\"})\nprint(token, \"\\n\")\n\ndef b64d(s):\n    return base64.urlsafe_b64decode(s + \"=\" * (-len(s) % 4))\n\nheader_b64, payload_b64, sig_b64 = token.split(\".\")\nprint(\"header :\", json.loads(b64d(header_b64)))\nprint(\"payload:\", json.loads(b64d(payload_b64)))\n\npub = idp_key.public_key()\nprint(\"verified:\", jwt.decode(token, pub, algorithms=[\"ES256\"], issuer=ISSUER, audience=\"nico-api\"))\n\nforged_claims = dict(claims, sub=\"admin\")\nforged_payload = base64.urlsafe_b64encode(json.dumps(forged_claims).encode()).rstrip(b\"=\").decode()\nforged = \".\".join([header_b64, forged_payload, sig_b64])\ntry:\n    jwt.decode(forged, pub, algorithms=[\"ES256\"], issuer=ISSUER, audience=\"nico-api\")\nexcept jwt.InvalidSignatureError as e:\n    print(\"forged token rejected:\", e)\n\ntry:\n    jwt.decode(token, pub, algorithms=[\"ES256\"], issuer=\"https://other.example.com/realms/ops\", audience=\"nico-api\")\nexcept jwt.InvalidIssuerError as e:\n    print(\"wrong issuer rejected:\", e)\n```"
+          },
+          {
+            "subgoal": "Read the token without any key",
+            "detail": "Run `python3 jwt_demo.py`. The header and payload print in plain JSON, and decoding them needed no key. That's why claims must never carry secrets."
+          },
+          {
+            "subgoal": "Verify like a resource server",
+            "detail": "The `verified:` line shows that `jwt.decode` checked the signature with the **public** key, then `iss`, `aud` and `exp`. This is the job `nico-rest-api` does with the `issuer` and `audience` values in its config."
+          },
+          {
+            "subgoal": "Watch the checks catch attacks",
+            "detail": "Changing `sub` to `admin` breaks the signature (`InvalidSignatureError`). A perfectly valid token checked against a different expected issuer fails too (`InvalidIssuerError`). Remember this second failure, because it's the most common real-world NICo token problem, covered in the next lesson."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Your organisation runs its own OIDC provider at `https://idp.example.com/realms/ops`, which issues tokens with `aud: nico-api`. Fill in the blanks so `nico-rest-api` validates tokens against it instead of the bundled Keycloak (Option 2 in the quick start).",
+        "partialSolution": "nico-rest-api:\n  config:\n    keycloak:\n      enabled: ___\n    issuers:\n      - issuer: \"https://idp.example.com/realms/ops\"\n        audience: ___",
+        "answer": "nico-rest-api:\n  config:\n    keycloak:\n      enabled: false\n    issuers:\n      - issuer: \"https://idp.example.com/realms/ops\"\n        audience: \"nico-api\"\n\n`enabled: false` stops nico-rest-api from using Keycloak for token validation. The docs note that setup.sh still deploys the Keycloak instance. `audience` must match the `aud` claim your IdP puts in tokens."
+      },
+      "independentProblem": {
+        "prompt": "nico-rest-api is configured with `issuer: \"https://idp.example.com/realms/ops\"` and `audience: \"nico-api\"`. A token has a valid signature from that IdP, and its decoded payload is `{\"iss\": \"https://idp.example.com/realms/ops\", \"sub\": \"8f1c...\", \"aud\": [\"account\"], \"azp\": \"ops-bot\", \"exp\": <one hour from now>}`. Is it accepted? If not, which check fails, and where would you fix it?",
+        "hints": [
+          "Go through the four checks one at a time: signature, iss, aud, exp.",
+          "Signature, iss and exp all pass. Compare the `aud` list with the configured audience.",
+          "`aud` contains only `account`, not `nico-api`. The fix belongs on the IdP side, in what it puts into tokens for this client."
+        ],
+        "answer": "Rejected. The audience check fails: the API expects `nico-api` in `aud`, but the token only names `account`. Signature, issuer and expiry are all fine. The fix is at the IdP: configure the `ops-bot` client so its tokens include `nico-api` in `aud` (in Keycloak, an audience mapper on the client or client scope). Don't relax the API's audience check. That check stops a token minted for some other service being replayed against NICo."
+      },
+      "selfExplanation": "Why can nico-rest-api trust a JWT it has never seen before without calling Keycloak, and why does it still have to check `iss` and `aud` when the signature is valid?",
+      "checks": [
+        {
+          "question": "What does the resource server need in order to verify a JWT's signature?",
+          "options": [
+            "The IdP's private key",
+            "The IdP's public key, usually fetched from its JWKS endpoint",
+            "The client's secret",
+            "A shared HMAC key with every client"
+          ],
+          "answer": "The IdP's public key, usually fetched from its JWKS endpoint",
+          "explanation": "The IdP signs with its private key, which never leaves it, and anyone can verify with the public key. Client secrets authenticate the client *to the IdP* and play no part in verifying tokens. Shared HMAC keys exist (HS256) but would let every verifier forge tokens."
+        },
+        {
+          "question": "Which NICo component uses OIDC login for a web UI?",
+          "options": [
+            "The DHCP server",
+            "The API Service's debug web UI on `/admin`",
+            "The DPU Agent",
+            "The PXE service"
+          ],
+          "answer": "The API Service's debug web UI on `/admin`",
+          "explanation": "The architecture overview says the API Service exposes `/admin` over HTTPS with OIDC authentication. DHCP, PXE and the DPU Agent talk to the API Service over mTLS/gRPC (or serve hosts directly) and have no human login."
+        },
+        {
+          "question": "A JWT's payload contains `\"iss\": \"http://keycloak.nico-rest:8082/realms/nico\"`. What does this claim tell the API?",
+          "options": [
+            "Which IdP and realm signed the token",
+            "Which API the token is meant for",
+            "The user's email address",
+            "Where to send the token next"
+          ],
+          "answer": "Which IdP and realm signed the token",
+          "explanation": "`iss` is the issuer. The intended recipient is `aud`. Identity details live in `sub` and optional profile claims. Nothing in a JWT tells you where to forward it."
+        }
+      ],
+      "sources": [
+        "overview/what-is-nico.md",
+        "getting-started/quick-start.md"
+      ]
+    },
+    {
+      "concept": "oauth2-client-credentials-flow-and-jwt-bearer-tokens",
+      "prequestions": [
+        {
+          "question": "A nightly automation job needs to call an API, and no human is around to log in. What could it send to the identity provider to get a token?",
+          "answer": "Its own credentials: a client ID and client secret registered with the IdP. That's the OAuth2 client credentials flow."
+        },
+        {
+          "question": "You get a token by port-forwarding Keycloak to localhost and requesting it there. The token is genuine and unexpired, but the API rejects it. Guess why.",
+          "answer": "Keycloak puts the URL you used to reach it into the token's `iss` claim. A localhost URL doesn't match the in-cluster issuer the API trusts."
+        }
+      ],
+      "explanation": "The **client credentials grant** (OAuth 2.0, RFC 6749 §4.4) is for machine-to-machine calls with no user involved. The procedure:\n\n1. **Register a client** at the IdP. It gets a `client_id` and a `client_secret`.\n2. **Request a token.** The client sends an HTTP `POST` to the IdP's token endpoint with a form-encoded body: `grant_type=client_credentials`, `client_id=...`, `client_secret=...`.\n3. **Receive the token.** The IdP replies with JSON: `access_token` (a signed JWT, in Keycloak's case), `expires_in` and `token_type: Bearer`.\n4. **Call the API** with the header `Authorization: Bearer <access_token>`. The API verifies the JWT as in the previous lesson.\n5. **Refresh by repeating step 2** before `expires_in` runs out.\n\n**Bearer** means 'whoever bears this token may use it'. There's no extra proof of possession, so protect tokens like passwords and keep lifetimes short. The client secret is a long-lived credential and needs real entropy (lesson 1).\n\n**The `iss` trap.** Unless Keycloak is configured with a fixed hostname, it builds the `iss` claim from the URL the request arrived on. NICo's dev Keycloak is reached in-cluster as `keycloak.nico-rest:8082`, so `nico-rest-api` expects `iss` to be `http://keycloak.nico-rest:8082/realms/nico`. The NICo quick start is explicit: *do not* port-forward Keycloak and request tokens against `localhost`, or the `iss` won't match and the token is rejected. Fetch tokens from inside the cluster.\n\n**NICo's dev values** (when `keycloak.enabled: true`, the default):\n\n| Setting | Value |\n|---|---|\n| Token endpoint | `http://keycloak.nico-rest:8082/realms/nico/protocol/openid-connect/token` |\n| `grant_type` | `client_credentials` |\n| `client_id` | `ncx-service` |\n| `client_secret` | `nico-local-secret` |\n\nThe helper `helm-prereqs/keycloak/get-token.sh` runs `curl` from a throw-away in-cluster pod and prints the token. That token is how you authenticate later to `nicocli` and to the one-time org bootstrap call (`/v2/org/ncx/nico/service-account/current`). These dev credentials are well known, so production sites point NICo REST at their own IdP.",
+      "analogy": "A hotel key-card machine for staff. The cleaning contractor shows their company badge (client ID and secret) at the front desk (token endpoint) and gets a key card (access token) that opens doors until it expires. Doors check the card, never the badge. Where it breaks down: a hotel card is encoded for *this* hotel's locks. The `iss` problem is like getting a card from a desk the doors don't recognise because you walked in through a side entrance with a different name on it.",
+      "workedExample": {
+        "title": "Get a NICo REST token and use it",
+        "steps": [
+          {
+            "subgoal": "Collect the flow parameters",
+            "detail": "From the quick start: token endpoint `http://keycloak.nico-rest:8082/realms/nico/protocol/openid-connect/token`, `client_id=ncx-service`, `client_secret=nico-local-secret`, grant `client_credentials`. These only apply when the bundled dev Keycloak is enabled."
+          },
+          {
+            "subgoal": "Request the token from inside the cluster",
+            "detail": "Use the documented helper:\n```bash\nTOKEN=$(helm-prereqs/keycloak/get-token.sh)\n```\nUnder the hood this is a standard OAuth2 request made from a pod. Done by hand, the same request looks like this:\n```bash\nkubectl run -i --rm --restart=Never --image=curlimages/curl get-token \\\n  -n nico-rest --quiet -- \\\n  -s -X POST http://keycloak.nico-rest:8082/realms/nico/protocol/openid-connect/token \\\n  -d grant_type=client_credentials \\\n  -d client_id=ncx-service \\\n  -d client_secret=nico-local-secret\n```\nThe JSON response has `access_token`, `expires_in` and `token_type`."
+          },
+          {
+            "subgoal": "Inspect the claims",
+            "detail": "```bash\npython3 -c 'import sys,json,base64; p=sys.argv[1].split(\".\")[1]; print(json.dumps(json.loads(base64.urlsafe_b64decode(p+\"=\"*(-len(p)%4))), indent=2))' \"$TOKEN\"\n```\nCheck that `iss` is `http://keycloak.nico-rest:8082/realms/nico` and that `exp` is in the future."
+          },
+          {
+            "subgoal": "Send it as a bearer token",
+            "detail": "```bash\nkubectl run -i --rm --restart=Never --image=curlimages/curl curl-test \\\n  -n nico-rest --quiet -- \\\n  -sf http://nico-rest-api.nico-rest:8388/v2/org/ncx/nico/user/current \\\n  -H \"Authorization: Bearer $TOKEN\"\n```\nA JSON response means the token verified. With `-sf`, a rejection makes curl exit non-zero instead."
+          },
+          {
+            "subgoal": "Know the failure mode",
+            "detail": "If you had run `kubectl port-forward` to Keycloak and requested `http://localhost:8082/...`, the token's `iss` would be `http://localhost:8082/realms/nico`, and nico-rest-api would reject it even though the signature is valid."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Fill in the blanks in this generic client-credentials request and API call (any OAuth2 IdP).",
+        "partialSolution": "TOKEN=$(curl -s -X POST \"$TOKEN_ENDPOINT\" \\\n  -d grant_type=___ \\\n  -d client_id=\"$CLIENT_ID\" \\\n  -d client_secret=\"$CLIENT_SECRET\" | jq -r .access_token)\n\ncurl -s \"$API/v2/org/ncx/nico/user/current\" -H \"Authorization: ___ $TOKEN\"",
+        "answer": "TOKEN=$(curl -s -X POST \"$TOKEN_ENDPOINT\" \\\n  -d grant_type=client_credentials \\\n  -d client_id=\"$CLIENT_ID\" \\\n  -d client_secret=\"$CLIENT_SECRET\" | jq -r .access_token)\n\ncurl -s \"$API/v2/org/ncx/nico/user/current\" -H \"Authorization: Bearer $TOKEN\"\n\nThe grant type names the flow, and `Bearer` is the authorization scheme the API expects. One gotcha: `curl -d` doesn't URL-encode values, so a secret containing `+` or `&` gets mangled. Use `--data-urlencode` for such secrets."
+      },
+      "independentProblem": {
+        "prompt": "A colleague writes: \"I ran `kubectl port-forward -n nico-rest svc/keycloak 8082:8082`, got a token from http://localhost:8082/realms/nico/protocol/openid-connect/token with the ncx-service credentials, and nico-rest-api returns 401. The secret is right, because Keycloak gave me a token.\" Diagnose the problem, give one command that proves it, and give the fix.",
+        "hints": [
+          "The token was issued, so the client ID and secret are fine. The problem is on the verification side.",
+          "Decode the payload and look at one specific claim. Which value does nico-rest-api expect?",
+          "`iss` will be `http://localhost:8082/realms/nico`, and nico-rest-api trusts `http://keycloak.nico-rest:8082/realms/nico`."
+        ],
+        "answer": "Keycloak built the `iss` claim from the URL used, so the token says `iss: http://localhost:8082/realms/nico`. nico-rest-api trusts the in-cluster issuer `http://keycloak.nico-rest:8082/realms/nico`, so it rejects the token. Prove it by decoding the payload: `python3 -c 'import sys,json,base64; p=sys.argv[1].split(\".\")[1]; print(json.loads(base64.urlsafe_b64decode(p+\"=\"*(-len(p)%4)))[\"iss\"])' \"$TOKEN\"`. Fix: fetch the token from inside the cluster with `TOKEN=$(helm-prereqs/keycloak/get-token.sh)`. Port-forwarding *nico-rest-api* for nicocli is fine, because that doesn't change what is inside the token."
+      },
+      "selfExplanation": "Explain why a perfectly valid, unexpired, correctly signed token can still be rejected purely because of the hostname used to request it.",
+      "checks": [
+        {
+          "question": "In the client credentials flow, where does the client put the access token when calling the API?",
+          "options": [
+            "In an `Authorization: Bearer <token>` header",
+            "In the request body as `client_secret`",
+            "In a cookie named `iss`",
+            "In the URL as `?grant_type=<token>`"
+          ],
+          "answer": "In an `Authorization: Bearer <token>` header",
+          "explanation": "The bearer header is the standard way to present an access token. `client_secret` and `grant_type` are only sent to the token endpoint, never to the API, and putting tokens in URLs leaks them into logs."
+        },
+        {
+          "question": "Why does the NICo quick start insist that you fetch Keycloak tokens from inside the cluster?",
+          "options": [
+            "Keycloak blocks connections from outside the cluster",
+            "The token's `iss` claim reflects the URL used, and must match the issuer nico-rest-api expects",
+            "Tokens fetched from outside are unsigned",
+            "The client secret only works inside the cluster"
+          ],
+          "answer": "The token's `iss` claim reflects the URL used, and must match the issuer nico-rest-api expects",
+          "explanation": "A port-forwarded request succeeds, so Keycloak isn't blocking it and the secret works. Tokens are always signed. The only difference is `iss`."
+        },
+        {
+          "question": "Why are bearer tokens usually short-lived?",
+          "options": [
+            "Because JWT signatures weaken over time",
+            "Because anyone who steals one can use it, so a short lifetime limits the damage",
+            "Because Keycloak's database can only store a few tokens",
+            "Because HTTP headers have a time limit"
+          ],
+          "answer": "Because anyone who steals one can use it, so a short lifetime limits the damage",
+          "explanation": "Bearer means possession is enough. The signature doesn't decay, and access tokens aren't looked up in a database per request. Expiry is what caps the damage from a leaked token."
+        }
+      ],
+      "sources": [
+        "getting-started/quick-start.md"
+      ]
+    },
+    {
+      "concept": "token-delegation",
+      "prequestions": [
+        {
+          "question": "A workload on a NICo-managed machine has a token NICo issued to it. It now needs to call an external storage service that only trusts tokens from its own issuer. Without storing a long-lived password on the machine, how might it get a suitable token?",
+          "answer": "Swap its NICo token for a new one at a token service the storage provider trusts. The service checks the first token and issues the second. That's token exchange (RFC 8693)."
+        },
+        {
+          "question": "If a control plane sends HTTP requests to URLs that tenants configure, what could go wrong?",
+          "answer": "A tenant could point it at internal addresses (metadata endpoints, admin APIs, the database) and use the control plane as a stepping stone. This is server-side request forgery (SSRF). Allowlists and egress proxies limit where those requests can go."
+        }
+      ],
+      "explanation": "**Token exchange** (RFC 8693) is an OAuth 2.0 extension: a client sends a token it already has to a **security token service (STS)** and gets back a different token. Typically the new token has a different issuer, audience or scope. The request is a `POST` to the STS token endpoint with form fields:\n\n- `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`\n- `subject_token`: the token being exchanged, which represents *who* the request is about\n- `subject_token_type`: what kind of token it is, e.g. `urn:ietf:params:oauth:token-type:jwt`\n- optional `actor_token` / `actor_token_type`: who is acting on the subject's behalf\n- optional `audience`, `resource`, `scope`, `requested_token_type`: what you want back\n\nThe STS verifies the subject token (signature, issuer, audience, expiry, as in the OIDC lesson), applies its own policy, and returns JSON with `access_token`, `issued_token_type` and `token_type`. When there's an actor, it's called **delegation**: the new token says 'A acting for B'. When the STS just issues a token as B, it's called impersonation.\n\nWhy bother? Identities can then be bridged between trust domains without long-lived secrets. A workload proves who it is with a short-lived token from one issuer and receives a short-lived token another system accepts.\n\n**In NICo:** NICo's machine identity feature lets workloads on provisioned instances obtain short-lived signed JWTs (you'll meet the SPIFFE details in chapter 21). Per-org settings configured on Day 1 include token delegation. NICo can then exchange tokens with external STS endpoints. The site-wide Day 0 `[machine_identity]` section has two related guard rails:\n\n- `token_endpoint_http_proxy`: an egress proxy for delegation calls. It's recommended when delegating to external HTTPS STS endpoints, so outbound traffic leaves through one controlled, auditable path.\n- `token_endpoint_domain_allowlist`: restricts which `token_endpoint` hosts a per-org config may use. Empty means no extra restriction beyond API validation.\n\nBoth guard against a tenant-supplied URL turning NICo into an SSRF tool. Site config for `[machine_identity]` isn't hot-reloaded, so restart `nico-api` after changing it.",
+      "analogy": "A currency exchange desk at an airport. You hand over money issued by one country (the subject token), the desk checks it's genuine and gives you local currency (the new token) that shops here accept. Where it breaks down: an exchange desk doesn't care who you are, while an STS issues the new token *about* the identity in the old one, and may record who acted on whose behalf.",
+      "workedExample": {
+        "title": "Following a delegated token from NICo to an external STS",
+        "steps": [
+          {
+            "subgoal": "Enable the site-level guard rails (Day 0)",
+            "detail": "In the nico-api site config (from the Day 0 machine identity guide):\n```toml\n[machine_identity]\nenabled = true\ncurrent_encryption_key_id = \"kv1\"\nalgorithm = \"ES256\"\ntoken_endpoint_http_proxy = \"https://nico-egress-proxy.example.com\"\ntoken_endpoint_domain_allowlist = [\"sts.example.com\", \"*.tenant.example.com\"]\n```\nThen restart nico-api, because this section isn't hot-reloaded."
+          },
+          {
+            "subgoal": "Identify the subject token",
+            "detail": "The workload holds a short-lived JWT signed by NICo with the org's ES256 signing key. That JWT is the `subject_token`. Per-org issuer, audiences, TTL and the delegation target are Day 1 settings, made with `PUT …/tenant-identity/config`."
+          },
+          {
+            "subgoal": "See the shape of the exchange request",
+            "detail": "This illustrates RFC 8693 on the wire, aimed at a hypothetical STS. It isn't a NICo command:\n```bash\ncurl -s -X POST https://sts.example.com/oauth2/token \\\n  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \\\n  --data-urlencode subject_token=\"$NICO_JWT\" \\\n  -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \\\n  -d audience=storage.example.com\n```"
+          },
+          {
+            "subgoal": "Read the response",
+            "detail": "A successful STS reply looks like:\n```json\n{\"access_token\": \"eyJ...\", \"issued_token_type\": \"urn:ietf:params:oauth:token-type:access_token\", \"token_type\": \"Bearer\", \"expires_in\": 900}\n```\nThe new token is then used as an ordinary bearer token against `storage.example.com`."
+          },
+          {
+            "subgoal": "Check the egress path",
+            "detail": "Because `token_endpoint_http_proxy` is set, NICo sends the call through the egress proxy. Because of the allowlist, a per-org config that names a host outside `sts.example.com` / `*.tenant.example.com` is restricted. Tenants can't make NICo call arbitrary hosts."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete the RFC 8693 request that exchanges a JWT held in `$SUBJECT` for a token aimed at `api.partner.example`.",
+        "partialSolution": "curl -s -X POST \"$STS_TOKEN_ENDPOINT\" \\\n  -d grant_type=___ \\\n  --data-urlencode subject_token=\"$SUBJECT\" \\\n  -d subject_token_type=___ \\\n  -d audience=api.partner.example",
+        "answer": "curl -s -X POST \"$STS_TOKEN_ENDPOINT\" \\\n  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \\\n  --data-urlencode subject_token=\"$SUBJECT\" \\\n  -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \\\n  -d audience=api.partner.example\n\nThe grant type is a URN, not a short word like `client_credentials`. The subject token type tells the STS how to parse and verify what you sent."
+      },
+      "independentProblem": {
+        "prompt": "Your site has `token_endpoint_domain_allowlist = [\"sts.example.com\", \"*.tenant.example.com\"]` and no `token_endpoint_http_proxy`. A tenant asks to configure delegation to `https://sts.attacker.example.net/token`. (a) What should happen, and why does the allowlist exist? (b) Why would you also add an egress proxy? (c) After you add the proxy setting, what must you do for it to take effect?",
+        "hints": [
+          "Compare the requested host with the two allowlist entries.",
+          "Think about SSRF and about having one place to see and control outbound traffic.",
+          "The Day 0 guide says something specific about reloading `[machine_identity]`."
+        ],
+        "answer": "(a) The host matches neither entry, so the allowlist restricts it and NICo won't use that token endpoint. The allowlist stops tenants pointing NICo's outbound token calls (which carry subject tokens) at arbitrary or malicious hosts. (b) An egress proxy sends all delegation traffic through one controlled, logged exit. You can apply network policy there, and the control plane doesn't need broad internet access. The Day 0 guide recommends it for delegation to external HTTPS STS endpoints. (c) Restart `nico-api`, because site config for `[machine_identity]` isn't hot-reloaded."
+      },
+      "selfExplanation": "Why is exchanging a short-lived token at an STS safer than placing a long-lived API key for the external service on every provisioned machine?",
+      "checks": [
+        {
+          "question": "In an RFC 8693 request, what is the `subject_token`?",
+          "options": [
+            "The token being exchanged, which represents who the request is about",
+            "The new token the STS returns",
+            "The STS's signing key",
+            "The client secret of the STS"
+          ],
+          "answer": "The token being exchanged, which represents who the request is about",
+          "explanation": "The client sends the subject token, and the STS returns `access_token`. Signing keys and secrets never travel in the request."
+        },
+        {
+          "question": "What does NICo's `token_endpoint_http_proxy` setting do?",
+          "options": [
+            "Routes token-delegation calls to external STS endpoints through an egress proxy",
+            "Proxies all NICo REST API traffic",
+            "Replaces Keycloak as the token issuer",
+            "Caches JWTs for faster validation"
+          ],
+          "answer": "Routes token-delegation calls to external STS endpoints through an egress proxy",
+          "explanation": "It's a `[machine_identity]` Day 0 option for delegation traffic only. It doesn't touch REST ingress or Keycloak, and it doesn't cache anything."
+        },
+        {
+          "question": "You change `token_endpoint_domain_allowlist` in the site config. Nothing changes in behaviour. Why?",
+          "options": [
+            "The allowlist only applies on Day 1",
+            "`[machine_identity]` isn't hot-reloaded, so nico-api must be restarted",
+            "Allowlists only take IP addresses",
+            "The DPU agent caches the allowlist"
+          ],
+          "answer": "`[machine_identity]` isn't hot-reloaded, so nico-api must be restarted",
+          "explanation": "The Day 0 guide says to restart nico-api after editing this section. The allowlist is a Day 0 site setting, it takes hostnames (including wildcard patterns, as in the example), and the DPU agent's `[machine-identity]` section is a separate config."
+        }
+      ],
+      "sources": [
+        "getting-started/installation-options/day0-machine-identity.md"
+      ]
+    },
+    {
+      "concept": "pki-and-tls-certificates",
+      "prequestions": [
+        {
+          "question": "Someone sends you a public key and says 'this is nico-api's key'. What's missing before you should believe them?",
+          "answer": "Proof that binds the key to that identity, from someone you already trust. A certificate supplies that proof: a trusted CA signs a statement that this key belongs to this name."
+        },
+        {
+          "question": "A root CA certificate is signed by its own key. Why would anyone trust it?",
+          "answer": "Because it's been placed in the trust store on purpose (shipped with the OS or browser, or distributed by the operator, like NICo's `nico-roots` bundle). Trust in a root comes from configuration, not from its signature."
+        }
+      ],
+      "explanation": "Public-key crypto (chapter 18) lets you verify signatures and set up encrypted sessions, but a bare public key says nothing about *whose* key it is. **Public key infrastructure (PKI)** solves this with certificates.\n\nAn **X.509 certificate** is a signed document containing:\n- a **subject** (who it's for) and **Subject Alternative Names (SANs)**, the DNS names, IPs or URIs it covers (next lesson)\n- the subject's **public key**\n- a **validity window** (`notBefore`/`notAfter`)\n- **extensions**: `basicConstraints` (is this a CA?), `keyUsage`/`extendedKeyUsage` (server auth, client auth, cert signing)\n- the **issuer** name and the issuer's **signature** over all of it\n\nA **certificate authority (CA)** is a key pair whose job is signing certificates. Certificates form a **chain**: leaf ← intermediate CA ← root CA. The root is self-signed and sits in a **trust store**. To verify a leaf, a client checks each signature up the chain until it reaches a trusted root, and also checks validity dates, CA flags and key usages. Requesters create their own key pair and send a **certificate signing request (CSR)**, so the private key never leaves them.\n\n**TLS** uses this: during the handshake the server presents its certificate chain and proves it holds the private key. **mTLS** (lesson 7) does the same in both directions.\n\n**NICo's PKI** (reference install) is a private one, built by cert-manager in phase 2 of `setup.sh`:\n- a `selfsigned-bootstrap` issuer signs the **`site-root`** CA\n- the `site-issuer` ClusterIssuer is a CA issuer backed by the `site-root` Secret\n- `vault-nico-issuer` is backed by Vault's PKI engine (absent with `--skip-vault`, where `site-issuer` signs the Core, RMS, Flow and site-agent certs)\n- External Secrets Operator copies the root bundle into each NICo namespace as the `nico-roots` Secret (keys `site-root`, `nico-root`), so every service knows which roots to trust\n\nWhen a NICo client says 'unknown CA', it usually means one of these trust bundles is missing or holds the wrong root.",
+      "analogy": "A passport. The passport office (CA) checks who you are and issues a document binding your name and photo (public key) to its seal (signature). Border guards (clients) don't know you, but they trust the seals of a list of passport offices (trust store). Where it breaks down: a forged-looking passport can still fool a tired guard, but a certificate signature either checks out mathematically or it doesn't. The weak points are instead CAs issuing to the wrong party and private keys being stolen.",
+      "workedExample": {
+        "title": "Build a one-level private CA with openssl",
+        "steps": [
+          {
+            "subgoal": "Create the root CA",
+            "detail": "```bash\nmkdir pki-lab && cd pki-lab\nopenssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\\n  -keyout ca.key -out ca.crt -days 30 -subj \"/CN=Lab Site Root\" \\\n  -addext \"basicConstraints=critical,CA:TRUE\" \\\n  -addext \"keyUsage=critical,keyCertSign,cRLSign\"\n```\nThis needs OpenSSL 1.1.1 or later. On macOS, `brew install openssl@3` if the built-in LibreSSL complains."
+          },
+          {
+            "subgoal": "Create a key and CSR for a service",
+            "detail": "```bash\nopenssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\\n  -keyout api.key -out api.csr -subj \"/CN=api.lab.internal\"\n```\nThe private key `api.key` stays with the service. Only `api.csr` goes to the CA."
+          },
+          {
+            "subgoal": "Have the CA sign it",
+            "detail": "```bash\nopenssl x509 -req -in api.csr -CA ca.crt -CAkey ca.key -CAcreateserial \\\n  -out api.crt -days 7 \\\n  -extfile <(printf \"subjectAltName=DNS:api.lab.internal\\nextendedKeyUsage=serverAuth\")\n```"
+          },
+          {
+            "subgoal": "Inspect and verify the chain",
+            "detail": "```bash\nopenssl x509 -in api.crt -noout -subject -issuer -dates\nopenssl verify -CAfile ca.crt api.crt        # api.crt: OK\n```\n`issuer` is `CN=Lab Site Root`. `openssl verify` checks the signature against the root you told it to trust, the same way a NICo service checks a peer against `nico-roots`."
+          },
+          {
+            "subgoal": "See verification fail without the right root",
+            "detail": "```bash\nopenssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\\n  -keyout other.key -out other.crt -days 1 -subj \"/CN=Some Other Root\"\nopenssl verify -CAfile other.crt api.crt\n```\nYou get `unable to get local issuer certificate`. The cert is fine, but the verifier trusts the wrong root."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Sign `dhcp.csr` with the lab root from the worked example. Fill in the two arguments that name the CA's certificate and private key.",
+        "partialSolution": "openssl x509 -req -in dhcp.csr -CA ___ -CAkey ___ -CAcreateserial \\\n  -out dhcp.crt -days 7 \\\n  -extfile <(printf \"subjectAltName=DNS:dhcp.lab.internal\\nextendedKeyUsage=serverAuth\")",
+        "answer": "openssl x509 -req -in dhcp.csr -CA ca.crt -CAkey ca.key -CAcreateserial \\\n  -out dhcp.crt -days 7 \\\n  -extfile <(printf \"subjectAltName=DNS:dhcp.lab.internal\\nextendedKeyUsage=serverAuth\")\n\n`-CA` supplies the issuer name that goes into the new cert, and `-CAkey` is the private key that signs it. (Create the CSR first with `openssl req -new ... -keyout dhcp.key -out dhcp.csr -subj \"/CN=dhcp.lab.internal\"`.)"
+      },
+      "independentProblem": {
+        "prompt": "Real PKIs keep the root offline and sign day-to-day certificates with an intermediate. Extend the lab: create `inter.key`/`inter.crt` signed by `ca.crt`, then a leaf `svc.crt` (SAN `DNS:svc.lab.internal`) signed by the intermediate. Prove the chain verifies when the client trusts only the root.",
+        "hints": [
+          "The intermediate is a CSR signed by the root, like the service cert, but its extensions must mark it as a CA.",
+          "Use `-extfile <(printf \"basicConstraints=critical,CA:TRUE\\nkeyUsage=critical,keyCertSign,cRLSign\")` when the root signs the intermediate. Then sign the leaf with `-CA inter.crt -CAkey inter.key`.",
+          "`openssl verify -CAfile ca.crt -untrusted inter.crt svc.crt`. `-untrusted` supplies the middle of the chain without trusting it as a root."
+        ],
+        "answer": "```bash\nopenssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout inter.key -out inter.csr -subj \"/CN=Lab Intermediate\"\nopenssl x509 -req -in inter.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out inter.crt -days 14 \\\n  -extfile <(printf \"basicConstraints=critical,CA:TRUE\\nkeyUsage=critical,keyCertSign,cRLSign\")\nopenssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout svc.key -out svc.csr -subj \"/CN=svc.lab.internal\"\nopenssl x509 -req -in svc.csr -CA inter.crt -CAkey inter.key -CAcreateserial -out svc.crt -days 7 \\\n  -extfile <(printf \"subjectAltName=DNS:svc.lab.internal\\nextendedKeyUsage=serverAuth\")\nopenssl verify -CAfile ca.crt -untrusted inter.crt svc.crt   # svc.crt: OK\n```\nWithout `-untrusted inter.crt`, verification fails because the client can't build the path. That's why servers send the intermediate along with their leaf (a 'full chain')."
+      },
+      "selfExplanation": "Explain why NICo distributes the `nico-roots` Secret to every namespace, and what would happen to service-to-service connections if one namespace had a stale root.",
+      "checks": [
+        {
+          "question": "What does a CA's signature on a certificate assert?",
+          "options": [
+            "That the public key in the certificate belongs to the identity named in it",
+            "That the certificate's private key is encrypted",
+            "That the server is free of malware",
+            "That the connection will use AES-GCM"
+          ],
+          "answer": "That the public key in the certificate belongs to the identity named in it",
+          "explanation": "A certificate binds a name to a key. It says nothing about the server's software, it contains no private key, and the cipher is negotiated separately in the TLS handshake."
+        },
+        {
+          "question": "In NICo's reference install, what is `site-issuer`?",
+          "options": [
+            "A cert-manager CA ClusterIssuer backed by the `site-root` Secret",
+            "The Keycloak realm for operators",
+            "A Vault KV path for BMC passwords",
+            "The DNS zone for the site"
+          ],
+          "answer": "A cert-manager CA ClusterIssuer backed by the `site-root` Secret",
+          "explanation": "From the software prerequisites: `site-issuer` is a CA issuer backed by `site-root`, which `selfsigned-bootstrap` signs. Keycloak, Vault KV and DNS are separate parts of the system."
+        },
+        {
+          "question": "A client reports `unable to get local issuer certificate` against a server whose certificate is valid and unexpired. What's the most likely cause?",
+          "options": [
+            "The client doesn't trust the root (or lacks the intermediate) that signed the server cert",
+            "The server's private key is too short",
+            "The server's clock is wrong",
+            "The certificate has too many SANs"
+          ],
+          "answer": "The client doesn't trust the root (or lacks the intermediate) that signed the server cert",
+          "explanation": "That error means path building failed: the client couldn't link the cert to anything in its trust store. Clock problems give 'not yet valid' or 'expired' errors, and name problems give hostname-mismatch errors."
+        }
+      ],
+      "sources": [
+        "getting-started/prerequisites/software.md",
+        "getting-started/quick-start.md",
+        "overview/what-is-nico.md"
+      ]
+    },
+    {
+      "concept": "tls-certificates-and-x-509-san",
+      "prequestions": [
+        {
+          "question": "Does a certificate for `*.mysite.example.com` cover `a.b.mysite.example.com`? Does it cover `mysite.example.com`?",
+          "answer": "Neither. A wildcard matches exactly one DNS label in the leftmost position, so it covers `rest-api.mysite.example.com` but not names with two extra labels, and not the bare apex."
+        },
+        {
+          "question": "Modern TLS clients check the hostname against which part of a certificate: the Common Name (CN) or the Subject Alternative Names?",
+          "answer": "The SANs. Browsers and most modern libraries ignore the CN for hostname checks, so a cert with the right CN but no matching SAN fails. (A few libraries still fall back to the CN, but only when the cert has no DNS SANs at all.)"
+        }
+      ],
+      "explanation": "Once a client has verified the chain (previous lesson), it still has to answer: *is this certificate for the host I meant to reach?* Otherwise any valid certificate from the same CA would do. That's **hostname verification**.\n\nThe answer lives in the **Subject Alternative Name (SAN)** extension, a list of entries such as `DNS:rest-api.mysite.example.com`, `DNS:nico-api.nico-system.svc.cluster.local` or `IP:10.0.0.5`. The client compares the name it dialled with each entry. The subject CN is legacy. Browsers, Go's `crypto/tls` (1.15 and later) and rustls ignore it completely. Some other stacks, such as gRPC's C core used by the Python, C++ and Ruby clients, still fall back to the CN when a cert has no DNS SANs at all. Don't rely on that: always put every name in the SANs.\n\n**Wildcard rules** (RFC 6125, as browsers and OpenSSL apply them):\n- `*` may appear only as the whole leftmost label: `*.mysite.example.com`.\n- It matches **exactly one label**: `nico.mysite.example.com` matches, `a.b.mysite.example.com` doesn't.\n- It doesn't match the apex: `mysite.example.com` needs its own SAN entry.\n- IP addresses must match an `IP:` entry. A `DNS:` entry holding an IP string doesn't count.\n\n**DNS ties in here** (chapter 8): the client uses the *name* for verification and DNS only to find the address. If you connect by IP, or through a name not in the SANs, verification fails even though the packets reach the right box. `curl --resolve host:port:ip` lets you test a name before DNS exists. `openssl s_client -servername host` sets **SNI**, the hostname the client announces during the handshake so the server can pick the right certificate. SNI only *selects* a certificate. It doesn't verify one: `s_client` checks the hostname only when you also pass `-verify_hostname host`.\n\n**NICo examples:**\n- Service certs carry cluster-internal SANs (the docs give `nico-api.<namespace>.svc.cluster.local`-style names and `nico-api.nico`) plus optional external FQDNs. Your ClusterIssuers must be able to issue both.\n- For the NICo REST ingress, `certificate.dnsNames` accepts a wildcard covering one label, as X.509 SAN matching does. `ingress.tls[].hosts` must name each host **exactly**, because ingress controllers like Contour key their HTTPS virtual host by that literal string. A wildcard there leaves the route with no HTTPS virtual host.\n- The docs' check, `openssl s_client -connect rest-api.mysite.example.com:443 -servername rest-api.mysite.example.com -CAfile nico-rest-ca.crt`, should print `Verify return code: 0 (ok)`. That proves Envoy serves a certificate whose chain leads to the CA in `nico-rest-ca.crt`. It doesn't check the SAN. Clients such as `curl --cacert nico-rest-ca.crt` do check the SAN.",
+      "analogy": "A parcel addressed to a named list of flats. `*.mysite` is like 'any flat on floor 3': it covers 3A and 3B but not the floor-3 storage cupboard on a mezzanine (a two-level name), and not the building's front office (the apex). Where it breaks down: a postman might deliver to a close-enough address, but hostname verification is exact string and label matching with no fuzziness.",
+      "workedExample": {
+        "title": "Test which hostnames a wildcard certificate covers",
+        "steps": [
+          {
+            "subgoal": "Create a cert with a wildcard and an explicit SAN",
+            "detail": "```bash\nopenssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\\n  -keyout wild.key -out wild.crt -days 7 \\\n  -subj \"/CN=rest-api.mysite.example.com\" \\\n  -addext \"subjectAltName=DNS:*.mysite.example.com,DNS:rest-api.mysite.example.com\"\n```"
+          },
+          {
+            "subgoal": "Read the SAN list",
+            "detail": "On OpenSSL 3.x:\n```bash\nopenssl x509 -in wild.crt -noout -ext subjectAltName\n```\nThe `-ext` option doesn't exist in OpenSSL 1.1.1. There, use:\n```bash\nopenssl x509 -in wild.crt -noout -text | grep -A1 'Subject Alternative Name'\n```\nEither way the output shows `DNS:*.mysite.example.com, DNS:rest-api.mysite.example.com`."
+          },
+          {
+            "subgoal": "Check candidate hostnames",
+            "detail": "```bash\nfor h in rest-api.mysite.example.com nico.mysite.example.com mysite.example.com a.b.mysite.example.com; do\n  openssl x509 -in wild.crt -noout -checkhost \"$h\"\ndone\n```\nThe first two print `does match certificate`. The apex and the two-label name print `does NOT match certificate`."
+          },
+          {
+            "subgoal": "Apply the rule to NICo's REST ingress",
+            "detail": "If this cert were stored as a TLS Secret in `nico-rest`, your values would list the **concrete** host:\n```yaml\n    tls:\n      - secretName: mysite-wildcard-tls\n        hosts:\n          - rest-api.mysite.example.com\n```\nThe cert's SAN may be a wildcard. The `hosts` entry must not be one."
+          },
+          {
+            "subgoal": "Verify a live endpoint: chain first, then name",
+            "detail": "With a real deployment, the docs' command checks the **chain only**:\n```bash\nopenssl s_client -connect rest-api.mysite.example.com:443 \\\n  -servername rest-api.mysite.example.com -CAfile nico-rest-ca.crt </dev/null | grep 'Verify return code'\n```\n`-servername` sets SNI, which tells Envoy which certificate to serve. `Verify return code: 0 (ok)` means that certificate chains to the CA in `nico-rest-ca.crt`. It would still say `0 (ok)` if the SAN were wrong. To check the SAN as well, add `-verify_hostname`:\n```bash\nopenssl s_client -connect rest-api.mysite.example.com:443 \\\n  -servername rest-api.mysite.example.com -CAfile nico-rest-ca.crt \\\n  -verify_hostname rest-api.mysite.example.com </dev/null | grep 'Verify return code'\n```\nA SAN mismatch now shows `Verify return code: 62 (hostname mismatch)`. `curl --cacert nico-rest-ca.crt https://rest-api.mysite.example.com/` does both checks by default."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Fill in the two SAN entries so the certificate covers `lab.example.com` itself and every single-label host under it (`pxe.lab.example.com`, `dns.lab.example.com`, …).",
+        "partialSolution": "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\\n  -keyout lab.key -out lab.crt -days 7 -subj \"/CN=lab.example.com\" \\\n  -addext \"subjectAltName=DNS:___,DNS:___\"",
+        "answer": "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\\n  -keyout lab.key -out lab.crt -days 7 -subj \"/CN=lab.example.com\" \\\n  -addext \"subjectAltName=DNS:lab.example.com,DNS:*.lab.example.com\"\n\nThe wildcard doesn't cover the apex, so the apex needs its own entry. Check with `openssl x509 -in lab.crt -noout -checkhost lab.example.com` and `-checkhost pxe.lab.example.com`."
+      },
+      "independentProblem": {
+        "prompt": "You have a site-wide wildcard Secret `mysite-wildcard-tls` with SAN `DNS:*.mysite.example.com`, and you want NICo REST served at both `rest-api.mysite.example.com` and `rest.api.mysite.example.com` through an existing nginx ingress controller. (a) Which of the two hostnames will pass TLS hostname verification? (b) What exactly goes in `ingress.tls[].hosts`? (c) Name one other requirement from the docs about where the Secret must live.",
+        "hints": [
+          "Count the labels to the left of `mysite.example.com` in each name.",
+          "`ingress.tls[].hosts` is keyed by literal string. The chart rejects any `ingress.hosts` entry it doesn't name exactly.",
+          "`spec.tls[].secretName` resolves in the Ingress's own namespace."
+        ],
+        "answer": "(a) Only `rest-api.mysite.example.com`. `rest.api.mysite.example.com` has two labels where the wildcard allows one, so it needs its own SAN or a different certificate. (b) Each concrete host, exactly as in `ingress.hosts`: `- rest-api.mysite.example.com` (and `- rest.api.mysite.example.com` too, if you keep it and get a certificate that covers it). Never `*.mysite.example.com`. (c) The Secret must be in the `nico-rest` namespace, because that's where the Ingress resolves `secretName`, so copy or mirror the wildcard Secret there. Also add `nginx.ingress.kubernetes.io/force-ssl-redirect: \"true\"` (a quoted string), since the default redirect annotation targets Contour."
+      },
+      "selfExplanation": "Chain verification and hostname verification are separate checks. Explain what attack becomes possible if a client does the first but skips the second.",
+      "checks": [
+        {
+          "question": "A certificate's only SAN is `DNS:*.mysite.example.com`. Which hostname does it cover?",
+          "options": [
+            "`nico.mysite.example.com`",
+            "`a.b.mysite.example.com`",
+            "`mysite.example.com`",
+            "All three"
+          ],
+          "answer": "`nico.mysite.example.com`",
+          "explanation": "A wildcard matches exactly one leftmost label. It doesn't reach two levels down, and the apex has no label for `*` to match."
+        },
+        {
+          "question": "A cert has CN `nico-api.nico` but no SAN entries. A gRPC client written in Go (`crypto/tls`, Go 1.15 or later) dials `nico-api.nico`. What happens?",
+          "options": [
+            "Verification succeeds because the CN matches",
+            "Hostname verification fails, because Go's TLS stack matches only against SANs and ignores the CN",
+            "The client falls back to IP matching",
+            "It succeeds only over HTTP/2"
+          ],
+          "answer": "Hostname verification fails, because Go's TLS stack matches only against SANs and ignores the CN",
+          "explanation": "Since 1.15, Go ignores the CN for hostname checks, and rustls never used it. The CN 'fallback' is real but stack-specific: gRPC's C core (the Python, C++ and Ruby clients) still accepts a CN match when the cert has no DNS SANs. So the same cert can pass in one client and fail in another, which is why every name belongs in the SANs. There's no IP fallback, and the HTTP version is irrelevant."
+        },
+        {
+          "question": "In the NICo REST chart, where is a wildcard allowed?",
+          "options": [
+            "In `certificate.dnsNames`, but not in `ingress.tls[].hosts`",
+            "In `ingress.tls[].hosts`, but not in `certificate.dnsNames`",
+            "In both",
+            "In neither"
+          ],
+          "answer": "In `certificate.dnsNames`, but not in `ingress.tls[].hosts`",
+          "explanation": "`certificate.dnsNames` become SANs, where one-label wildcards are valid. `ingress.tls[].hosts` must name hosts exactly, because controllers such as Contour key the HTTPS virtual host by the literal string."
+        }
+      ],
+      "sources": [
+        "getting-started/quick-start.md",
+        "getting-started/prerequisites/software.md"
+      ]
+    },
+    {
+      "concept": "mtls-grpc",
+      "prequestions": [
+        {
+          "question": "In ordinary HTTPS, the server proves its identity with a certificate. How does the server know who the client is?",
+          "answer": "At the TLS level it doesn't. The client is anonymous unless it sends a password or token. Mutual TLS adds a client certificate, so the client's identity is proven during the handshake as well."
+        },
+        {
+          "question": "gRPC sends messages defined in `.proto` files. Which encoding from chapter 1 does it use on the wire, and over which HTTP version?",
+          "answer": "Protocol Buffers (binary), over HTTP/2."
+        }
+      ],
+      "explanation": "**gRPC** is a remote procedure call framework. You define services and messages in a `.proto` file (chapter 1). Code generators produce typed client and server stubs, and calls travel as binary Protocol Buffers over **HTTP/2**, which carries many concurrent calls on one connection. gRPC supports unary calls and streaming, and returns its own status codes (`OK`, `UNAVAILABLE`, `UNAUTHENTICATED`, `PERMISSION_DENIED`, …). In production it almost always runs over TLS.\n\nIn normal TLS only the server authenticates. In **mutual TLS (mTLS)**:\n1. The server presents its certificate chain, and the client verifies the chain and the hostname (SAN).\n2. The server sends a *CertificateRequest*.\n3. The client presents its own certificate and signs the handshake with its private key, proving it holds the key.\n4. The server verifies the client's chain against **its** trust bundle. It can then authorise based on the identity in the client cert (a SAN, or a SPIFFE URI, covered in chapter 21).\n\nIf any check fails, the handshake aborts before a single RPC is sent. Typical errors are `unknown ca`, `certificate required` and `bad certificate`. Client certs need the `clientAuth` extended key usage, and server certs need `serverAuth`.\n\n**Why NICo does this:** NICo is 'zero-trust'. Being on the right network proves nothing. *All NICo control-plane services communicate over mTLS/gRPC*. The API Service (NICo Core) is the hub. DHCP, PXE, Hardware Health, SSH Console, DNS, Scout on hosts, the DPU Agent and `nico-admin-cli` all connect to it over mTLS/gRPC. Concrete cases from the docs:\n- **RMS:** NICo Core calls `rms-api-server` (namespace `rack-manager`) on gRPC port `8801` with mutual TLS. RMS's certificate comes from the **same cert-manager issuer** that signs NICo's, so both directions verify without extra configuration. NICo needs no dedicated RMS client cert, because the RMS client library finds NICo's own SPIFFE certificate mount and presents it.\n- **Site agent:** the health check looks for the Certificate `core-grpc-client-site-agent-certs` in `nico-rest`. That's the client certificate the site agent uses to call Core over gRPC.\n- **Switches:** the switch state machine installs NVOS mTLS certificates (`ConfigureCertificate`) during bring-up.",
+      "analogy": "A secure building where the guard checks your badge, and you check the guard's badge before handing over anything sensitive. Both badges come from the same company. Where it breaks down: a person could flash someone else's badge, but in mTLS presenting the certificate isn't enough. You must sign the handshake with the matching private key, so a copied certificate alone is useless.",
+      "workedExample": {
+        "title": "Run an mTLS server and connect with and without a client cert",
+        "steps": [
+          {
+            "subgoal": "Issue a server cert and a client cert from one CA",
+            "detail": "Reuse `ca.crt`/`ca.key` from the PKI lesson (or recreate them):\n```bash\nopenssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout server.key -out server.csr -subj \"/CN=localhost\"\nopenssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 7 \\\n  -extfile <(printf \"subjectAltName=DNS:localhost,IP:127.0.0.1\\nextendedKeyUsage=serverAuth\")\nopenssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout client.key -out client.csr -subj \"/CN=site-agent\"\nopenssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out client.crt -days 7 \\\n  -extfile <(printf \"extendedKeyUsage=clientAuth\")\n```"
+          },
+          {
+            "subgoal": "Start a server that requires client certs",
+            "detail": "In terminal 1 (in the same directory):\n```bash\nopenssl s_server -accept 9443 -cert server.crt -key server.key -CAfile ca.crt -Verify 1 -www\n```\n`-Verify 1` (capital V) makes a client certificate mandatory, and `-CAfile` is the bundle used to check it."
+          },
+          {
+            "subgoal": "Connect without a client cert",
+            "detail": "In terminal 2 (also in that directory):\n```bash\ncurl --cacert ca.crt https://localhost:9443/\n```\nThis fails with a TLS alert such as `certificate required` or `handshake failure`. The server cert verified fine, but the server refused an anonymous client."
+          },
+          {
+            "subgoal": "Connect with the client cert",
+            "detail": "```bash\ncurl --cacert ca.crt --cert client.crt --key client.key https://localhost:9443/\n```\nYou get s_server's status page. Terminal 1 logs the client's subject `CN=site-agent`. Both sides are now authenticated."
+          },
+          {
+            "subgoal": "Connect with a cert from a different CA",
+            "detail": "```bash\nopenssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout rogue.key -out rogue.crt -days 1 -subj \"/CN=site-agent\" -addext \"extendedKeyUsage=clientAuth\"\ncurl --cacert ca.crt --cert rogue.crt --key rogue.key https://localhost:9443/\n```\nThis fails (the server reports an unknown CA or verify error). Same name, wrong issuer. This is why NICo and RMS take their certs from the same issuer."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "Complete the curl command so it performs mTLS against the server from the worked example.",
+        "partialSolution": "curl --cacert ca.crt ___ client.crt ___ client.key https://localhost:9443/",
+        "answer": "curl --cacert ca.crt --cert client.crt --key client.key https://localhost:9443/\n\n`--cacert` is the trust bundle used to verify the *server*. `--cert` and `--key` are the *client's* own identity. Mixing these up (e.g. passing ca.crt to --cert) is a common mistake."
+      },
+      "independentProblem": {
+        "prompt": "A site's RMS chart was customised so that `rms-api-server` gets its certificate from a separate, newly created CA issuer instead of the issuer that signs nico-api's certificate. NICo Core's calls to RMS on port 8801 now fail during the TLS handshake. Explain which verification fails (and on which side), and give two ways to fix it that are consistent with the RMS architecture page.",
+        "hints": [
+          "In mTLS both sides verify. What does nico-api trust, and what does RMS trust?",
+          "nico-api checks RMS's server cert against roots it trusts, and RMS checks nico-api's SPIFFE client cert against the roots it trusts. With two unrelated CAs, neither chain reaches a root the other side trusts.",
+          "The docs say the shared issuer is what makes it work without extra configuration, and that explicit certificate paths are an override."
+        ],
+        "answer": "Both directions break. nico-api can't build a chain from RMS's server cert to a root it trusts (the new CA isn't in its bundle), and RMS can't verify the SPIFFE client cert nico-api presents (signed by the original issuer). The handshake aborts with an unknown-CA style error before any RPC is sent. Fix 1 (preferred): issue RMS's certificate from the same cert-manager issuer that signs NICo's certificate, as the reference install does (`vault-nico-issuer`, or `site-issuer` with `--skip-vault`). Fix 2: use the documented override and supply explicit certificate paths so each side has material that the other side's trust bundle accepts. Simply skipping verification would defeat the purpose of mTLS."
+      },
+      "selfExplanation": "Why does NICo authenticate every service-to-service call with certificates instead of trusting anything that arrives from inside the cluster network?",
+      "checks": [
+        {
+          "question": "In mutual TLS, who presents a certificate?",
+          "options": [
+            "Only the server",
+            "Only the client",
+            "Both client and server, each verified by the other",
+            "Neither: keys are pre-shared"
+          ],
+          "answer": "Both client and server, each verified by the other",
+          "explanation": "Server-only is ordinary TLS. mTLS adds a client certificate and a proof-of-possession signature. Pre-shared keys are a different TLS mode, not mTLS."
+        },
+        {
+          "question": "Why does NICo Core need no dedicated RMS client certificate?",
+          "options": [
+            "RMS doesn't use TLS",
+            "The RMS client library presents NICo's own SPIFFE certificate, and RMS's cert comes from the same issuer, so both directions verify",
+            "RMS authenticates NICo with HTTP basic auth",
+            "nico-api disables verification for RMS"
+          ],
+          "answer": "The RMS client library presents NICo's own SPIFFE certificate, and RMS's cert comes from the same issuer, so both directions verify",
+          "explanation": "The RMS page lists NICo Core to RMS as gRPC on 8801 with mutual TLS. Basic auth is what RMS uses *towards* BMCs. Nothing disables verification."
+        },
+        {
+          "question": "How does gRPC encode and transport messages?",
+          "options": [
+            "JSON over HTTP/1.1",
+            "Protocol Buffers over HTTP/2",
+            "XML over SOAP",
+            "TOML over raw TCP"
+          ],
+          "answer": "Protocol Buffers over HTTP/2",
+          "explanation": "gRPC's default wire format is binary Protobuf, multiplexed over HTTP/2. JSON over HTTP/1.1 describes REST APIs such as NICo REST."
+        }
+      ],
+      "sources": [
+        "overview/what-is-nico.md",
+        "architecture/backends/rms.md",
+        "architecture/state_machines/switch.md",
+        "getting-started/quick-start.md"
+      ]
+    },
+    {
+      "concept": "cert-manager",
+      "prequestions": [
+        {
+          "question": "NICo has dozens of services, each with a certificate that expires. What goes wrong if renewal depends on a human running openssl?",
+          "answer": "Someone eventually forgets. A certificate expires, mTLS handshakes start failing, and services can't talk to each other: an outage caused by a calendar. Automation renews certificates before they expire."
+        },
+        {
+          "question": "In Kubernetes, how might you ask for a certificate 'the Kubernetes way'?",
+          "answer": "Declare a custom resource describing the cert you want (names, issuer, Secret name). A controller notices it, gets the certificate signed, and keeps the result in a Secret, renewing it as needed."
+        }
+      ],
+      "explanation": "**cert-manager** is a Kubernetes controller (chapter 14 covered CRDs) that turns certificate management into declared resources:\n\n- **Issuer** (namespaced) and **ClusterIssuer** (cluster-wide) describe *how* to sign. Types include `selfSigned`, `ca` (sign with a CA key stored in a Secret), `vault` (Vault PKI) and ACME.\n- **Certificate** describes *what* you want: `dnsNames` and other SANs, `duration`, `renewBefore`, `usages`, `isCA`, `issuerRef`, and the `secretName` to write to.\n- **CertificateRequest** is a one-off signing request the controller creates from a Certificate. It contains a CSR, and the private key stays in the cluster.\n- The result is a Kubernetes **Secret** of type `kubernetes.io/tls` with `tls.crt`, `tls.key` and usually `ca.crt`.\n\nThe controller keeps reconciling. When a cert nears expiry (at `renewBefore`, or by default two-thirds of the way through its lifetime), it issues a new one and updates the Secret. Pods that mount the Secret see the new files, but the application must reload them, because cert-manager doesn't restart workloads.\n\n**approver-policy** adds a gate: CertificateRequests must be *approved* by policy (rules about which namespaces may use which issuers and SANs) before an issuer signs them. Without it, any namespace that can create a Certificate could ask a powerful ClusterIssuer for any name.\n\n**In NICo:**\n- Validated: cert-manager v1.11.1 with approver-policy v0.6.3. `setup.sh` deploys cert-manager v1.17.1 in phase 2, together with the site CA bootstrap.\n- Required ClusterIssuers: `site-issuer` (CA, backed by the `site-root` Secret) and `vault-nico-issuer` (Vault PKI). The reference install also creates `selfsigned-bootstrap`, which signs `site-root`.\n- cert-manager issues and rotates the certificates NICo services use for mTLS/gRPC, for example `core-grpc-client-site-agent-certs` in `nico-rest`. RMS's server certificate comes from the same issuer as NICo's.\n- If you bring your own cert-manager, your issuers must handle cluster-internal service SANs and external FQDNs, and your approver flows must allow Certificates in NICo namespaces.\n- The REST ingress chart can create a Certificate issued by `nico-rest-ca-issuer`.\n\nHealth checks: `kubectl get clusterissuer` and `kubectl get certificate -A` should show `READY True`.",
+      "analogy": "A standing order with a print shop for staff ID badges. You file a form once (the Certificate) saying who needs a badge and which print shop to use (the issuer), and the shop reprints each badge before it expires and drops it in the person's pigeonhole (the Secret). Where it breaks down: a person notices a new badge in their pigeonhole, but an application may keep using the old certificate in memory until it reloads or restarts.",
+      "workedExample": {
+        "title": "Recreate NICo's issuer chain shape in a kind cluster",
+        "steps": [
+          {
+            "subgoal": "Create a cluster and install cert-manager",
+            "detail": "```bash\nkind create cluster --name pki-lab\nkubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.17.1/cert-manager.yaml\nkubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=180s\n```"
+          },
+          {
+            "subgoal": "Bootstrap a root CA and a CA ClusterIssuer",
+            "detail": "This has the same shape as NICo's selfsigned-bootstrap → site-root → site-issuer, with lab names. Save as `issuers.yaml`:\n```yaml\napiVersion: cert-manager.io/v1\nkind: ClusterIssuer\nmetadata:\n  name: lab-selfsigned\nspec:\n  selfSigned: {}\n---\napiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: lab-root\n  namespace: cert-manager\nspec:\n  isCA: true\n  commonName: lab-root\n  secretName: lab-root\n  privateKey:\n    algorithm: ECDSA\n    size: 256\n  issuerRef:\n    name: lab-selfsigned\n    kind: ClusterIssuer\n---\napiVersion: cert-manager.io/v1\nkind: ClusterIssuer\nmetadata:\n  name: lab-issuer\nspec:\n  ca:\n    secretName: lab-root\n```\nApply with `kubectl apply -f issuers.yaml`. A ClusterIssuer of type `ca` reads its Secret from the `cert-manager` namespace by default, which is why `lab-root` lives there."
+          },
+          {
+            "subgoal": "Request a service certificate",
+            "detail": "Save as `leaf.yaml` and apply it:\n```yaml\napiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: demo-grpc\n  namespace: default\nspec:\n  secretName: demo-grpc-tls\n  duration: 24h\n  renewBefore: 8h\n  dnsNames:\n    - demo.default.svc.cluster.local\n    - demo.default\n  usages:\n    - server auth\n    - client auth\n  issuerRef:\n    name: lab-issuer\n    kind: ClusterIssuer\n```"
+          },
+          {
+            "subgoal": "Check status and the issued Secret",
+            "detail": "```bash\nkubectl get clusterissuer\nkubectl get certificate -A\nkubectl get secret demo-grpc-tls -o jsonpath='{.data.tls\\.crt}' | base64 -d \\\n  | openssl x509 -noout -subject -issuer -dates -ext subjectAltName\n```\n`-ext` needs OpenSSL 3.x. On 1.1.1, replace the last line's options with `openssl x509 -noout -text | grep -A1 'Subject Alternative Name'`. You should see both ClusterIssuers and both Certificates `READY True`, the issuer `CN=lab-root`, and your two SANs."
+          },
+          {
+            "subgoal": "Verify against the CA bundle",
+            "detail": "```bash\nkubectl get secret demo-grpc-tls -o jsonpath='{.data.ca\\.crt}' | base64 -d > lab-ca.crt\nkubectl get secret demo-grpc-tls -o jsonpath='{.data.tls\\.crt}' | base64 -d > demo.crt\nopenssl verify -CAfile lab-ca.crt demo.crt\n```\nThe `ca.crt` key is the same bundle you'd export for NICo REST clients (`--cacert nico-rest-ca.crt`)."
+          }
+        ]
+      },
+      "completionProblem": {
+        "prompt": "You want a server certificate for a lab Service named `rms-api-server` in namespace `rack-manager` (run `kubectl create namespace rack-manager` first), signed by `lab-issuer` from the worked example. Fill in the blanks.",
+        "partialSolution": "apiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: rms-server\n  namespace: rack-manager\nspec:\n  secretName: rms-server-tls\n  dnsNames:\n    - ___\n  issuerRef:\n    name: ___\n    kind: ClusterIssuer",
+        "answer": "apiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: rms-server\n  namespace: rack-manager\nspec:\n  secretName: rms-server-tls\n  dnsNames:\n    - rms-api-server.rack-manager.svc.cluster.local\n  issuerRef:\n    name: lab-issuer\n    kind: ClusterIssuer\n\nThe SAN is the Service's cluster DNS name, so in-cluster clients dialling it pass hostname verification. Using the same issuer as your other services means mTLS peers already trust it, the same idea as RMS sharing NICo's issuer."
+      },
+      "independentProblem": {
+        "prompt": "Watch cert-manager rotate a certificate. Create a Certificate `demo-short` in `default` (issuer `lab-issuer`, SAN `short.default`) that cert-manager will renew within about five minutes, then show evidence that it renewed and that the Secret's certificate changed.",
+        "hints": [
+          "cert-manager requires `duration` of at least 1h, and `renewBefore` must be shorter than `duration`.",
+          "`duration: 1h` with `renewBefore: 55m` renews about 5 minutes after issue.",
+          "Compare `.status.revision` and `.status.notBefore` before and after, or the serial from `openssl x509 -noout -serial` on `tls.crt`."
+        ],
+        "answer": "```yaml\napiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: demo-short\n  namespace: default\nspec:\n  secretName: demo-short-tls\n  duration: 1h\n  renewBefore: 55m\n  dnsNames:\n    - short.default\n  issuerRef:\n    name: lab-issuer\n    kind: ClusterIssuer\n```\nApply it, then run:\n```bash\nkubectl get certificate demo-short -o jsonpath='{.status.revision}  {.status.notBefore}  {.status.renewalTime}{\"\\n\"}'\nkubectl get secret demo-short-tls -o jsonpath='{.data.tls\\.crt}' | base64 -d | openssl x509 -noout -serial\n```\nAfter `renewalTime` passes (about 5 minutes), run both again: `revision` goes from 1 to 2, and `notBefore` and the serial change. `kubectl get certificaterequest` shows a second request. A workload mounting this Secret must reload the files to start using the new cert."
+      },
+      "selfExplanation": "Explain the division of labour between a Certificate, an Issuer and the resulting Secret, and why approver-policy matters when a powerful ClusterIssuer like `site-issuer` is available to many namespaces.",
+      "checks": [
+        {
+          "question": "Which resource do you create to ask cert-manager for a certificate for your service?",
+          "options": [
+            "A Certificate",
+            "A ClusterIssuer",
+            "A Secret of type kubernetes.io/tls",
+            "A CertificateSigningRequest in kube-system"
+          ],
+          "answer": "A Certificate",
+          "explanation": "The Certificate declares what you want. Issuers say how to sign, and the Secret is the *output*. Writing a TLS Secret yourself bypasses cert-manager, and cert-manager creates its CertificateRequests for you."
+        },
+        {
+          "question": "What's the difference between an Issuer and a ClusterIssuer?",
+          "options": [
+            "An Issuer serves Certificates in its own namespace, and a ClusterIssuer serves the whole cluster",
+            "A ClusterIssuer is always backed by Vault",
+            "An Issuer can only self-sign",
+            "There is no difference"
+          ],
+          "answer": "An Issuer serves Certificates in its own namespace, and a ClusterIssuer serves the whole cluster",
+          "explanation": "Scope is the only difference. Both support the same issuer types (selfSigned, ca, vault, ACME). NICo uses ClusterIssuers (`site-issuer`, `vault-nico-issuer`) because many namespaces need certificates from the same PKI."
+        },
+        {
+          "question": "cert-manager renewed a certificate and updated its Secret, but clients still see the old certificate. What's the likely reason?",
+          "options": [
+            "The application hasn't reloaded the new files",
+            "cert-manager only renews on Mondays",
+            "The Secret update failed silently",
+            "The CA was revoked"
+          ],
+          "answer": "The application hasn't reloaded the new files",
+          "explanation": "cert-manager updates the Secret and mounted files refresh, but a process that read the cert at startup keeps serving the old one until it reloads or restarts. A failed Secret update would show up in the Certificate's status."
+        }
+      ],
+      "sources": [
+        "getting-started/prerequisites/software.md",
+        "getting-started/quick-start.md",
+        "overview/what-is-nico.md",
+        "architecture/backends/rms.md"
+      ]
+    }
+  ],
+  "buildTask": {
+    "title": "A zero-trust API on your laptop: mTLS plus Keycloak JWTs",
+    "goal": "Build a small HTTPS API that only answers a caller who presents both a client certificate signed by your private CA and a valid Keycloak-issued JWT obtained with the client credentials flow. Then prove that each missing or wrong piece is rejected.",
+    "whyItMatters": "This is NICo's security model in miniature. Control-plane services prove their identity to each other with certificates from a shared CA (mTLS), and callers of NICo REST prove theirs with bearer JWTs whose `iss` must match exactly. When a real NICo connection fails, you'll recognise the symptoms: an unknown CA, a hostname missing from the SANs, a missing client cert, or a localhost-issued token.",
+    "setup": [
+      "Linux or macOS with bash or zsh (the commands work in both)",
+      "OpenSSL 1.1.1 or 3.x (`openssl version`; on macOS `brew install openssl@3` and put it first on PATH)",
+      "Python 3.9+ with `venv`",
+      "Docker or Podman (substitute `podman` for `docker` throughout)",
+      "curl and jq",
+      "About 1 GB of free RAM for the Keycloak container",
+      "Two terminal windows: terminal A for the client commands, terminal B for the server"
+    ],
+    "steps": [
+      {
+        "subgoal": "Build the PKI",
+        "detail": "In terminal A:\n```bash\nmkdir zt-lab && cd zt-lab\nopenssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\\n  -keyout ca.key -out ca.crt -days 30 -subj \"/CN=ZT Lab Root\" \\\n  -addext \"basicConstraints=critical,CA:TRUE\" -addext \"keyUsage=critical,keyCertSign,cRLSign\"\n\nopenssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\\n  -keyout server.key -out server.csr -subj \"/CN=api.lab.internal\"\nopenssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 7 \\\n  -extfile <(printf \"subjectAltName=DNS:api.lab.internal,DNS:localhost,IP:127.0.0.1\\nextendedKeyUsage=serverAuth\")\n\nopenssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\\n  -keyout client.key -out client.csr -subj \"/CN=site-agent\"\nopenssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out client.crt -days 7 \\\n  -extfile <(printf \"extendedKeyUsage=clientAuth\")\n\nopenssl verify -CAfile ca.crt server.crt client.crt\nopenssl x509 -in server.crt -noout -checkhost api.lab.internal\n```\nBoth certs should print `OK`, and the hostname should match."
+      },
+      {
+        "subgoal": "Run Keycloak and register a machine client with a high-entropy secret",
+        "detail": "Still in terminal A, inside `zt-lab`:\n```bash\ndocker run -d --name kc -p 8080:8080 \\\n  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \\\n  quay.io/keycloak/keycloak:26.0 start-dev\nuntil curl -sf http://localhost:8080/realms/master >/dev/null; do sleep 3; done\n\nCLIENT_SECRET=$(openssl rand -hex 32)   # 256 bits; hex avoids form-encoding issues with + and /\necho \"$CLIENT_SECRET\" > client_secret.txt\n\n# A shell function passes arguments correctly in both bash and zsh\nkcadm() { docker exec kc /opt/keycloak/bin/kcadm.sh \"$@\"; }\nkcadm config credentials --server http://localhost:8080 --realm master --user admin --password admin\nkcadm create realms -s realm=lab -s enabled=true\nkcadm create clients -r lab -s clientId=lab-svc -s secret=\"$CLIENT_SECRET\" \\\n  -s serviceAccountsEnabled=true -s publicClient=false -s standardFlowEnabled=false\n```\nEach `create` prints a `Created new ...` line. The admin/admin password is only for this throwaway lab."
+      },
+      {
+        "subgoal": "Get a token with the client credentials flow and inspect it",
+        "detail": "In terminal A:\n```bash\nTOKEN=$(curl -s -X POST http://localhost:8080/realms/lab/protocol/openid-connect/token \\\n  -d grant_type=client_credentials -d client_id=lab-svc -d client_secret=\"$(cat client_secret.txt)\" \\\n  | jq -r .access_token)\npython3 -c 'import sys,json,base64; p=sys.argv[1].split(\".\")[1]; c=json.loads(base64.urlsafe_b64decode(p+\"=\"*(-len(p)%4))); print(c[\"iss\"], c.get(\"azp\"), c[\"exp\"])' \"$TOKEN\"\n```\nExpect `http://localhost:8080/realms/lab lab-svc <timestamp>`. Tokens expire after about 5 minutes, so rerun this command when needed. `$TOKEN` exists only in terminal A, so run all later curl commands there."
+      },
+      {
+        "subgoal": "Write the mTLS + JWT server",
+        "detail": "In terminal A, inside `zt-lab`, create the virtual environment:\n```bash\npython3 -m venv .venv && .venv/bin/pip install \"pyjwt[crypto]\"\n```\nSave as `server.py` in `zt-lab`:\n```python\nimport json, ssl\nfrom http.server import HTTPServer, BaseHTTPRequestHandler\nimport jwt\n\nISSUER = \"http://localhost:8080/realms/lab\"\njwks = jwt.PyJWKClient(ISSUER + \"/protocol/openid-connect/certs\")\n\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        peer = self.connection.getpeercert()\n        cn = dict(x[0] for x in peer[\"subject\"])[\"commonName\"]\n        auth = self.headers.get(\"Authorization\", \"\")\n        if not auth.startswith(\"Bearer \"):\n            return self.reply(401, {\"error\": \"missing bearer token\", \"client_cert_cn\": cn})\n        token = auth[len(\"Bearer \"):]\n        try:\n            key = jwks.get_signing_key_from_jwt(token)\n            claims = jwt.decode(token, key.key, algorithms=[\"RS256\"], issuer=ISSUER,\n                                options={\"verify_aud\": False})\n        except jwt.PyJWTError as e:\n            return self.reply(401, {\"error\": str(e), \"client_cert_cn\": cn})\n        self.reply(200, {\"client_cert_cn\": cn, \"token_iss\": claims[\"iss\"], \"token_azp\": claims.get(\"azp\")})\n\n    def reply(self, code, body):\n        data = json.dumps(body).encode()\n        self.send_response(code)\n        self.send_header(\"Content-Type\", \"application/json\")\n        self.send_header(\"Content-Length\", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\nctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\nctx.load_cert_chain(\"server.crt\", \"server.key\")\nctx.load_verify_locations(\"ca.crt\")\nctx.verify_mode = ssl.CERT_REQUIRED\nsrv = HTTPServer((\"127.0.0.1\", 8443), Handler)\nsrv.socket = ctx.wrap_socket(srv.socket, server_side=True)\nprint(\"listening on https://127.0.0.1:8443\")\nsrv.serve_forever()\n```\nNow open terminal B. It starts in your home directory with no virtual environment, so change into the lab and run the server with the venv's own Python:\n```bash\ncd zt-lab            # use the full path if you created zt-lab somewhere else\n.venv/bin/python server.py\n```\n(Equivalently: `. .venv/bin/activate` then `python3 server.py`.) Leave it running and switch back to terminal A. Audience checking is off because Keycloak's default client-credentials tokens don't carry a custom `aud`. Instead the response reports `azp`. A production API would require a specific audience, as nico-rest-api's `issuers[].audience` does."
+      },
+      {
+        "subgoal": "Make a fully authenticated call",
+        "detail": "In terminal A (where `$TOKEN` is set):\n```bash\ncurl -s --resolve api.lab.internal:8443:127.0.0.1 --cacert ca.crt \\\n  --cert client.crt --key client.key \\\n  -H \"Authorization: Bearer $TOKEN\" https://api.lab.internal:8443/whoami | jq .\n```\n`--resolve` stands in for a DNS record. curl checks both the chain and the name `api.lab.internal` against the SAN."
+      },
+      {
+        "subgoal": "Prove each control rejects bad input",
+        "detail": "In terminal A, run each and note the failure:\n```bash\n# 1. No client cert: TLS handshake fails\ncurl -s --resolve api.lab.internal:8443:127.0.0.1 --cacert ca.crt https://api.lab.internal:8443/ ; echo \"exit=$?\"\n# 2. Name not in SANs: hostname verification fails\ncurl -s --resolve wrong.lab.internal:8443:127.0.0.1 --cacert ca.crt --cert client.crt --key client.key https://wrong.lab.internal:8443/ ; echo \"exit=$?\"\n# 3. Token issued via a different hostname: iss mismatch -> 401\nBADTOKEN=$(curl -s -X POST http://127.0.0.1:8080/realms/lab/protocol/openid-connect/token \\\n  -d grant_type=client_credentials -d client_id=lab-svc -d client_secret=\"$(cat client_secret.txt)\" | jq -r .access_token)\ncurl -s --resolve api.lab.internal:8443:127.0.0.1 --cacert ca.crt --cert client.crt --key client.key \\\n  -H \"Authorization: Bearer $BADTOKEN\" https://api.lab.internal:8443/ ; echo\n```\nCase 3 is the NICo port-forward trap: same Keycloak, valid signature, but `iss` says `127.0.0.1` instead of `localhost`."
+      }
+    ],
+    "verify": "In terminal A, with a fresh token, `curl -s --resolve api.lab.internal:8443:127.0.0.1 --cacert ca.crt --cert client.crt --key client.key -H \"Authorization: Bearer $TOKEN\" https://api.lab.internal:8443/whoami` returns `{\"client_cert_cn\": \"site-agent\", \"token_iss\": \"http://localhost:8080/realms/lab\", \"token_azp\": \"lab-svc\"}`. The three negative tests fail as described: (1) curl exits non-zero with a TLS alert, (2) curl exits non-zero with a certificate name mismatch, (3) the server returns HTTP 401 with an `Invalid issuer` error.",
+    "hints": [
+      "`unable to get local issuer certificate` or `unknown ca`: you passed the wrong file to `--cacert`, or regenerated `ca.crt` without re-signing the leaf certs. Rerun the whole PKI step.",
+      "`ModuleNotFoundError: No module named 'jwt'` when starting the server: you ran the system `python3` instead of the venv's. In terminal B, `cd zt-lab` and use `.venv/bin/python server.py`.",
+      "`FileNotFoundError` for `server.crt`: terminal B isn't in `zt-lab`. The server loads its certs from the current directory.",
+      "`kcadm: command not found` or `zsh: command not found: docker exec ...`: define the `kcadm` function in the same terminal before using it. Don't store the command in a plain variable, because zsh doesn't split it into words.",
+      "`Signature has expired` from the server: Keycloak tokens live about 5 minutes. Fetch a new `$TOKEN` in terminal A.",
+      "`-addext` or `<(...)` errors: use OpenSSL 1.1.1+ (not old LibreSSL) and run in bash or zsh, which support process substitution. In plain `sh`, write the extension text to a file and pass `-extfile ext.cnf`.",
+      "Keycloak not ready: the `until curl` loop can take 30–90 s on first start. If `kcadm config credentials` fails, wait and retry. `docker logs kc 2>&1 | tail` shows startup progress.",
+      "`Address already in use` on 8080 or 8443: stop the other process or change the ports in both the commands and `server.py`.",
+      "For rejected TLS handshakes (tests 1 and 2), the server usually prints nothing, or at most an SSL error, and keeps running. The handshake fails while the connection is being accepted, so the client never reaches `do_GET`. The evidence is on the curl side."
+    ],
+    "stretch": "Replace the openssl PKI with cert-manager. In a `kind` cluster, create a self-signed ClusterIssuer, a CA Certificate and a CA ClusterIssuer (as in the cert-manager lesson), and issue `server` and `client` Certificates with the right SANs and `usages` (`server auth` / `client auth`). Export `tls.crt`, `tls.key` and `ca.crt` from the Secrets, point `server.py` and curl at them, and confirm the same verify command passes. Then give the server cert `duration: 1h` and `renewBefore: 55m`, wait for renewal, and observe that the running Python server keeps serving the old certificate until you restart it."
+  }
+}

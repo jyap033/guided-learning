@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "token-delegation",
+        "severity": "major",
+        "problem": "The worked example says, as a fact about NICo, that the workload's NICo-signed JWT 'is the subject_token' and that 'NICo sends the call through the egress proxy'. The independent-problem answer repeats this ('NICo's outbound token calls (which carry subject tokens)'). The docs pages only say that per-org settings include token delegation, that `token_endpoint_http_proxy` is an egress proxy 'for token delegation (RFC 8693)', and that `token_endpoint_domain_allowlist` restricts delegation `token_endpoint` hosts. They never say which token NICo sends as `subject_token`, or which component makes the exchange request.",
+        "fix": "Hedge these statements. For example: 'In a typical RFC 8693 delegation the NICo-issued JWT would be the subject token; see the Day 1 machine identity guide for exactly what NICo sends.' Also say that the docs describe only the proxy and allowlist guard rails. Or cite the Day 1 page if it confirms these details."
+      },
+      {
+        "where": "mtls-grpc",
+        "severity": "minor",
+        "problem": "The lesson says `core-grpc-client-site-agent-certs` is 'the client certificate the site agent uses to call Core over gRPC'. The docs only list this Certificate in the overall health check. Its role is a guess from its name.",
+        "fix": "Rephrase to something like 'the health check confirms the Certificate `core-grpc-client-site-agent-certs` in `nico-rest`. As its name suggests, it is the site agent's gRPC client certificate for Core.' Or cite a source that states its role."
+      }
+    ]
+  }
+}

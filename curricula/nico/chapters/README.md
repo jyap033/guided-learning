@@ -1,6 +1,6 @@
 # NVIDIA NICo (NVIDIA Infra Controller): lessons
 
-18 of 49 chapters written. The full plan is in [curriculum.md](../curriculum.md) and the overview in [mindmap.md](../mindmap.md).
+21 of 49 chapters written. The full plan is in [curriculum.md](../curriculum.md) and the overview in [mindmap.md](../mindmap.md).
 
 1. [Hardware Basics · Data & Formats](01-hardware-basics-data-formats.md) (10 concepts) · *Foundations*
 2. [Software & Linux Basics](02-software-linux-basics.md) (6 concepts) · *Foundations*
@@ -20,3 +20,6 @@
 16. [Scale & Sizing](16-scale-sizing.md) (7 concepts) · *Kubernetes & Deployment*
 17. [Helm & GitOps · Installation & Setup](17-helm-gitops-installation-setup.md) (7 concepts) · *Kubernetes & Deployment*
 18. [Cryptography](18-cryptography.md) (6 concepts) · *Security & Identity*
+19. [PKI & Certificates · Authentication & Identity](19-pki-certificates-authentication-identity.md) (8 concepts) · *Security & Identity*
+20. [Credentials & Secrets · Security & Identity](20-credentials-secrets-security-identity.md) (6 concepts) · *Security & Identity*
+21. [Authentication & Identity](21-authentication-identity.md) (5 concepts) · *Security & Identity*

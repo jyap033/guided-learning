@@ -1,0 +1,28 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "minor-issues",
+    "issues": [
+      {
+        "where": "external-secrets-operator",
+        "severity": "minor",
+        "problem": "The lesson says the architecture overview \"describes ESO in general terms, as syncing secrets into NICo namespaces.\" The overview actually says ESO \"syncs secrets from Vault into Kubernetes Secret objects.\" That contradicts the software prerequisites page, and the lesson's check question depends on the software page's version (\"it does not read Vault\"). A learner who reads the cited overview will find an unexplained conflict.",
+        "fix": "Say plainly that the overview describes ESO as syncing from Vault, and that the software prerequisites page is more specific about the reference install: there, ESO reads Kubernetes Secrets in cert-manager and postgres, not Vault."
+      },
+      {
+        "where": "external-secrets-operator",
+        "severity": "minor",
+        "problem": "Two statements sit side by side without explanation: \"ESO comes first in the foundation-services install order\" and \"setup.sh installs it in phase 5.\" Phase 5 comes after cert-manager (phase 2) and Vault (phase 3). The docs also mark ESO as optional in that order. Learners may read the two as contradicting each other.",
+        "fix": "Note that the prerequisites page lists ESO (optional) first in its suggested manual order, while setup.sh installs external-secrets in phase 5, after cert-manager and Vault have created the source Secrets it copies."
+      },
+      {
+        "where": "kmip-kek-provider",
+        "severity": "minor",
+        "problem": "\"Set NICO_KMIP_CLIENT_DIR to a directory holding exactly those three files\" goes further than the docs. The docs only say the directory holds ca.pem, client.pem and client.key. They don't say other files are forbidden.",
+        "fix": "Change \"exactly those three files\" to \"those three files (ca.pem, client.pem, client.key)\", or cite the helm-prereqs README if it really does require exactly three."
+      }
+    ]
+  }
+}

@@ -1,0 +1,581 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Earlier chapters covered how NICo talks to hardware (BMCs over Redfish, Chapter 6), how Kubernetes stores Secrets (Chapter 14), and how certificates and public-key signatures establish trust (Chapters 18–19). This chapter puts those pieces together around one question: **how does NICo hold the keys to thousands of machines, and how does it know those machines can be trusted?**\n\nThe first half is about secrets. You'll meet HashiCorp Vault, NICo's default secrets manager, and its Postgres-only alternative. Then you'll follow the most important credential on a site, the site-wide BMC root password: where it lives, how carbide-api copies it into the `bmc-shared-password` Secret for DPF, and why nothing happens to DPUs until it is set. After that come the factory-default passwords NICo needs for its first login to new hardware, and the reason rotating the BMC password is risky on a DPF site today.\n\nThe second half is about hardware identity. TPM-based measured boot shows that a host booted the software you expected. SPDM does the same for individual components such as GPUs and NICs, and NICo triggers it through Redfish `ComponentIntegrity`. Both build on what you already know about hashes, signatures and CA chains.\n\nEverything here is about access to the machines themselves. Get it wrong and NICo either can't log into hardware at all, or locks itself out halfway through a change. The lab at the end has you simulate both failure modes on a laptop.",
+    "objectives": [
+      "Explain what Vault's KV and PKI engines do for NICo, and what changes when a site is installed with `--skip-vault`",
+      "Trace the site-wide BMC root credential from where it is stored to the `bmc-shared-password` Secret, and name the three ways to set it",
+      "Plan how factory-default BMC and UEFI credentials reach NICo on Vault-backed and Postgres-only sites",
+      "Explain why BMC credential rotation must not be staged while DPF v26.4.0 manages any DPU",
+      "Compute and check a simulated PCR measurement chain, and describe what a TPM quote proves",
+      "Describe the SPDM evidence flow and the Redfish ComponentIntegrity endpoints NICo uses to trigger it"
+    ],
+    "lessons": [
+      {
+        "concept": "hashicorp-vault",
+        "prequestions": [
+          {
+            "question": "If you had to store 10,000 BMC passwords for a running service, why might a plain Kubernetes Secret or a database column not be enough?",
+            "answer": "Kubernetes Secrets are only base64-encoded by default and have no version history. A plain column is readable by anyone with database access. A secrets manager adds encryption at rest, access policies per caller, audit logs and version history."
+          },
+          {
+            "question": "Guess: can NICo run without Vault at all?",
+            "answer": "Yes. Vault is the default, but a site installed with `setup.sh --skip-vault` keeps credentials in Postgres, with each credential encrypted, and issues service certificates from a different cert-manager issuer."
+          }
+        ],
+        "explanation": "**HashiCorp Vault** is a server whose only job is holding secrets and handing them out to callers that prove who they are. It is organised into **secrets engines**, which are plug-ins mounted at paths. NICo uses two:\n\n- **KV (key/value) engine.** Stores small secrets such as BMC and UEFI passwords under paths like `/machines/bmc/site/root`. The KV v2 flavour keeps **versions**, so you can read the current value or an older one.\n- **PKI engine.** A certificate authority (CA) inside Vault. When cert-manager (Chapter 19) needs a certificate, a `ClusterIssuer` named `vault-nico-issuer` asks Vault's PKI engine to sign it. With the chart defaults, the machine and UFM certificates that `nico-api` requests also come from Vault.\n\n**Kubernetes auth** is how a pod logs in to Vault without a hard-coded password. The pod sends its ServiceAccount token. Vault asks the Kubernetes API whether that token is genuine, maps the ServiceAccount to a Vault *role*, and returns a short-lived Vault token limited by a *policy*. Identity comes from where the workload runs, not from a secret baked into a config file.\n\n**Vault is optional.** You can choose the credential store at Day 0:\n\n| Install | Credentials live in | Service certs issued by |\n|---|---|---|\n| Default | Vault KV | `vault-nico-issuer` (Vault PKI) |\n| `setup.sh --skip-vault` | Postgres, encrypted per credential | `site-issuer` ClusterIssuer |\n\nThe Postgres store uses envelope encryption, which you saw in Chapter 18. Each credential gets its own data key, and every data key is wrapped by a **KEK** (key encryption key) that is held, for example, in a Kubernetes Secret. You configure it in the `[secrets]` section of the nico-api site config (`backends`, `writer`, `[secrets.kms]`, `[secrets.routing]`). A site can also keep Vault installed for certificates while moving credentials to Postgres. In that case the Vault connection settings in the `nico-api` chart are still required.\n\nOne operational rule follows directly: **back up the KEK.** A Postgres dump can't be decrypted without it, and losing the Integrated KEK loses every stored credential.",
+        "analogy": "Vault is like a hotel front desk that keeps a key safe (KV) and also cuts new keycards (PKI). Guests prove who they are with their room booking (Kubernetes auth) rather than a password they carry around. The analogy breaks down because a real front desk forgets old keys, while Vault KV v2 deliberately keeps every version so you can go back.",
+        "workedExample": {
+          "title": "Run Vault locally and use its KV and PKI engines",
+          "steps": [
+            {
+              "subgoal": "Start a dev-mode Vault",
+              "detail": "Dev mode keeps everything in memory, starts already unsealed, and has a known root token. It's for labs only.\n```bash\ndocker run -d --name vault-lab --cap-add=IPC_LOCK -p 8200:8200 \\\n  -e VAULT_DEV_ROOT_TOKEN_ID=root \\\n  -e VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \\\n  hashicorp/vault:1.17\nv() { docker exec -i -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=root vault-lab vault \"$@\"; }\nv status   # Sealed: false\n```"
+            },
+            {
+              "subgoal": "Write two versions of a secret",
+              "detail": "Dev mode mounts KV v2 at `secret/`.\n```bash\nv kv put secret/lab/bmc/site/root username=admin password=first\nv kv put secret/lab/bmc/site/root username=admin password=second\nv kv metadata get secret/lab/bmc/site/root | grep current_version   # 2\n```"
+            },
+            {
+              "subgoal": "Read current and old versions",
+              "detail": "```bash\nv kv get -field=password secret/lab/bmc/site/root              # second\nv kv get -version=1 -field=password secret/lab/bmc/site/root   # first\n```\nServices normally use the HTTP API instead of the CLI:\n```bash\ncurl -s -H 'X-Vault-Token: root' http://127.0.0.1:8200/v1/secret/data/lab/bmc/site/root\n```"
+            },
+            {
+              "subgoal": "Issue a certificate from the PKI engine",
+              "detail": "```bash\nv secrets enable pki\nv write pki/root/generate/internal common_name=lab.local ttl=24h\nv write pki/roles/lab allowed_domains=lab.local allow_subdomains=true max_ttl=1h\nv write pki/issue/lab common_name=api.lab.local\n```\nThe output contains `certificate`, `issuing_ca` and `private_key`. This is the same job `vault-nico-issuer` does for cert-manager in a NICo cluster."
+            },
+            {
+              "subgoal": "Clean up",
+              "detail": "`docker rm -f vault-lab`. Dev mode is in-memory, so everything is gone. That's another reason it is never used in production."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so the first command prints the *original* password stored at `secret/lab/bmc/site/root` after two writes, and the second prints which version is current.",
+          "partialSolution": "v kv get -version=___ -field=password secret/lab/bmc/site/root\nv kv ___ get secret/lab/bmc/site/root | grep current_version",
+          "answer": "First blank: `1` (KV v2 numbers versions from 1). Second blank: `metadata`, giving `v kv metadata get secret/lab/bmc/site/root`."
+        },
+        "independentProblem": {
+          "prompt": "A colleague installs a new site with `setup.sh --skip-vault`. Answer three questions: (a) where do BMC and UEFI passwords live, (b) which ClusterIssuer issues the Core service certificates, and (c) what single object must be backed up so that a database dump can still be decrypted?",
+          "hints": [
+            "Look at the Day 0 table: what replaces Vault KV?",
+            "The Postgres store uses envelope encryption. What wraps the per-credential data keys?",
+            "Certificates no longer come from `vault-nico-issuer`. The replacement issuer's name starts with `site-`."
+          ],
+          "answer": "(a) In Postgres, with each credential encrypted. (b) The `site-issuer` ClusterIssuer, which issues the Core, RMS, Flow and site-agent service certificates. (c) The KEK Secret (for example `nico-secrets-kek` in `nico-system`). Without every KEK that its rows reference, the dump can't be read. Note that the Transit KEK provider isn't available on a `--skip-vault` site."
+        },
+        "selfExplanation": "Why is it safer for a NICo pod to log in to Vault with its Kubernetes ServiceAccount token than with a Vault token stored in its config?",
+        "checks": [
+          {
+            "question": "Which Vault engine does cert-manager's `vault-nico-issuer` use?",
+            "options": [
+              "KV v2",
+              "PKI",
+              "Transit",
+              "Kubernetes auth"
+            ],
+            "answer": "PKI",
+            "explanation": "The PKI engine is a CA that signs certificates. KV stores passwords. Transit can hold a KEK, but it doesn't issue certificates. Kubernetes auth is a login method, not an engine that produces anything."
+          },
+          {
+            "question": "A site keeps Vault installed but moves credentials to Postgres (`backends = [\"postgres\"]`). Are the Vault connection settings in the nico-api chart still needed?",
+            "options": [
+              "No, Vault is now unused",
+              "Yes, Vault still issues certificates through `vault-nico-issuer`",
+              "Only if `import_from` is set"
+            ],
+            "answer": "Yes, Vault still issues certificates through `vault-nico-issuer`",
+            "explanation": "Moving the credential store doesn't move certificate issuance. Only a `--skip-vault` install takes Vault out entirely."
+          },
+          {
+            "question": "What happens to stored credentials if the Integrated KEK is lost and there is no backup?",
+            "options": [
+              "NICo regenerates the KEK at startup",
+              "Vault decrypts them instead",
+              "They are unrecoverable",
+              "Postgres can still read them with superuser access"
+            ],
+            "answer": "They are unrecoverable",
+            "explanation": "Each data key is wrapped by the KEK, so without it the data keys and the credentials they protect can't be decrypted. Database privileges don't help, because the stored rows are ciphertext."
+          }
+        ],
+        "sources": [
+          "getting-started/installation-options/day0-credential-store.md",
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "concept": "site-wide-bmc-root-credential",
+        "prequestions": [
+          {
+            "question": "NICo manages thousands of BMCs. Would you give each one a unique password or one shared password? What's the trade-off?",
+            "answer": "NICo applies one site-wide BMC root credential. It is simpler to manage and lets other systems such as DPF reach every BMC with a single Secret. The cost is a large blast radius if it leaks, and rotation has to be coordinated across the whole fleet."
+          },
+          {
+            "question": "If that shared password is missing on a fresh site, what do you think NICo does: crash, wait, or carry on with something else?",
+            "answer": "In `local_first` or `backend` mode it starts anyway, logs a warning, leaves `bmc-shared-password` unwritten and blocks new DPU registration until the credential appears. Authoritative `local` mode with DPF enabled instead requires the local version 0 before Core starts (when v0 is current or the current target can't be resolved)."
+          }
+        ],
+        "explanation": "The **site-wide BMC root credential** is the shared BMC password NICo applies to the hardware it manages. Once a machine is onboarded, its BMC answers to this password instead of the factory default.\n\nDPF (DPU provisioning) talks Redfish to host BMCs, so it needs the password too. NICo doesn't give DPF access to its credential store. Instead, **carbide-api copies the current version into a Kubernetes Secret named `bmc-shared-password` in `dpf-operator-system`, refreshing it every 60 seconds.** Because of the refresh, a credential that is missing at startup reaches DPF later without a restart.\n\nThe consequences of a missing credential:\n- New **DPU registration is blocked** and DPU provisioning can't proceed.\n- **Site Explorer** doesn't run. It needs this credential *plus* the host and DPU UEFI site defaults, and it fails each iteration with `MissingCredentials` until all three exist.\n- Once a value has been published, a later read failure leaves the last value in place and logs an error.\n\n**Credential source modes** decide who is authoritative for version 0 (v0) of the BMC root:\n- `backend`: the persistent store (Vault or Postgres).\n- `local_first`: a local file or environment value if one is present, otherwise the backend.\n- `local`: only the local source. API add/delete for v0 is rejected, and with DPF enabled, v0 must exist before Core starts (when v0 is current or the current target can't be resolved).\n\n**Three ways to set it:**\n1. `setup.sh` with `NICO_DPF_BMC_ROOT_PASSWORD` exported. This creates `nico-system/nico-bmc-v0-credentials` (username `admin`) and selects `local` ownership.\n2. A watched credential-file Secret containing `bmc_site_wide_root`, mounted through the `nico-api` chart **before** Core is deployed. Don't use a ConfigMap.\n3. The API (`nico-admin-cli -a <api> credential add-bmc --kind=site-wide-root --password='...'`), or seeding the store directly, in `backend` mode or `local_first` without a local override.\n\nThe CLI path puts the password in shell history and in the process list, so prefer seeding with `read -rs`.",
+        "analogy": "Think of a building manager who keeps the master key and, every minute, puts a fresh copy into a lockbox for the cleaning contractor (DPF). If the master key hasn't been cut yet, the lockbox stays empty and the contractor can't start new floors, but the rest of the building runs. The analogy breaks down at rotation: in a real building a new master key doesn't make old locks change themselves, and that is exactly the gap that causes trouble in the rotation lesson.",
+        "workedExample": {
+          "title": "Bring a fresh site from MissingCredentials to a published shared Secret",
+          "steps": [
+            {
+              "subgoal": "Recognise the symptom",
+              "detail": "On a new `backend`-mode site, carbide-api logs a warning about the missing BMC root, and Site Explorer reports `MissingCredentials`. Confirm the derived Secret isn't there yet:\n```bash\nkubectl -n dpf-operator-system get secret bmc-shared-password\n# Error from server (NotFound)\n```"
+            },
+            {
+              "subgoal": "Seed the credential without leaking it",
+              "detail": "For a Vault-backed site, this is the docs' seeding path:\n```bash\nread -rs -p 'Site-wide BMC root password: ' BMC_ROOT_PASSWORD && echo\nprintf '{\"UsernamePassword\":{\"username\":\"root\",\"password\":\"%s\"}}' \\\n  \"${BMC_ROOT_PASSWORD}\" \\\n  | vault kv put /machines/bmc/site/root -\nunset BMC_ROOT_PASSWORD\n```\n`read -rs` hides typing and keeps the value out of history. `printf` is a shell builtin, so the password never appears in a process argument list."
+            },
+            {
+              "subgoal": "Wait one refresh tick",
+              "detail": "Within about 60 seconds carbide-api picks up the credential and writes the Secret. No restart is needed.\n```bash\nkubectl -n dpf-operator-system get secret bmc-shared-password\n```"
+            },
+            {
+              "subgoal": "Finish the other prerequisites",
+              "detail": "Site Explorer also needs the host and DPU UEFI site defaults. Until all three credentials exist it keeps failing with `MissingCredentials`, even though the BMC root is now set."
+            },
+            {
+              "subgoal": "Simulate the refresh loop locally",
+              "detail": "You can watch the same pattern on a laptop with a file standing in for the source and another standing in for the Secret:\n```bash\nwhile true; do\n  if [ -f source.txt ]; then cp source.txt shared.txt; echo published; else echo 'WARN: missing, shared unwritten'; fi\n  sleep 5\ndone\n# in another terminal, after a few warnings:\necho s3cret > source.txt\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the leak-free seeding snippet. One blank makes `read` silent and stops it mangling backslashes. The other tells `vault kv put` to read its data from stdin.",
+          "partialSolution": "read -___ -p 'Site-wide BMC root password: ' BMC_ROOT_PASSWORD && echo\nprintf '{\"UsernamePassword\":{\"username\":\"root\",\"password\":\"%s\"}}' \\\n  \"${BMC_ROOT_PASSWORD}\" \\\n  | vault kv put /machines/bmc/site/root ___\nunset BMC_ROOT_PASSWORD",
+          "answer": "`rs` (giving `read -rs`) and `-` (giving `vault kv put /machines/bmc/site/root -`)."
+        },
+        "independentProblem": {
+          "prompt": "A site was installed with `NICO_DPF_BMC_ROOT_PASSWORD` set. An operator later runs `nico-admin-cli -a <api> credential add-bmc --kind=site-wide-root --password='newpass'` and it is rejected. Explain why, and say what they should change instead (assuming no managed device is using v0 yet).",
+          "hints": [
+            "Which credential source mode does the setup.sh path select?",
+            "In that mode, who owns version 0, and what happens to API add/delete calls for v0?",
+            "Where does the setup.sh path store v0, and what is its Secret name?"
+          ],
+          "answer": "The setup.sh path selects authoritative `local` ownership. In `local` mode, v0 comes only from the local source, and API add/delete for v0 is rejected with instructions to update that source. If no device is using v0 yet, they would correct the local source. Note that setup.sh itself refuses to replace `nico-system/nico-bmc-v0-credentials` with a different value, so a different v0 means updating a watched credential-file Secret they manage themselves. If devices already use v0, it must stay unchanged, and moving to a new password is a coordinated rotation to v1 or later (not on DPF sites today)."
+        },
+        "selfExplanation": "Why does carbide-api copy the credential into a separate `bmc-shared-password` Secret every 60 seconds instead of giving DPF direct access to Vault or Postgres?",
+        "checks": [
+          {
+            "question": "Where does carbide-api publish the BMC root for DPF?",
+            "options": [
+              "Vault path `/machines/bmc/site/root`",
+              "Secret `bmc-shared-password` in `dpf-operator-system`",
+              "ConfigMap `carbide-api-site-config-files`",
+              "Secret `hbn-user-password`"
+            ],
+            "answer": "Secret `bmc-shared-password` in `dpf-operator-system`",
+            "explanation": "The Vault path is one possible *source*, not what DPF reads. `hbn-user-password` is the HBN local credential. Credentials should never be put in a ConfigMap."
+          },
+          {
+            "question": "In `backend` mode, the BMC root is added an hour after carbide-api starts. What happens?",
+            "options": [
+              "Nothing until carbide-api is restarted",
+              "The next 60-second refresh writes `bmc-shared-password` and DPU registration can proceed",
+              "carbide-api crashes and restarts in a loop"
+            ],
+            "answer": "The next 60-second refresh writes `bmc-shared-password` and DPU registration can proceed",
+            "explanation": "The refresh exists so that a bootstrap credential added late propagates without a restart. Only authoritative `local` mode refuses to start without v0, and only under specific conditions."
+          },
+          {
+            "question": "Site Explorer still reports `MissingCredentials` after you set the BMC root. What is the most likely cause?",
+            "options": [
+              "The KEK is missing",
+              "The host and DPU UEFI site defaults aren't set",
+              "DPF isn't installed"
+            ],
+            "answer": "The host and DPU UEFI site defaults aren't set",
+            "explanation": "Site Explorer needs all three credentials: the BMC root and both UEFI site defaults."
+          }
+        ],
+        "sources": [
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "concept": "factory-default-credentials",
+        "prequestions": [
+          {
+            "question": "A brand-new server arrives with a BMC that NICo has never seen. What password can NICo possibly use for its first login?",
+            "answer": "The vendor's factory default, for example a well-known default or a per-unit password printed on a label. NICo has to be told these factory-default BMC (and UEFI) credentials before it can onboard the hardware."
+          }
+        ],
+        "explanation": "**Factory default credentials** are the BMC and UEFI passwords that hardware ships with. NICo needs them for exactly one thing: the *first* login to new hardware, after which it moves the device to the site-wide credential. A BMC's account password is changed through Redfish `PATCH /redfish/v1/AccountService/Accounts/{id}`. A UEFI password is managed through `POST /redfish/v1/Systems/{id}/Bios/Actions/Bios.ChangePassword`. The account `Id` varies by vendor: Lenovo uses `1`, AMI/Viking use `2`, and NVIDIA uses the current user.\n\nNICo keeps separate defaults for hosts and for DPUs. There are three ways to get them into NICo, and which one you use depends on your credential store:\n\n1. **Seed into Vault.** `helm-prereqs` writes entries such as the DPU BMC factory defaults into Vault KV through the `vault.kvSeeds` value. This works when Vault is the credential backend.\n2. **Import once into Postgres.** If you choose `backends = [\"postgres\"]`, Vault seeds are never read. To carry them over, list `vault` after `postgres` in `backends` and set `import_from = \"vault\"` for the first boot. When the log shows `Vault secret import completed`, remove `vault` from `backends` and drop `import_from`.\n3. **Add through the CLI.** Set `vault.kvSeeds: []` (or install with `--skip-vault`, where there are no seeds at all) and, once the API is up, run `nico-admin-cli credential add-dpu-factory-default` and `nico-admin-cli credential add-host-factory-default`. Check `--help` for each command's flags.\n\nOn a `--skip-vault` site you also set `siteCredentials.enabled: true`. This renders the site-wide BMC root and UEFI defaults as a credential-file Secret, and you point `nico-api.credentials.file.existingSecret` at it. Factory defaults still go in through the CLI.\n\nTreat factory defaults as public knowledge. Vendors document them, so a device should spend as little time as possible still using one.",
+        "analogy": "Factory defaults are like the temporary PIN a bank mails with a new card: you use it once to get in, then set your own. It breaks down because a bank PIN is unique to you, whereas many BMC defaults are the same across a whole product line, which makes them far more dangerous to leave in place.",
+        "workedExample": {
+          "title": "First login with a factory default, then switch to the site credential (mock BMC)",
+          "steps": [
+            {
+              "subgoal": "Write a tiny mock BMC",
+              "detail": "Save as `mock_bmc.py`:\n```python\nimport base64, json, sys\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n\nPORT = int(sys.argv[1])\nSTATE = {\"user\": \"admin\", \"password\": sys.argv[2]}\nPATH = \"/redfish/v1/AccountService/Accounts/2\"\n\nclass H(BaseHTTPRequestHandler):\n    def _authed(self):\n        hdr = self.headers.get(\"Authorization\", \"\")\n        if not hdr.startswith(\"Basic \"):\n            return False\n        user, _, pw = base64.b64decode(hdr[6:]).decode().partition(\":\")\n        return user == STATE[\"user\"] and pw == STATE[\"password\"]\n\n    def _send(self, code, body):\n        data = json.dumps(body).encode()\n        self.send_response(code)\n        self.send_header(\"Content-Type\", \"application/json\")\n        self.send_header(\"Content-Length\", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\n    def do_GET(self):\n        if not self._authed():\n            return self._send(401, {\"error\": \"bad credentials\"})\n        if self.path == PATH:\n            return self._send(200, {\"Id\": \"2\", \"UserName\": STATE[\"user\"], \"RoleId\": \"Administrator\"})\n        self._send(404, {\"error\": \"not found\"})\n\n    def do_PATCH(self):\n        if not self._authed():\n            return self._send(401, {\"error\": \"bad credentials\"})\n        if self.path != PATH:\n            return self._send(404, {\"error\": \"not found\"})\n        length = int(self.headers.get(\"Content-Length\", 0))\n        body = json.loads(self.rfile.read(length) or b\"{}\")\n        if \"Password\" in body:\n            STATE[\"password\"] = body[\"Password\"]\n        self._send(200, {\"Id\": \"2\", \"UserName\": STATE[\"user\"]})\n\nHTTPServer((\"127.0.0.1\", PORT), H).serve_forever()\n```\nReal BMCs serve HTTPS. Plain HTTP keeps this lab simple."
+            },
+            {
+              "subgoal": "Start it with a factory default",
+              "detail": "```bash\npython3 mock_bmc.py 8001 factory-pass 2>/dev/null &\ncurl -s -o /dev/null -w '%{http_code}\\n' -u admin:factory-pass http://127.0.0.1:8001/redfish/v1/AccountService/Accounts/2   # 200\n```"
+            },
+            {
+              "subgoal": "Use the default once to set the site password",
+              "detail": "```bash\ncurl -s -u admin:factory-pass -X PATCH -H 'Content-Type: application/json' \\\n  -d '{\"Password\":\"site-root-v0\"}' http://127.0.0.1:8001/redfish/v1/AccountService/Accounts/2\n```"
+            },
+            {
+              "subgoal": "Confirm the default no longer works",
+              "detail": "```bash\ncurl -s -o /dev/null -w '%{http_code}\\n' -u admin:factory-pass  http://127.0.0.1:8001/redfish/v1/AccountService/Accounts/2   # 401\ncurl -s -o /dev/null -w '%{http_code}\\n' -u admin:site-root-v0 http://127.0.0.1:8001/redfish/v1/AccountService/Accounts/2   # 200\nkill %1\n```"
+            },
+            {
+              "subgoal": "Map this to NICo's choices",
+              "detail": "In NICo you don't type these curls yourself. You provide the factory default through Vault seeds, a one-time import, or `nico-admin-cli credential add-host-factory-default` / `add-dpu-factory-default`, and NICo performs the login."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "A Vault-backed site with `helm-prereqs` seeds is moving to Postgres at Day 0 and wants the seeded factory defaults imported on first boot. Fill in the blanks in the `[secrets]` section (the KMS and routing tables stay as on the Day 0 page).",
+          "partialSolution": "[secrets]\nbackends = [\"postgres\", \"___\"]\nwriter = \"postgres\"\nimport_from = \"___\"",
+          "answer": "Both blanks are `vault`: `backends = [\"postgres\", \"vault\"]` and `import_from = \"vault\"`. After the log shows `Vault secret import completed`, remove `vault` from `backends` and delete `import_from`."
+        },
+        "independentProblem": {
+          "prompt": "You're bringing up a `--skip-vault` site with new hosts and BlueField DPUs. List, in order, what you configure so that NICo has (a) the site-wide BMC root and UEFI defaults and (b) the host and DPU factory defaults.",
+          "hints": [
+            "With `--skip-vault` there are no `vault.kvSeeds` and nothing to import.",
+            "A `helm-prereqs` value renders a credential-file Secret, and a `nico-api` value points at it.",
+            "The factory defaults go in after the API is running, using two `credential add-*` subcommands."
+          ],
+          "answer": "1) In the `helm-prereqs` values, set `siteCredentials.enabled: true`, which renders the site-wide BMC root and UEFI defaults as a credential-file Secret. 2) Point `nico-api.credentials.file.existingSecret` at that Secret and deploy. 3) Once the API is up, run `nico-admin-cli credential add-host-factory-default` and `nico-admin-cli credential add-dpu-factory-default` with the vendor values."
+        },
+        "selfExplanation": "Why does NICo need factory defaults at all if it immediately replaces them with the site-wide credential?",
+        "checks": [
+          {
+            "question": "A site sets `backends = [\"postgres\"]` and leaves `vault.kvSeeds` at its default. What happens to the seeded factory defaults?",
+            "options": [
+              "They are read from Vault automatically",
+              "They are never read",
+              "They are copied to Postgres on every boot"
+            ],
+            "answer": "They are never read",
+            "explanation": "With Postgres as the only backend, Vault seeds are ignored. You either import them once with `import_from = \"vault\"` or add the credentials through the CLI."
+          },
+          {
+            "question": "Which Redfish call changes a BMC account password?",
+            "options": [
+              "POST /redfish/v1/Systems/{id}/Bios/Actions/Bios.ChangePassword",
+              "PATCH /redfish/v1/AccountService/Accounts/{id}",
+              "POST /redfish/v1/Managers/{id}/Actions/Manager.ResetToDefaults"
+            ],
+            "answer": "PATCH /redfish/v1/AccountService/Accounts/{id}",
+            "explanation": "`Bios.ChangePassword` manages the UEFI password, not the BMC login. `ResetToDefaults` factory-resets the BMC, which would put the factory default back."
+          }
+        ],
+        "sources": [
+          "getting-started/installation-options/day0-credential-store.md",
+          "architecture/redfish/endpoints_reference.md",
+          "manuals/dpf.md"
+        ]
+      },
+      {
+        "concept": "bmc-credential-rotation",
+        "prequestions": [
+          {
+            "question": "You change a shared password on 1,000 devices. The change happens one device at a time and takes an hour. A client that only knows 'the current password' talks to the devices during that hour. What goes wrong?",
+            "answer": "The client switches to the new password while many devices still have the old one, so its logins to those devices fail until they catch up."
+          }
+        ],
+        "explanation": "**BMC credential rotation** moves managed BMCs from one version of the site-wide password to a new one. NICo numbers these versions: v0 is the bootstrap value, and rotations advance to v1 or later. The new version comes from the persistent backend, because the local file schema has no versioned BMC root key. On each device, rotation is a Redfish account-password change (`PATCH /redfish/v1/AccountService/Accounts/{id}`), and these changes converge **asynchronously**, device by device.\n\nThe problem is the `bmc-shared-password` Secret. It holds *one* value: the current site-wide **target**. When a rotation is staged, that Secret switches to the new target **before** device convergence finishes. DPF reads only this Secret, so it can't log in to DPU host BMCs that still have the old password. **DPF v26.4.0 doesn't support BMC credential rotation**, so:\n\n> Don't stage a site-wide BMC credential rotation while DPF manages any DPU. (Support is tracked in issue #6147.)\n\nTwo related traps:\n- **The 60-second refresh isn't a rotation mechanism.** It republishes whatever the current target is and does nothing to coordinate devices.\n- **Don't \"rotate\" by editing v0.** Once any managed device uses v0, keep the local value unchanged. Replacing it updates neither the BMC hardware nor NICo's convergence records, so NICo and the hardware disagree about the password.\n\nIf the rotation target disappears from its authoritative source after a value has been published, NICo keeps the last published Secret and logs an error. A fresh site leaves the Secret unwritten. Either way, the fix is to restore the expected credential.",
+        "analogy": "It's like changing the locks across an office building one floor per day while the cleaners get a single key on a ring each morning. The day you hand them the new key, every floor still on the old lock is closed to them. Where the analogy breaks down: a person would just carry both keys, but DPF v26.4.0 can only hold one.",
+        "workedExample": {
+          "title": "Reproduce the rotation hazard with two mock BMCs",
+          "steps": [
+            {
+              "subgoal": "Start two BMCs on v0",
+              "detail": "Use `mock_bmc.py` from the factory-defaults lesson:\n```bash\npython3 mock_bmc.py 8001 pw-v0 2>/dev/null &\npython3 mock_bmc.py 8002 pw-v0 2>/dev/null &\necho 'v0 pw-v0' > bmc-shared-password\n```"
+            },
+            {
+              "subgoal": "Write a 'DPF' consumer that knows only the shared value",
+              "detail": "Save as `check.sh` and run `chmod +x check.sh`:\n```bash\n#!/usr/bin/env bash\nread -r VER PW < bmc-shared-password\nfor port in 8001 8002; do\n  code=$(curl -s -o /dev/null -w '%{http_code}' -u \"admin:$PW\" \\\n    http://127.0.0.1:$port/redfish/v1/AccountService/Accounts/2)\n  echo \"BMC :$port using shared $VER -> HTTP $code\"\ndone\n```\n`./check.sh` shows 200 for both."
+            },
+            {
+              "subgoal": "Stage rotation: switch the target, converge one device",
+              "detail": "```bash\necho 'v1 pw-v1' > bmc-shared-password      # target switches immediately\ncurl -s -u admin:pw-v0 -X PATCH -H 'Content-Type: application/json' \\\n  -d '{\"Password\":\"pw-v1\"}' http://127.0.0.1:8001/redfish/v1/AccountService/Accounts/2\n./check.sh\n# :8001 -> 200, :8002 -> 401   <- the DPF failure window\n```"
+            },
+            {
+              "subgoal": "Finish convergence",
+              "detail": "```bash\ncurl -s -u admin:pw-v0 -X PATCH -H 'Content-Type: application/json' \\\n  -d '{\"Password\":\"pw-v1\"}' http://127.0.0.1:8002/redfish/v1/AccountService/Accounts/2\n./check.sh   # both 200\nkill %1 %2\n```\nThe failure window lasts as long as convergence takes. On a real fleet that can be a long time."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the curl that moves the BMC on port 8002 from `pw-v0` to `pw-v1`.",
+          "partialSolution": "curl -s -u admin:pw-v0 -X ___ -H 'Content-Type: application/json' \\\n  -d '{\"___\":\"pw-v1\"}' http://127.0.0.1:8002/redfish/v1/AccountService/Accounts/2",
+          "answer": "`PATCH` and `Password`."
+        },
+        "independentProblem": {
+          "prompt": "Your manager asks you to rotate the site-wide BMC password tonight on a site running the default pinned DPF v26.4.0 with 40 DPF-managed DPUs. Someone suggests simply editing the v0 value in the watched credential Secret instead. Give your recommendation and explain both risks.",
+          "hints": [
+            "What does the pinned DPF version support?",
+            "When does `bmc-shared-password` switch relative to device convergence?",
+            "Does changing v0 in the local source change the password on the hardware?"
+          ],
+          "answer": "Don't do either. DPF v26.4.0 doesn't support BMC credential rotation, and NICo says not to stage a rotation while DPF manages any DPU (tracked in #6147). Staging it switches `bmc-shared-password` to the new target before devices converge, so DPF can't authenticate to BMCs still on the old password. Editing v0 is worse: once devices use v0 it must stay unchanged, because replacing it updates neither the BMCs nor the convergence records, so NICo's idea of the password no longer matches the hardware. Wait for a DPF release with rotation support."
+        },
+        "selfExplanation": "Explain in your own words why a consumer that holds only one password version can't survive an asynchronous rotation, and what a consumer would need in order to survive one.",
+        "checks": [
+          {
+            "question": "During a staged rotation, when does `bmc-shared-password` switch to the new value?",
+            "options": [
+              "After every device has converged",
+              "Before device convergence finishes",
+              "Only after carbide-api restarts"
+            ],
+            "answer": "Before device convergence finishes",
+            "explanation": "That early switch is exactly why DPF loses access to BMCs that haven't converged yet. A restart isn't involved, because the 60-second refresh publishes the new target."
+          },
+          {
+            "question": "Is the 60-second refresh a safe way to roll out a new BMC password?",
+            "options": [
+              "Yes, it updates devices every minute",
+              "No, it only republishes the current target and doesn't coordinate devices",
+              "Yes, if the interval is shortened"
+            ],
+            "answer": "No, it only republishes the current target and doesn't coordinate devices",
+            "explanation": "The refresh exists so a bootstrap credential propagates without a restart. The docs say explicitly that it isn't a safe rotation mechanism."
+          },
+          {
+            "question": "Which version does a coordinated rotation advance to, and where does it come from?",
+            "options": [
+              "v0, from the local file",
+              "v1 or later, from the persistent backend",
+              "v1, from `bmc-shared-password`"
+            ],
+            "answer": "v1 or later, from the persistent backend",
+            "explanation": "The local file has no versioned BMC root key. `bmc-shared-password` is a derived copy, not a source."
+          }
+        ],
+        "sources": [
+          "manuals/dpf.md",
+          "architecture/redfish/endpoints_reference.md"
+        ]
+      },
+      {
+        "concept": "tpm-and-measured-boot-attestation",
+        "prequestions": [
+          {
+            "question": "Secure Boot (Chapter 5) refuses to run unsigned bootloaders. What can't it tell a remote server about a machine that has already booted?",
+            "answer": "Secure Boot enforces locally but produces no evidence for anyone else. A remote party can't learn which signed components actually ran, or whether Secure Boot was even on. Measured boot plus attestation provides that evidence."
+          },
+          {
+            "question": "If a register can only be updated as new = hash(old || data), can malware set it to any value it likes?",
+            "answer": "No. It would have to find inputs that hash to the target value, which is infeasible for a cryptographic hash. The only way to reset the register is a platform reset."
+          }
+        ],
+        "explanation": "A **TPM (Trusted Platform Module)** is a small security chip, or firmware equivalent, on the motherboard. During **measured boot**, each stage hashes the next stage before running it (firmware, bootloader, kernel and so on) and records the hash in a **Platform Configuration Register (PCR)**.\n\nA PCR can't be written directly. It can only be **extended**:\n\n```\nPCR_new = H(PCR_old || H(component))\n```\n\nThe final value therefore depends on every component *and their order*. Change one byte of the bootloader and the PCR comes out completely different. Software running after boot can't undo a measurement, because it can only extend further. PCRs reset only when the platform resets.\n\n**Attestation** turns those values into evidence a remote verifier can trust:\n1. The verifier sends a fresh random **nonce**.\n2. The TPM produces a **quote**: the selected PCR values plus the nonce, signed by a key that never leaves the TPM (an attestation key).\n3. The verifier checks that the key really belongs to a genuine TPM. TPMs carry an endorsement certificate issued by the **TPM Manufacturer CA**, and validating that chain is ordinary PKI (Chapter 19).\n4. The verifier checks the signature, checks the nonce (proving the quote is fresh and not replayed), and compares the PCRs with known-good \"golden\" values.\n\nIf everything matches, the host booted the expected, untampered software. Usually an event log is also sent so the verifier can recompute the PCRs entry by entry.\n\nIn NICo, TPM/measured boot attestation is **off by default**. Separately, NICo can read basic TPM status from Redfish `Systems/{id}` → `TrustedModules`, an optional field used for status reporting.",
+        "analogy": "A PCR is like a tamper-evident logbook written in permanent ink, where every entry includes a fingerprint of the page before it. You can add entries but never erase them, so a forged page shows up immediately. It breaks down because a real logbook can be photographed and replayed. That's why the verifier's fresh nonce and the TPM's signature are needed.",
+        "workedExample": {
+          "title": "Simulate PCR extension and a signed quote",
+          "steps": [
+            {
+              "subgoal": "Write the extend function",
+              "detail": "Save as `pcr.py`:\n```python\nimport hashlib, sys\n\ndef extend(pcr: bytes, data: bytes) -> bytes:\n    return hashlib.sha256(pcr + hashlib.sha256(data).digest()).digest()\n\npcr = bytes(32)  # PCRs start at all zeros\nfor path in sys.argv[1:]:\n    with open(path, \"rb\") as f:\n        pcr = extend(pcr, f.read())\nprint(pcr.hex())\n```"
+            },
+            {
+              "subgoal": "Record a golden value",
+              "detail": "```bash\nmkdir -p boot\necho shim-1.0 > boot/shim.efi; echo grub-2.12 > boot/grub.efi; echo linux-6.8 > boot/vmlinuz\npython3 pcr.py boot/shim.efi boot/grub.efi boot/vmlinuz > golden.txt\n```\nList the files in boot order explicitly. A shell glob sorts them alphabetically, which produces a different PCR."
+            },
+            {
+              "subgoal": "Produce and sign a quote",
+              "detail": "The RSA key stands in for the TPM's attestation key:\n```bash\nopenssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out ak.pem\nopenssl pkey -in ak.pem -pubout -out ak.pub\nopenssl rand -hex 16 > nonce.txt                    # from the verifier\n{ python3 pcr.py boot/shim.efi boot/grub.efi boot/vmlinuz; cat nonce.txt; } > quote.txt\nopenssl dgst -sha256 -sign ak.pem -out quote.sig quote.txt\n```"
+            },
+            {
+              "subgoal": "Verify like a remote verifier",
+              "detail": "```bash\nopenssl dgst -sha256 -verify ak.pub -signature quote.sig quote.txt   # Verified OK\n[ \"$(head -1 quote.txt)\" = \"$(cat golden.txt)\" ] && echo TRUSTED || echo UNTRUSTED\n```"
+            },
+            {
+              "subgoal": "Tamper and observe",
+              "detail": "```bash\necho grub-evil > boot/grub.efi\npython3 pcr.py boot/shim.efi boot/grub.efi boot/vmlinuz | diff - golden.txt   # differs\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the extend function so it follows the TPM rule `PCR_new = H(PCR_old || H(data))` with SHA-256.",
+          "partialSolution": "import hashlib\n\ndef extend(pcr: bytes, data: bytes) -> bytes:\n    return hashlib.sha256(pcr + ___).digest()",
+          "answer": "`hashlib.sha256(data).digest()`, so the line reads `return hashlib.sha256(pcr + hashlib.sha256(data).digest()).digest()`."
+        },
+        "independentProblem": {
+          "prompt": "An attacker gets root on a host after it boots and wants the next attestation to pass. Explain why they can't just set the PCR back to the golden value, and why replaying yesterday's valid quote also fails.",
+          "hints": [
+            "Which operations does a TPM allow on a PCR?",
+            "Where does the signing key live, and can root read it?",
+            "What does the verifier put into each quote request?"
+          ],
+          "answer": "PCRs can only be extended, and extending from the current value can't produce a chosen target without breaking SHA-256. They reset only on platform reset, which triggers a fresh measured boot. Root can't forge a quote either, because the attestation key never leaves the TPM. A replayed quote fails because it contains an old nonce, and the verifier checks for the fresh one it just sent."
+        },
+        "selfExplanation": "Why does the verifier need the TPM Manufacturer CA, rather than trusting whatever public key the host sends with its quote?",
+        "checks": [
+          {
+            "question": "Why do two hosts with identical components loaded in a different order end up with different PCR values?",
+            "options": [
+              "PCRs store a timestamp",
+              "Extend chains each hash onto the previous value, so order matters",
+              "TPMs randomise PCRs at boot"
+            ],
+            "answer": "Extend chains each hash onto the previous value, so order matters",
+            "explanation": "H(H(0||a)||b) differs from H(H(0||b)||a). PCRs contain no timestamps or randomness, which is what makes golden values possible."
+          },
+          {
+            "question": "What is TPM / measured boot attestation's default state in NICo?",
+            "options": [
+              "On",
+              "Off",
+              "On only for DPUs"
+            ],
+            "answer": "Off",
+            "explanation": "It's off by default. NICo's Redfish reading of `TrustedModules` is separate, optional status reporting."
+          },
+          {
+            "question": "What does the nonce in a quote prove?",
+            "options": [
+              "The TPM is genuine",
+              "The quote is fresh, not a replay",
+              "The PCRs match the golden values"
+            ],
+            "answer": "The quote is fresh, not a replay",
+            "explanation": "Genuineness comes from the CA chain, and correctness comes from comparing with golden values. The nonce only proves freshness."
+          }
+        ],
+        "sources": [
+          "architecture/redfish/endpoints_reference.md"
+        ]
+      },
+      {
+        "concept": "spdm-attestation",
+        "prequestions": [
+          {
+            "question": "A TPM measures what the host CPU booted. How would you check the firmware inside a GPU or NIC that the host CPU never measured?",
+            "answer": "Ask the component itself. With SPDM, the device proves its identity with a certificate chain from its vendor and returns firmware measurements signed by its own key."
+          }
+        ],
+        "explanation": "**SPDM (Security Protocol and Data Model)** is a DMTF standard for authenticating individual hardware components such as GPUs, NICs and DPUs. It's the same idea as TPM attestation, applied per device:\n\n- **Identity.** The component holds a private key and a **certificate chain** rooted at its vendor's CA. The verifier checks the chain exactly as it would a TLS server certificate (Chapter 19).\n- **Measurements.** The component reports hashes of its firmware and configuration, **signed** with its key over a verifier-supplied nonce, so the result is fresh and can't be forged by anything outside the device.\n- **Appraisal.** The verifier checks the chain, the signature and the nonce, then compares the measurements with expected values.\n\nOn servers, the BMC usually speaks SPDM to the components and exposes the results over Redfish. NICo uses these `ComponentIntegrity` endpoints (through libredfish functions such as `get_component_integrities()`, `get_component_ca_certificate()`, `trigger_evidence_collection()` and `get_evidence()`):\n\n| Endpoint | Method | Purpose |\n|---|---|---|\n| `/redfish/v1/ComponentIntegrity` | GET | List SPDM attestation components |\n| `{component}/Certificates/CertChain` | GET | Component CA certificate |\n| `{component}/Actions/ComponentIntegrity.SPDMGetSignedMeasurements` | POST | Trigger evidence collection |\n\nNICo runs its own controller for SPDM attestation. It triggers evidence collection through these endpoints and then works with the evidence. SPDM and TPM complement each other: the TPM covers the host boot chain, and SPDM covers the devices plugged into it.",
+        "analogy": "SPDM is like checking each contractor's ID badge on a building site and asking them to sign a statement of what tools they brought today, with today's date written in by you. It breaks down because a person could lie about their tools, while a device's measurements come from its own firmware root of trust. The signature proves who is speaking, not that their measuring logic is honest, which is why vendor trust matters.",
+        "workedExample": {
+          "title": "Follow the SPDM evidence flow, then simulate the cryptography locally",
+          "steps": [
+            {
+              "subgoal": "Discover components (real BMC)",
+              "detail": "Against a BMC that supports it (not runnable without hardware):\n```bash\ncurl -sk -u \"$USER:$PASS\" https://$BMC/redfish/v1/ComponentIntegrity\n```\nEach member is one component that can be attested."
+            },
+            {
+              "subgoal": "Fetch the cert chain and trigger measurements (real BMC)",
+              "detail": "```bash\ncurl -sk -u \"$USER:$PASS\" https://$BMC<component>/Certificates/CertChain\ncurl -sk -u \"$USER:$PASS\" -X POST -H 'Content-Type: application/json' \\\n  -d '{\"Nonce\":\"<64 hex chars>\"}' \\\n  https://$BMC<component>/Actions/ComponentIntegrity.SPDMGetSignedMeasurements\n```\nThe action parameters (such as `Nonce`, `SlotId` and `MeasurementIndices`) come from the DMTF schema. Check your BMC's documentation for what it accepts."
+            },
+            {
+              "subgoal": "Simulate the vendor CA and device certificate",
+              "detail": "```bash\nopenssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -subj /CN=VendorCA -days 1\nopenssl req -newkey rsa:2048 -nodes -keyout dev.key -out dev.csr -subj /CN=GPU-0\nopenssl x509 -req -in dev.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out dev.pem -days 1\nopenssl verify -CAfile ca.pem dev.pem     # dev.pem: OK\n```"
+            },
+            {
+              "subgoal": "Simulate signed measurements with a nonce",
+              "detail": "```bash\necho 'fw=96.00.5A' > meas.txt\nopenssl rand -hex 32 > nonce.txt                      # verifier\ncat meas.txt nonce.txt > tbs.txt\nopenssl dgst -sha256 -sign dev.key -out sig.bin tbs.txt   # device\nopenssl x509 -in dev.pem -pubkey -noout > dev.pub\nopenssl dgst -sha256 -verify dev.pub -signature sig.bin tbs.txt   # Verified OK\n```"
+            },
+            {
+              "subgoal": "Appraise",
+              "detail": "The signature is valid, the chain leads to the vendor CA, and the nonce is the one you sent. Finally, compare `meas.txt` with the expected firmware value. All four checks must pass."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the Redfish action that NICo POSTs to a component to trigger SPDM evidence collection.",
+          "partialSolution": "POST {component}/Actions/ComponentIntegrity.___",
+          "answer": "`SPDMGetSignedMeasurements`"
+        },
+        "independentProblem": {
+          "prompt": "A component returns validly signed measurements that match the expected values, but `openssl verify -CAfile vendor-ca.pem device.pem` fails. Should the component be trusted? Explain.",
+          "hints": [
+            "What does a valid signature prove on its own?",
+            "Who could have generated the key that made the signature?",
+            "The chain check is what links the key to a real vendor's device."
+          ],
+          "answer": "No. A valid signature only proves that whoever holds the key signed the data. Without a chain to the vendor CA, that key could belong to anyone, such as an emulator or a counterfeit part, and its measurements can say anything. Identity (the chain) and integrity (the signed measurements) both have to pass."
+        },
+        "selfExplanation": "Why would NICo need SPDM in addition to TPM measured boot, if the host's boot chain is already attested?",
+        "checks": [
+          {
+            "question": "Which Redfish resource does NICo use for SPDM?",
+            "options": [
+              "`/redfish/v1/Systems/{id}/SecureBoot`",
+              "`/redfish/v1/ComponentIntegrity`",
+              "`/redfish/v1/AccountService`",
+              "`/redfish/v1/UpdateService/FirmwareInventory`"
+            ],
+            "answer": "`/redfish/v1/ComponentIntegrity`",
+            "explanation": "SecureBoot controls UEFI signature enforcement. FirmwareInventory reports versions *claimed* by the BMC, unsigned, which is a common confusion. ComponentIntegrity carries SPDM evidence."
+          },
+          {
+            "question": "What does `{component}/Certificates/CertChain` provide?",
+            "options": [
+              "The component's CA certificate chain, used to verify its identity",
+              "The BMC's TLS certificate",
+              "The TPM endorsement key"
+            ],
+            "answer": "The component's CA certificate chain, used to verify its identity",
+            "explanation": "It's the component's own chain. The BMC's TLS certificate secures the Redfish connection itself, and the TPM endorsement key belongs to host attestation."
+          }
+        ],
+        "sources": [
+          "architecture/redfish/endpoints_reference.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Credential lifecycle and attestation lab: Vault, mock BMCs, a shared-secret sync and a boot verifier",
+      "goal": "On a laptop, store factory-default and site-wide BMC credentials in Vault, onboard two mock Redfish BMCs, publish the current version to a 'shared Secret' file the way carbide-api feeds `bmc-shared-password`, reproduce the rotation failure window, and finish with a measured-boot verifier that flags a tampered bootloader.",
+      "whyItMatters": "This lab reproduces the failure modes you'll actually debug in NICo: the `MissingCredentials` / empty-Secret state, the one-time use of factory defaults, the DPF lockout that an early-switching shared Secret causes during rotation, and how attestation separates 'signed' from 'expected'.",
+      "setup": [
+        "Docker or Podman (commands use `docker`; with Podman, alias it)",
+        "Python 3.9+ (standard library only)",
+        "curl and openssl (LibreSSL on macOS works)",
+        "A working directory: `mkdir -p ~/nico-ch20 && cd ~/nico-ch20`",
+        "`mock_bmc.py` from the factory-defaults lesson, saved in that directory"
+      ],
+      "steps": [
+        {
+          "subgoal": "Start Vault and a helper",
+          "detail": "```bash\ndocker run -d --name vault-lab --cap-add=IPC_LOCK -p 8200:8200 \\\n  -e VAULT_DEV_ROOT_TOKEN_ID=root -e VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \\\n  hashicorp/vault:1.17\ncat > lab.env <<'EOF'\nv() { docker exec -i -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=root vault-lab vault \"$@\"; }\nEOF\nsource lab.env\nv status | grep Sealed   # false\n```"
+        },
+        {
+          "subgoal": "Seed the factory default and the site root (leak-free)",
+          "detail": "```bash\nv kv put secret/lab/bmc/factory-default/host username=admin password=factory-pass\nread -rs -p 'Site root v-initial: ' P && echo\nprintf '%s' \"$P\" | v kv put secret/lab/bmc/site/root username=admin password=-\nunset P\n```\n`password=-` makes Vault read the value from stdin. Vault's own version counter starts at 1. That's Vault's numbering, not NICo's v0/v1."
+        },
+        {
+          "subgoal": "Start two mock BMCs on the factory default",
+          "detail": "```bash\npython3 mock_bmc.py 8001 factory-pass 2>/dev/null &\npython3 mock_bmc.py 8002 factory-pass 2>/dev/null &\n```"
+        },
+        {
+          "subgoal": "Onboard: one factory login, then the site root",
+          "detail": "```bash\nFACTORY=$(v kv get -field=password secret/lab/bmc/factory-default/host)\nSITE=$(v kv get -field=password secret/lab/bmc/site/root)\nfor port in 8001 8002; do\n  curl -s -u \"admin:$FACTORY\" -X PATCH -H 'Content-Type: application/json' \\\n    -d \"{\\\"Password\\\":\\\"$SITE\\\"}\" http://127.0.0.1:$port/redfish/v1/AccountService/Accounts/2; echo\ndone\nunset FACTORY SITE\n```\nPasswords on a curl command line are visible in `ps`. That's acceptable for this lab only."
+        },
+        {
+          "subgoal": "Publish the current version to the 'shared Secret' and check access",
+          "detail": "Create `sync_once.sh` (one carbide-api refresh tick):\n```bash\n#!/usr/bin/env bash\nset -euo pipefail\ncurl -sf -H 'X-Vault-Token: root' http://127.0.0.1:8200/v1/secret/data/lab/bmc/site/root \\\n  | python3 -c 'import json,sys; d=json.load(sys.stdin)[\"data\"]; print(\"vault-v%s\" % d[\"metadata\"][\"version\"], d[\"data\"][\"password\"])' \\\n  > bmc-shared-password.tmp\nchmod 600 bmc-shared-password.tmp\nmv bmc-shared-password.tmp bmc-shared-password\necho \"published $(cut -d' ' -f1 bmc-shared-password)\"\n```\nUse `check.sh` from the rotation lesson as the DPF stand-in, then run:\n```bash\nchmod +x sync_once.sh check.sh\n./sync_once.sh && ./check.sh    # both HTTP 200\n```"
+        },
+        {
+          "subgoal": "Reproduce the rotation failure window",
+          "detail": "```bash\nread -rs -p 'New site root: ' P && echo\nprintf '%s' \"$P\" | v kv put secret/lab/bmc/site/root username=admin password=-\nOLD=$(v kv get -version=1 -field=password secret/lab/bmc/site/root)\ncurl -s -u \"admin:$OLD\" -X PATCH -H 'Content-Type: application/json' \\\n  -d \"{\\\"Password\\\":\\\"$P\\\"}\" http://127.0.0.1:8001/redfish/v1/AccountService/Accounts/2; echo\n./sync_once.sh && ./check.sh    # :8001 200, :8002 401  <- DPF lockout\ncurl -s -u \"admin:$OLD\" -X PATCH -H 'Content-Type: application/json' \\\n  -d \"{\\\"Password\\\":\\\"$P\\\"}\" http://127.0.0.1:8002/redfish/v1/AccountService/Accounts/2; echo\n./check.sh                      # both 200\nunset P OLD\n```\nWrite down how long :8002 was locked out. That gap is why NICo forbids staging rotation while DPF v26.4.0 manages DPUs."
+        },
+        {
+          "subgoal": "Add a measured-boot verifier",
+          "detail": "Use `pcr.py` from the TPM lesson. Create `verify_boot.sh`:\n```bash\n#!/usr/bin/env bash\nset -euo pipefail\nopenssl rand -hex 16 > nonce.txt                                         # verifier\n{ python3 pcr.py boot/shim.efi boot/grub.efi boot/vmlinuz; cat nonce.txt; } > quote.txt\nopenssl dgst -sha256 -sign ak.pem -out quote.sig quote.txt              # 'TPM'\nopenssl dgst -sha256 -verify ak.pub -signature quote.sig quote.txt >/dev/null\nif [ \"$(head -1 quote.txt)\" = \"$(cat golden.txt)\" ]; then echo TRUSTED; else echo UNTRUSTED; fi\n```\nThen:\n```bash\nmkdir -p boot; echo shim-1.0 > boot/shim.efi; echo grub-2.12 > boot/grub.efi; echo linux-6.8 > boot/vmlinuz\npython3 pcr.py boot/shim.efi boot/grub.efi boot/vmlinuz > golden.txt\nopenssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out ak.pem\nopenssl pkey -in ak.pem -pubout -out ak.pub\nchmod +x verify_boot.sh && ./verify_boot.sh   # TRUSTED\necho grub-evil > boot/grub.efi && ./verify_boot.sh   # UNTRUSTED\n```"
+        }
+      ],
+      "verify": "Run `source lab.env && v kv metadata get secret/lab/bmc/site/root | grep current_version` (shows 2), `./check.sh` (both BMCs return HTTP 200 using `vault-v2`), and `./verify_boot.sh` (prints UNTRUSTED with the tampered grub, and TRUSTED again after `echo grub-2.12 > boot/grub.efi`). You should also have seen the intermediate `:8002 -> HTTP 401` line in step 6.",
+      "hints": [
+        "`v` fails with 'connection refused': the container is still starting or has exited. Check `docker logs vault-lab 2>&1 | tail`. Port 8200 may already be in use.",
+        "`printf ... | v kv put ...` stores an empty value: the helper needs `docker exec -i` to forward stdin. Check that `lab.env` has `-i`.",
+        "Onboarding returns 401: the mock BMC was already changed in an earlier attempt. Kill the mocks (`kill %1 %2` or `pkill -f mock_bmc.py`) and restart them with `factory-pass`.",
+        "`sync_once.sh` fails: if the curl call to Vault returns non-200 (wrong path or token), `-f` makes it fail. Test the curl on its own.",
+        "`verify_boot.sh` says UNTRUSTED with untouched files: check that golden.txt was built with the files in the same order as the script, not with a `boot/*` glob."
+      ],
+      "stretch": "Make the rotation safe from the consumer's side: change `sync_once.sh` to publish the previous *and* current Vault versions, and `check.sh` to try current first and fall back to previous. Show that the 401 window disappears, then explain why NICo can't do this alone (DPF v26.4.0 reads one value). For extra credit, start a `kind` cluster and have the sync write a real Secret with `kubectl create secret generic bmc-shared-password --from-literal=password=\"$PW\" --dry-run=client -o yaml | kubectl apply -f -` on a 60-second loop."
+    }
+  }
+}

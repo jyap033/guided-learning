@@ -1,0 +1,34 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "client-identity",
+        "severity": "major",
+        "problem": "The lesson states that nico-api uses the client-certificate identity to apply per-client limits, and that on real hardware each host and DPU agent has its own identity. None of the listed sources (what-is-nico, quick-start, software prerequisites) say this. They only say services use mTLS/gRPC. The lesson's central claim, the 'matches production' fix in the independent problem, the first check question's explanation and the build task's 'why it matters' all rest on it.",
+        "fix": "Cite a docs page that documents per-client limits in nico-api, or reword these as a general mTLS design pattern rather than documented NICo behaviour. Use the documented DPU-agent limiter on IMDS identity requests ([machine-identity] requests-per-second 3 / burst 8) as the concrete NICo example."
+      },
+      {
+        "where": "role-based-access-control",
+        "severity": "major",
+        "problem": "The claim that 'Core grants the OnDemandRackMaintenance permission to the NicoAdminCLI role' is not in any provided source (glossary, quick-start, overview). None of them mention Core-side RBAC, that permission or that role. It is repeated in the completion problem, the self-explanation prompt and the build task. The worked example's statement that Core identities 'would come from the client certificate' is also unsupported.",
+        "fix": "Add the source page that documents this grant, or label the names as illustrative and keep the NICo-specific content to the documented REST role families and the JWT claims processor pipeline."
+      },
+      {
+        "where": "kmip-kek-provider",
+        "severity": "major",
+        "problem": "The 'Check purpose and lifetime' step runs `openssl x509 -checkend 86400 && echo \"valid >24h\"` on a certificate made with the client-identity lesson's issue() helper, which uses `-days 1`. Moments after issuing, less than 86400 s remain, so -checkend exits non-zero and 'valid >24h' is never printed. The command does not behave as the text implies. (The build task works only because mkcerts.sh uses -days 7.)",
+        "fix": "Issue the KMIP client certificate with a longer lifetime (e.g. change the client-identity issue() helper to -days 7, or add a separate step for this cert), or use a smaller threshold such as -checkend 3600. State the expected output."
+      },
+      {
+        "where": "kmip-kek-provider",
+        "severity": "minor",
+        "problem": "The last worked-example step runs `cd helm-prereqs/ && source ./preflight.sh` from ~/nico-ch21, which has no helm-prereqs directory. It also points preflight at a lab-CA directory without saying where the repo checkout is.",
+        "fix": "Say to export NICO_KMIP_CLIENT_DIR as an absolute path and then cd into the infra-controller checkout's helm-prereqs/ directory. Note that the lab certificates are only for practice and not for a real site."
+      }
+    ]
+  }
+}

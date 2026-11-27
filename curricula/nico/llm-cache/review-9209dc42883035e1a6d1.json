@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "tls-certificates-and-x-509-san",
+        "severity": "major",
+        "problem": "Worked example step 'Verify a live endpoint' says the docs' `openssl s_client ... -servername ... -CAfile nico-rest-ca.crt` command 'checks chain and name together'. In the next sentence it says to add `-verify_hostname` to enforce the name check. That is a contradiction. Without `-verify_hostname` (or `-verify_host`), s_client does not check the hostname. `Verify return code: 0 (ok)` only proves the chain, and `-servername` only sets SNI. A learner could wrongly conclude that a cert with the wrong SAN passed this check.",
+        "fix": "Say the docs' command verifies the chain only (SNI picks which certificate Envoy serves), and that `-verify_hostname rest-api.mysite.example.com` is needed to also check the SAN. Drop 'checks chain and name together'."
+      },
+      {
+        "where": "tls-certificates-and-x-509-san",
+        "severity": "major",
+        "problem": "Check question 2 ('cert has CN nico-api.nico but no SAN entries; a modern gRPC client dials nico-api.nico') is ambiguous. gRPC C-core (used by the C++, Python and Ruby clients) still falls back to the CN when a cert has no DNS SANs, so with that client the expected answer ('verification fails') is wrong. The answer only holds for some stacks, such as Go crypto/tls (1.15 and later) and rustls.",
+        "fix": "Name the client stack, e.g. 'A Go (crypto/tls) or Rust (rustls) gRPC client', or rephrase it as a browser or curl with a current TLS library. Alternatively, add a SAN that doesn't match so the CN fallback can't apply."
+      }
+    ]
+  }
+}

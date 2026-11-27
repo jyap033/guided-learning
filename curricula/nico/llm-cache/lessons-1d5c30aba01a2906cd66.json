@@ -1,0 +1,530 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Chapter 19 covered how TLS certificates and JWTs prove things, and chapter 20 covered where secrets live (Vault, the site-wide BMC root, rotation). This chapter covers a different question: **who is calling, and what may they do?** Every NICo control-plane service talks to `nico-api` over mTLS/gRPC. Every DPU agent polls Core every 30 seconds. Operators use `nico-admin-cli` against Core, and orchestrators use JWTs against NICo REST. Each of these callers needs an identity that the server can check, plus rules that decide what that identity is allowed to do.\n\nThe chapter has five lessons. **SPIFFE** is the standard vocabulary for workload identity: SPIFFE IDs, trust domains and SVIDs. NICo uses it for service identity and, later in the course (ch. 43), for issuing JWT-SVIDs to tenant workloads. **Client identity** is how `nico-api` takes a verified identity from a caller's certificate and applies per-client limits. **RBAC** maps identities to roles and roles to permissions, both in Core and in NICo REST's provider/tenant admin and viewer roles. The last two lessons cover the plumbing that makes this work in a real cluster. The **External Secrets Operator** copies CA bundles and database credentials into the namespaces that need them. The **KMIP KEK provider** lets the keys that protect stored secrets live in an external key manager, which NICo reaches with its own client certificate.\n\nRunning a NICo site depends on all of this. When a DPU agent is rejected, an admin gets `403`, a pod can't find `nico-roots`, or preflight complains about your KMIP directory, the cause is almost always one of these five ideas. The build task has you assemble a small identity-aware API on your laptop using only `openssl`, Python and `curl`.",
+    "objectives": [
+      "Read a SPIFFE ID, tell an X.509-SVID from a JWT-SVID, and issue an X.509-SVID with openssl",
+      "Explain how an mTLS server such as nico-api gets a verified client identity from a certificate, and why per-client limits need one identity per agent",
+      "Model access as identity → role → permission and pick the right NICo REST role (provider/tenant, admin/viewer) for a persona",
+      "Write an External Secrets Operator ClusterSecretStore and ExternalSecret that copy a CA bundle across namespaces, and check NICo's nico-roots Secret",
+      "Prepare and validate a KMIP client TLS directory (ca.pem, client.pem, client.key) for NICO_KMIP_CLIENT_DIR"
+    ],
+    "lessons": [
+      {
+        "concept": "spiffe",
+        "prequestions": [
+          {
+            "question": "A service presents a TLS certificate. Where in the certificate would you put a machine-readable statement like \"I am the DPU agent for dpu-01 in site nico.lab\", so that any verifier knows exactly where to look?",
+            "answer": "In a Subject Alternative Name of type URI, written as `spiffe://nico.lab/dpu-agent/dpu-01`. SPIFFE standardises this: one URI SAN holds the ID. The Common Name is not used for identity."
+          },
+          {
+            "question": "Name one situation where a workload would rather prove its identity with a signed JWT than with an X.509 certificate.",
+            "answer": "When there is no end-to-end TLS session to the verifier. Examples: a proxy terminates TLS, or the identity has to reach a third-party HTTP API or token-exchange endpoint. A JWT can be passed along as a bearer token. The price is that anyone holding it can replay it, so JWT-SVIDs are short-lived and tied to an audience."
+          }
+        ],
+        "explanation": "**SPIFFE** (Secure Production Identity Framework For Everyone) is an open standard for giving *workloads* (processes, pods, agents) cryptographic identities without passwords. It defines three terms.\n\n- **SPIFFE ID**: a URI of the form `spiffe://<trust-domain>/<path>`, for example `spiffe://nico.lab/dpu-agent/dpu-01`. The path is free-form and meaningful to you.\n- **Trust domain**: the part after `spiffe://` (`nico.lab`). It is an identity namespace with its own root signing keys. The set of public keys/CA certificates for a trust domain is its **trust bundle**. A verifier accepts an identity only if it can check it against the bundle of that trust domain.\n- **SVID** (SPIFFE Verifiable Identity Document): the proof. It comes in two forms:\n  - **X.509-SVID**: a certificate whose *single* URI SAN is the SPIFFE ID. The workload proves it by holding the private key during a TLS handshake, which makes it natural for mTLS. A stolen certificate is useless without the key.\n  - **JWT-SVID**: a signed JWT whose `sub` claim is the SPIFFE ID. Its `aud` (audience) claim is required. It is a bearer token, so anyone who holds it can use it until `exp`. Keep JWT-SVIDs short-lived and scoped to one audience.\n\nVerifying an SVID means three checks: the signature chains to the trust bundle, the trust domain is one you accept, and (for JWTs) your name is in `aud` and the token hasn't expired.\n\n**In NICo.** The glossary says NICo uses SPIFFE-based identities for service-to-service authentication, and its control-plane services all talk over mTLS/gRPC. NICo also issues SPIFFE **JWT-SVIDs** to tenant workloads (\"machine identity\"). It signs them when a DPU calls the Core gRPC API or when a workload reads the instance metadata service (IMDS) on the DPU. The tokens are signed with per-tenant keys. Day 0 site config turns this on with a `[machine_identity]` section (`enabled`, `algorithm = \"ES256\"`, `current_encryption_key_id`). An optional `trust_domain_allowlist` restricts which trust domains tenant orgs may use as their JWT issuer. Chapter 43 covers that path in depth. This lesson gives you the vocabulary.",
+        "analogy": "A SPIFFE ID is like a passport number plus issuing country (the trust domain). The X.509-SVID is the passport booklet: it only works when the holder shows up in person, which corresponds to proving the private key. The JWT-SVID is a printed boarding pass for one flight (the audience) that expires soon. The analogy breaks down on lifetime and copying. Passports last years, while SVIDs last hours or minutes. A photocopied boarding pass is rejected at the gate, but a copied JWT-SVID works for whoever presents it until it expires.",
+        "workedExample": {
+          "title": "Mint and inspect an X.509-SVID for a lab trust domain",
+          "steps": [
+            {
+              "subgoal": "Create the trust domain's root",
+              "detail": "The trust domain `nico.lab` is backed by a CA key. Its certificate `ca.pem` is the trust bundle.\n```bash\nmkdir -p ~/nico-ch21/pki && cd ~/nico-ch21\nopenssl ecparam -genkey -name prime256v1 -noout -out pki/ca.key\nopenssl req -x509 -new -key pki/ca.key -sha256 -days 30 \\\n  -subj \"/CN=nico.lab trust root\" -out pki/ca.pem\n```"
+            },
+            {
+              "subgoal": "Issue an X.509-SVID with a SPIFFE URI SAN",
+              "detail": "```bash\nopenssl ecparam -genkey -name prime256v1 -noout -out pki/dpu-01.key\nopenssl req -new -key pki/dpu-01.key -subj \"/CN=dpu-01\" -out pki/dpu-01.csr\ncat > pki/dpu-01.ext <<'EOF'\nbasicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\nsubjectAltName=URI:spiffe://nico.lab/dpu-agent/dpu-01\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\nEOF\nopenssl x509 -req -in pki/dpu-01.csr -CA pki/ca.pem -CAkey pki/ca.key \\\n  -CAcreateserial -sha256 -days 1 -extfile pki/dpu-01.ext -out pki/dpu-01.pem\n```\nThe certificate is a leaf (`CA:FALSE`), it is for TLS clients (`clientAuth`), it carries exactly one URI SAN, and it lives for only 1 day."
+            },
+            {
+              "subgoal": "Read the identity back out",
+              "detail": "```bash\nopenssl x509 -in pki/dpu-01.pem -noout -text | grep -A1 \"Subject Alternative Name\"\n```\nExpected:\n```\n            X509v3 Subject Alternative Name: \n                URI:spiffe://nico.lab/dpu-agent/dpu-01\n```\nThe CN `dpu-01` is only a label. Verifiers read the URI SAN."
+            },
+            {
+              "subgoal": "Verify it against the trust bundle",
+              "detail": "```bash\nopenssl verify -CAfile pki/ca.pem pki/dpu-01.pem\n# pki/dpu-01.pem: OK\n```\nIf you verify it against a different trust domain's bundle, it fails with `unable to get local issuer certificate`. The ID says `nico.lab`, but only `nico.lab`'s keys can back that claim."
+            },
+            {
+              "subgoal": "Compare with a JWT-SVID's shape",
+              "detail": "A JWT-SVID carries the same identity as signed claims, for example:\n```json\n{\"alg\": \"ES256\", \"kid\": \"key-1\", \"typ\": \"JWT\"}\n{\"sub\": \"spiffe://nico.lab/dpu-agent/dpu-01\",\n \"aud\": [\"nico-rest\"],\n \"iat\": 1795600000, \"exp\": 1795600300}\n```\nA verifier checks the signature against the trust domain's public keys (often published as a JWKS), checks that it is listed in `aud`, and checks that `exp` is in the future. NICo's machine identity uses ES256, as in this header."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks in this openssl extension file so that it produces an X.509-SVID that DPU `dpu-07` can use as an mTLS **client** in trust domain `nico.lab`, under the same path scheme as the worked example.",
+          "partialSolution": "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=___\nsubjectAltName=___\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid",
+          "answer": "extendedKeyUsage=clientAuth\nsubjectAltName=URI:spiffe://nico.lab/dpu-agent/dpu-07"
+        },
+        "independentProblem": {
+          "prompt": "Your service is named `nico-rest`, trusts only trust domain `nico.lab`, and receives three JWT-SVIDs. Each has a valid signature from *some* trust domain's key. Which do you accept, and why are the others rejected?\n\nA: `sub=spiffe://nico.lab/tenant/acme/job-1`, `aud=[\"nico-rest\"]`, `exp` in 4 minutes, signed by a `nico.lab` key\nB: `sub=spiffe://evil.lab/tenant/acme/job-1`, `aud=[\"nico-rest\"]`, `exp` in 4 minutes, signed by an `evil.lab` key\nC: `sub=spiffe://nico.lab/tenant/acme/job-1`, `aud=[\"billing\"]`, `exp` in 4 minutes, signed by a `nico.lab` key",
+          "hints": [
+            "List the three checks a JWT-SVID verifier makes and apply each one to each token.",
+            "For B, ask which trust bundle you would need in order to validate that signature, and whether you have it.",
+            "C is correctly signed and unexpired. Look at who it was issued *for*."
+          ],
+          "answer": "Accept only A. B names a trust domain (`evil.lab`) whose bundle you don't hold, and its signature doesn't chain to `nico.lab`'s keys. A valid signature from *a* key means nothing unless it is the key of a trust domain you trust. C passes the signature check but was issued for audience `billing`. Accepting it would let anyone who obtained a billing token replay it against you. That is the reason the audience claim is mandatory for JWT-SVIDs."
+        },
+        "selfExplanation": "An X.509-SVID needs the private key to be useful, but a JWT-SVID works for whoever holds it. In your own words, explain why that difference makes short lifetimes and a mandatory audience much more important for JWT-SVIDs than for X.509-SVIDs.",
+        "checks": [
+          {
+            "question": "Where does a verifier read the SPIFFE ID in an X.509-SVID?",
+            "options": [
+              "The subject Common Name (CN)",
+              "A single URI Subject Alternative Name",
+              "The issuer field",
+              "The certificate serial number"
+            ],
+            "answer": "A single URI Subject Alternative Name",
+            "explanation": "SPIFFE puts the ID in exactly one URI SAN. The CN is a legacy, free-text field that many people wrongly treat as identity. The issuer names the CA, not the workload. The serial number is only unique per CA."
+          },
+          {
+            "question": "Which claim is required in a JWT-SVID and limits which services may accept it?",
+            "options": [
+              "iss",
+              "aud",
+              "jti",
+              "kid"
+            ],
+            "answer": "aud",
+            "explanation": "`aud` (audience) is required in JWT-SVIDs, and a verifier must find itself in it. `iss` names the issuer but doesn't limit where the token can be replayed. `jti` is an optional unique ID. `kid` is a header field that picks the signing key."
+          },
+          {
+            "question": "In NICo, which path issues SPIFFE JWT-SVIDs to tenant workloads on an instance?",
+            "options": [
+              "Keycloak's client_credentials flow",
+              "cert-manager's site-issuer",
+              "The DPU's instance metadata service (IMDS), with NICo signing using per-tenant keys",
+              "Vault PKI"
+            ],
+            "answer": "The DPU's instance metadata service (IMDS), with NICo signing using per-tenant keys",
+            "explanation": "Per the glossary and the Day 0 machine identity guide, tenant processes read identity from IMDS on the DPU (or the DPU calls Core gRPC), and NICo signs the JWT-SVID. Keycloak issues REST API tokens for operators. cert-manager and Vault PKI issue X.509 service certificates."
+          }
+        ],
+        "sources": [
+          "glossary.md",
+          "getting-started/installation-options/day0-machine-identity.md",
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "concept": "client-identity",
+        "prequestions": [
+          {
+            "question": "A gRPC server sits behind Kubernetes networking, and 200 DPU agents call it. If it wants to limit each agent to N requests per minute, what should it key the limit on: source IP, a header the client sends, or something else?",
+            "answer": "Something else: the identity in the client's TLS certificate, which the server verified during the mTLS handshake. Source IPs get rewritten by NAT and proxies, and pods change IPs. A header is whatever the client chooses to send, so the server can't trust it."
+          },
+          {
+            "question": "Ten simulated DPU agents in a lab all use the same client certificate. How many clients does the server see?",
+            "answer": "One. The server can only tell callers apart by the identity they prove, so all ten share one identity and one limit."
+          }
+        ],
+        "explanation": "In ordinary TLS, only the server proves who it is. In **mutual TLS (mTLS)**, which you met in ch. 19, the server also asks for a client certificate and checks that it chains to a CA the server trusts. The client proves it holds the matching private key. Once the handshake finishes, the server has a **verified client identity**: the subject and SANs of a certificate it validated itself. Nothing in the request body can forge that.\n\n**Client identity** is that verified identity, used as a key for decisions. NICo's `nico-api` uses the identity from the client's certificate to apply **per-client limits**. Each caller gets its own budget, so one misbehaving caller can't starve the rest. That matters because many agents call Core at once. Per the architecture overview, each DPU agent polls the API Service every 30 seconds, and Scout, DHCP, PXE, DNS, Hardware Health, the SSH console and the admin CLI all connect over mTLS/gRPC. The site agent has its own client certificate too. The Quick Start health check lists a cert-manager `Certificate` named `core-grpc-client-site-agent-certs` in the `nico-rest` namespace.\n\nThree consequences follow:\n\n1. **Identity comes from the certificate, not the network.** Pod IPs, NAT and load balancers make the source address meaningless as an identity.\n2. **One identity per caller.** On real hardware, each host and DPU agent has its own identity, so each gets its own limit. If several processes share a certificate, which is common in labs, the server sees one client, and they share one budget and one audit trail.\n3. **Identity is not permission.** The identity answers *who*. Deciding *what they may do* is authorization, covered in the next lesson (RBAC). Limits answer *how much*.\n\nTerms: **authentication** means proving who you are (the handshake). **Authorization** means deciding what you may do. **Admission control** means deciding whether to take on this request right now. Limits are one kind of admission control, covered in ch. 32.",
+        "analogy": "Think of a badge reader at an office gym that allows each employee three visits a day. It counts by badge, not by which door you came through. The analogy breaks down when badges are shared. If a team passes one badge around, the reader sees one person who hits the limit quickly, and the log can't say who actually came in. A shared client certificate has the same problem, and copying a private key is as easy as lending a badge.",
+        "workedExample": {
+          "title": "See exactly what an mTLS server learns about its client",
+          "steps": [
+            {
+              "subgoal": "Issue a server cert and a second client SVID",
+              "detail": "Run this in `~/nico-ch21` (from the SPIFFE lesson). Define a helper and use it:\n```bash\nissue() {  # name san eku\n  openssl ecparam -genkey -name prime256v1 -noout -out \"pki/$1.key\"\n  openssl req -new -key \"pki/$1.key\" -subj \"/CN=$1\" -out \"pki/$1.csr\"\n  printf 'basicConstraints=CA:FALSE\\nkeyUsage=critical,digitalSignature\\nextendedKeyUsage=%s\\nsubjectAltName=%s\\nsubjectKeyIdentifier=hash\\nauthorityKeyIdentifier=keyid\\n' \"$3\" \"$2\" > \"pki/$1.ext\"\n  openssl x509 -req -in \"pki/$1.csr\" -CA pki/ca.pem -CAkey pki/ca.key \\\n    -CAcreateserial -sha256 -days 1 -extfile \"pki/$1.ext\" -out \"pki/$1.pem\"\n}\nissue server \"DNS:localhost,IP:127.0.0.1\" serverAuth\nissue dpu-02 \"URI:spiffe://nico.lab/dpu-agent/dpu-02\" clientAuth\n```"
+            },
+            {
+              "subgoal": "Run a server that requires and prints client certs",
+              "detail": "Save as `whoami.py`:\n```python\nimport http.server, ssl\n\nclass H(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        cert = self.connection.getpeercert()\n        body = f\"subject={cert.get('subject')}\\nsan={cert.get('subjectAltName')}\\n\".encode()\n        self.send_response(200)\n        self.send_header(\"Content-Length\", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\nctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\nctx.load_cert_chain(\"pki/server.pem\", \"pki/server.key\")\nctx.load_verify_locations(\"pki/ca.pem\")\nctx.verify_mode = ssl.CERT_REQUIRED\nsrv = http.server.HTTPServer((\"127.0.0.1\", 9443), H)\nsrv.socket = ctx.wrap_socket(srv.socket, server_side=True)\nsrv.serve_forever()\n```\nStart it with `python3 whoami.py`. `CERT_REQUIRED` turns plain TLS into mTLS."
+            },
+            {
+              "subgoal": "Call it as two different agents",
+              "detail": "In a second terminal:\n```bash\ncd ~/nico-ch21\nfor a in dpu-01 dpu-02; do\n  curl -s --cacert pki/ca.pem --cert pki/$a.pem --key pki/$a.key https://127.0.0.1:9443/\ndone\n```\nExpected:\n```\nsubject=((('commonName', 'dpu-01'),),)\nsan=(('URI', 'spiffe://nico.lab/dpu-agent/dpu-01'),)\nsubject=((('commonName', 'dpu-02'),),)\nsan=(('URI', 'spiffe://nico.lab/dpu-agent/dpu-02'),)\n```\nBoth calls come from the same IP (127.0.0.1), but the server sees two distinct, verified identities."
+            },
+            {
+              "subgoal": "Try to call anonymously",
+              "detail": "```bash\ncurl -s --cacert pki/ca.pem https://127.0.0.1:9443/ ; echo \"exit=$?\"\n```\ncurl fails with a TLS error (typically exit 35 or 56) because the server rejects a handshake that has no client certificate. No identity means no request, before any application code runs."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this admission function so that it keys a per-client call counter on the caller's single SPIFFE URI SAN and rejects a caller once it exceeds `LIMIT` calls. `cert` is the dict returned by `getpeercert()`.",
+          "partialSolution": "from collections import Counter\n\ncalls = Counter()\nLIMIT = 3\n\ndef admit(cert):\n    sans = cert.get(\"subjectAltName\", ())\n    ids = [v for (k, v) in sans if k == ___]\n    if len(ids) != 1:\n        return False\n    calls[ids[0]] += 1\n    return calls[ids[0]] <= ___",
+          "answer": "The first blank is \"URI\" (the SAN type Python reports for SPIFFE IDs), and the second blank is LIMIT. The filled lines read:\n    ids = [v for (k, v) in sans if k == \"URI\"]\n    return calls[ids[0]] <= LIMIT"
+        },
+        "independentProblem": {
+          "prompt": "In a test lab, you run 50 simulated DPU agents against a server that enforces per-client limits from client certificates. All 50 agents mount the same client cert and key from one Kubernetes Secret. After you turn the limits on, most agents start getting rejected, although each one only calls every 30 seconds. Explain what is happening and give two possible fixes, saying which one matches production behaviour.",
+          "hints": [
+            "How many distinct identities does the server see?",
+            "50 agents × 2 calls per minute all land in which bucket?",
+            "One fix changes the certificates, the other changes the limit. Only one of them makes the lab look like real hardware."
+          ],
+          "answer": "The server sees one client because all 50 agents prove the same identity. Their combined ~100 calls/minute land in a single per-client bucket and quickly exceed a limit sized for one agent. Fix 1, which matches production: give each agent its own certificate with a distinct SAN, for example `spiffe://nico.lab/dpu-agent/sim-17`, so each gets its own budget. On real hardware each host and DPU agent has its own identity. Fix 2, which is lab-only: raise the limit for that shared identity. This hides the problem and also loses per-agent audit and isolation. Keying on pod IP instead would be fragile and is not what the server does."
+        },
+        "selfExplanation": "Why is the identity from a verified client certificate a better key for per-client limits than the request's source IP address or a client-supplied header? Name the specific failure each alternative would cause.",
+        "checks": [
+          {
+            "question": "In an mTLS connection to nico-api, where does the client identity used for per-client limits come from?",
+            "options": [
+              "The client's source IP address",
+              "A username field in the gRPC request body",
+              "The client certificate the server verified during the TLS handshake",
+              "The Kubernetes namespace of the server pod"
+            ],
+            "answer": "The client certificate the server verified during the TLS handshake",
+            "explanation": "Only the certificate is proven cryptographically. IPs change and are rewritten by NAT and load balancers. Body fields are whatever the client chooses to send. The server's own namespace says nothing about the caller."
+          },
+          {
+            "question": "Two processes share one client certificate. What does a server with per-client limits do?",
+            "options": [
+              "Gives each process its own limit, because they have different PIDs",
+              "Treats them as one client sharing one limit",
+              "Rejects both, because certificates can't be shared",
+              "Falls back to IP-based limits automatically"
+            ],
+            "answer": "Treats them as one client sharing one limit",
+            "explanation": "The server can only tell callers apart by the identity they prove. PIDs are invisible to it. TLS doesn't detect sharing, since any holder of the key can complete the handshake. There is no automatic IP fallback."
+          },
+          {
+            "question": "A DPU agent completes the mTLS handshake but calls an RPC it isn't allowed to use. Which concept rejects that call?",
+            "options": [
+              "Authentication",
+              "Authorization (e.g. RBAC)",
+              "The TLS cipher suite",
+              "Certificate revocation"
+            ],
+            "answer": "Authorization (e.g. RBAC)",
+            "explanation": "The handshake already authenticated the caller, which established who it is. Whether that identity may call this RPC is an authorization decision. Cipher suites and revocation are about the security of the connection and the validity of the certificate, not about per-RPC permission."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "getting-started/quick-start.md",
+          "getting-started/prerequisites/software.md"
+        ]
+      },
+      {
+        "concept": "role-based-access-control",
+        "prequestions": [
+          {
+            "question": "A site has 40 operators. When someone joins or leaves the on-call rotation, which is less error-prone: editing a list of permissions on each operator, or editing which group each operator is in? Why?",
+            "answer": "Editing group (role) membership. The permissions are defined once per role, so a change in who is on call is a single membership change. You don't have to rebuild several permission lists for each person, where mistakes and leftover privileges creep in."
+          },
+          {
+            "question": "Kubernetes RBAC (ch. 14) has Roles and RoleBindings. Which one says *what* is allowed and which says *who* gets it?",
+            "answer": "A Role lists the permitted verbs on resources (what). A RoleBinding attaches that Role to users, groups or service accounts (who)."
+          }
+        ],
+        "explanation": "**Role-Based Access Control (RBAC)** puts a layer between identities and permissions:\n\n```\nidentity  ──(binding)──▶  role  ──(grant)──▶  permissions\n```\n\nYou grant **permissions** (named actions such as \"read sites\" or \"start rack maintenance\") to **roles**, and you **bind** identities to roles. An authorization check asks: *does any role bound to this caller include this permission?* If nothing grants it, the answer is no. This is **default deny**. Granting each role only what its job needs is **least privilege**.\n\nRBAC is the step after client identity. The previous lesson gave the server a verified *who*. RBAC turns that into *what*.\n\n**In NICo Core (gRPC).** Permissions are granted to roles. For example, Core grants the `OnDemandRackMaintenance` permission to the `NicoAdminCLI` role, which is the role used by the admin CLI that site administrators run against the API Service over mTLS/gRPC.\n\n**In NICo REST (JWT).** Callers send a JWT. The *JWT claims processor pipeline* (with processors for Keycloak, NGC KAS, service accounts and custom issuers) maps token claims into an internal authorization context. Roles come in two families, each with admin and viewer variants:\n\n| Role | Scope | Can do |\n|---|---|---|\n| Provider admin | org / infrastructure provider | manage sites, hardware, tenants, expected machines, racks |\n| Provider viewer | org / infrastructure provider | read sites, expected racks, machines |\n| Tenant admin | org / tenant | manage instances, SSH keys, VPC peering in *that* tenant |\n| Tenant viewer | org / tenant | read tenant resources |\n\nTwo details matter in practice. First, **scope**: a tenant admin is an admin of *their* tenant only. A role grant always applies within a scope. Second, **role string format**: the REST SDK and current OpenAPI use suffixes such as `PROVIDER_ADMIN` and `TENANT_ADMIN`, but some older snapshots and the bundled dev Keycloak examples use prefixed strings such as `NICO_PROVIDER_ADMIN`. Use whatever format your issuer and API version expect. A mismatch shows up as `403`, not as a login failure.",
+        "analogy": "RBAC is like job titles on a building access system. The system grants \"Electrician\" access to plant rooms, and HR assigns people to titles. When someone moves teams, you change their title and don't touch the door list. The analogy breaks down on scope. In NICo, \"Tenant admin\" means admin of one specific tenant, more like \"Electrician, Building B only\". A title without its scope is not the whole grant.",
+        "workedExample": {
+          "title": "A tiny RBAC engine modelled on NICo REST roles",
+          "steps": [
+            {
+              "subgoal": "Define role → permission grants",
+              "detail": "Save as `rbac.py`. The permission names are illustrative and are not NICo's internal strings:\n```python\nPERMISSIONS = {\n    \"PROVIDER_ADMIN\":  {\"site:read\", \"site:write\", \"machine:read\", \"machine:write\", \"tenant:write\"},\n    \"PROVIDER_VIEWER\": {\"site:read\", \"machine:read\"},\n    \"TENANT_ADMIN\":    {\"instance:read\", \"instance:write\", \"sshkey:write\"},\n    \"TENANT_VIEWER\":   {\"instance:read\"},\n}\n```"
+            },
+            {
+              "subgoal": "Bind identities to roles",
+              "detail": "Add the bindings:\n```python\nBINDINGS = {\n    \"ops-bot\":  [\"PROVIDER_ADMIN\"],\n    \"auditor\":  [\"PROVIDER_VIEWER\"],\n    \"acme-ci\":  [\"TENANT_ADMIN\"],\n}\n```\nIn REST, these identities would come from JWT claims. In Core they would come from the client certificate."
+            },
+            {
+              "subgoal": "Write a default-deny check",
+              "detail": "```python\ndef allowed(who, perm):\n    return any(perm in PERMISSIONS.get(r, set()) for r in BINDINGS.get(who, []))\n\nfor who, perm in [(\"auditor\", \"site:read\"), (\"auditor\", \"site:write\"),\n                  (\"acme-ci\", \"instance:write\"), (\"acme-ci\", \"site:read\"),\n                  (\"stranger\", \"site:read\")]:\n    print(f\"{who:9} {perm:15} {'ALLOW' if allowed(who, perm) else 'DENY'}\")\n```\nAn unknown identity has no roles and an unknown role has no permissions, so both fall through to `DENY`."
+            },
+            {
+              "subgoal": "Run it and read the results",
+              "detail": "```bash\npython3 rbac.py\n```\n```\nauditor   site:read       ALLOW\nauditor   site:write      DENY\nacme-ci   instance:write  ALLOW\nacme-ci   site:read       DENY\nstranger  site:read       DENY\n```\nTo give a second auditor access, add one binding. No permission lists change."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "This models Core's grant of `OnDemandRackMaintenance` to the `NicoAdminCLI` role. The `DpuAgent` role and the SPIFFE IDs are illustrative. Fill the blanks so `allowed()` is default-deny and does not crash for an identity that has no role.",
+          "partialSolution": "PERMISSIONS = {\n    \"NicoAdminCLI\": {\"OnDemandRackMaintenance\", \"ListMachines\"},\n    \"DpuAgent\": {\"GetNetworkConfig\", \"ReportHealth\"},\n}\nROLE_OF = {\n    \"spiffe://nico.lab/admin-cli/alice\": \"NicoAdminCLI\",\n    \"spiffe://nico.lab/dpu-agent/dpu-01\": \"DpuAgent\",\n}\n\ndef allowed(identity, permission):\n    role = ROLE_OF.get(identity)\n    return permission in PERMISSIONS.get(___, ___)",
+          "answer": "Fill in role and set(), giving: return permission in PERMISSIONS.get(role, set()). An unknown identity gives role=None, PERMISSIONS.get(None, set()) returns an empty set, and the check returns False."
+        },
+        "independentProblem": {
+          "prompt": "Extend the worked example's model with scope. Bindings become (role, scope) pairs such as (\"TENANT_ADMIN\", \"tenant:acme\"), and each check names the scope of the target resource. Write `allowed(who, perm, scope)` and show that acme's CI can write instances in tenant acme but not in tenant globex.",
+          "hints": [
+            "Change BINDINGS so each value is a list of (role, scope) tuples.",
+            "A grant applies only when the binding's scope equals the resource's scope and the role contains the permission.",
+            "any(perm in PERMISSIONS.get(r, set()) and s == scope for (r, s) in BINDINGS.get(who, []))"
+          ],
+          "answer": "BINDINGS = {\"acme-ci\": [(\"TENANT_ADMIN\", \"tenant:acme\")], \"auditor\": [(\"PROVIDER_VIEWER\", \"provider:ncx\")]}\n\ndef allowed(who, perm, scope):\n    return any(perm in PERMISSIONS.get(r, set()) and s == scope\n               for (r, s) in BINDINGS.get(who, []))\n\nallowed(\"acme-ci\", \"instance:write\", \"tenant:acme\")   # True\nallowed(\"acme-ci\", \"instance:write\", \"tenant:globex\") # False\n\nThis matches NICo REST, where tenant admin applies within an org and tenant. Without scope, any tenant admin could manage every tenant's instances."
+        },
+        "selfExplanation": "Explain why NICo grants permissions like OnDemandRackMaintenance to a role such as NicoAdminCLI rather than to individual operators' identities. What goes wrong over time with per-identity grants?",
+        "checks": [
+          {
+            "question": "A support engineer must look at sites and machines across the provider's infrastructure but must not change anything. Which NICo REST role fits?",
+            "options": [
+              "Provider admin",
+              "Provider viewer",
+              "Tenant admin",
+              "Tenant viewer"
+            ],
+            "answer": "Provider viewer",
+            "explanation": "Provider viewer is read-only over infrastructure-provider resources such as sites, expected racks and machines. Provider admin can modify them, which breaks least privilege. The tenant roles are scoped to one tenant's resources such as instances, not provider infrastructure."
+          },
+          {
+            "question": "A token from your IdP carries the role NICO_TENANT_ADMIN, the user authenticates fine, but tenant calls return 403. What is the most likely cause?",
+            "options": [
+              "The JWT signature is invalid",
+              "The role string format doesn't match what the target API version expects (e.g. TENANT_ADMIN)",
+              "Tenant admins can never call tenant endpoints",
+              "The client certificate is missing"
+            ],
+            "answer": "The role string format doesn't match what the target API version expects (e.g. TENANT_ADMIN)",
+            "explanation": "Authentication worked, so the signature is fine (a bad signature usually gives 401). The glossary notes that prefixed (NICO_...) and suffix-style role strings both appear depending on issuer and API version, and a mismatch means no role matches, so access is denied. REST uses JWTs, not client certificates."
+          },
+          {
+            "question": "Under default deny, what happens when an identity is bound to no roles?",
+            "options": [
+              "It gets viewer access",
+              "It gets whatever its certificate's CN implies",
+              "Every permission check fails",
+              "It inherits the permissions of the last caller"
+            ],
+            "answer": "Every permission check fails",
+            "explanation": "Default deny means a permission must be explicitly granted through a role. There is no implicit viewer role, the CN isn't a grant, and permissions never leak between callers."
+          }
+        ],
+        "sources": [
+          "glossary.md",
+          "getting-started/quick-start.md",
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "concept": "external-secrets-operator",
+        "prequestions": [
+          {
+            "question": "A pod in namespace `nico-system` needs a CA certificate stored in a Secret in namespace `cert-manager`. Can the pod mount that Secret directly?",
+            "answer": "No. Secret volume mounts and env references only resolve in the pod's own namespace. Something has to put a copy into `nico-system`."
+          },
+          {
+            "question": "If you copied that Secret once by hand with kubectl, what problem would show up a few months later?",
+            "answer": "When the source rotates (a new CA, a new DB password), the copy goes stale and nothing updates it. You also lose any record of where the copy came from."
+          }
+        ],
+        "explanation": "An **operator** is a Kubernetes controller that watches Custom Resources (ch. 14) and keeps the cluster matching them. The **External Secrets Operator (ESO)** watches two kinds of resource:\n\n- **SecretStore / ClusterSecretStore**: *where* secrets come from and *how to authenticate* there. ESO supports many backends: Vault, cloud secret managers, and a **Kubernetes provider** that reads Secrets in another namespace or cluster. A SecretStore can be used only in its own namespace. A **ClusterSecretStore** can be referenced from any namespace.\n- **ExternalSecret**: *what* to fetch, the **target** Secret name to write in the ExternalSecret's own namespace, and a `refreshInterval`. ESO creates and owns the target Secret and re-syncs it on that interval. Rotations propagate, and hand edits to the target get overwritten.\n\nApplications keep mounting a plain Kubernetes Secret and never talk to the backend.\n\n**In NICo.** The architecture overview describes ESO generally as syncing secrets into NICo namespaces. The software prerequisites page is more specific about the reference install: ESO copies the **`site-root` CA bundle** and the **database credentials** into the NICo namespaces through ClusterSecretStores that read Kubernetes Secrets in the `cert-manager` and `postgres` namespaces. In that setup *it does not read Vault*. The required objects include:\n\n- ClusterSecretStores for the `cert-manager` and `postgres` namespaces\n- ExternalSecret `nico-roots-eso` → target Secret `nico-roots` with keys `site-root` and `nico-root`\n- per-namespace DB credential ExternalSecrets, e.g. `clouddb-db-eso` → `nico.nico-pg-cluster.credentials`\n\nThe source Secrets live in those namespaces because cert-manager holds the CA there and the Zalando operator writes DB credentials there. ESO is first in the foundation-services install order, and `setup.sh` installs it in phase 5 alongside `nico-prereqs` and `nico-pg-cluster`. The Quick Start health check confirms the result:\n\n```bash\nkubectl get clustersecretstore\nkubectl get secret nico-roots -n nico-system\nkubectl get secret nico-system.nico.nico-pg-cluster.credentials -n nico-system\n```",
+        "analogy": "ESO is like a records clerk with a standing order: \"Keep a current copy of document X from the Finance cabinet in the Engineering cabinet, and check every minute.\" Engineering reads its own cabinet and never needs a key to Finance. The analogy breaks down on direction and ownership. The clerk only copies one way, and treats the Engineering copy as theirs: anything you scribble on it is replaced at the next check.",
+        "workedExample": {
+          "title": "Copy a CA bundle across namespaces with ESO on kind (mirrors NICo's nico-roots pattern)",
+          "steps": [
+            {
+              "subgoal": "Create a cluster and install ESO",
+              "detail": "You need Docker, `kind`, `kubectl` and `helm`. Pin ESO to 0.14.3 (the version `setup.sh` installs) so the `v1beta1` API used below is served.\n```bash\nkind create cluster --name eso-lab\nhelm repo add external-secrets https://charts.external-secrets.io && helm repo update\nhelm install external-secrets external-secrets/external-secrets \\\n  -n external-secrets --create-namespace --version 0.14.3\nkubectl wait -n external-secrets --for=condition=Available deploy --all --timeout=180s\n```"
+            },
+            {
+              "subgoal": "Create the source Secret where the CA lives",
+              "detail": "Reuse `ca.pem` from the SPIFFE lesson. A CA certificate is public, so it's safe to use here.\n```bash\ncd ~/nico-ch21\nkubectl create namespace cert-manager\nkubectl create namespace nico-system\nkubectl create secret generic site-root -n cert-manager --from-file=ca.crt=pki/ca.pem\n```"
+            },
+            {
+              "subgoal": "Give ESO a least-privilege reader and a ClusterSecretStore",
+              "detail": "Save as `store.yaml` and run `kubectl apply -f store.yaml`:\n```yaml\napiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: eso-reader\n  namespace: cert-manager\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: eso-reader\n  namespace: cert-manager\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"secrets\"]\n    verbs: [\"get\", \"list\", \"watch\"]\n  - apiGroups: [\"authorization.k8s.io\"]\n    resources: [\"selfsubjectrulesreviews\"]\n    verbs: [\"create\"]\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: eso-reader\n  namespace: cert-manager\nsubjects:\n  - kind: ServiceAccount\n    name: eso-reader\n    namespace: cert-manager\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: Role\n  name: eso-reader\n---\napiVersion: external-secrets.io/v1beta1\nkind: ClusterSecretStore\nmetadata:\n  name: lab-cert-manager-store\nspec:\n  provider:\n    kubernetes:\n      remoteNamespace: cert-manager\n      server:\n        url: https://kubernetes.default.svc\n        caProvider:\n          type: ConfigMap\n          name: kube-root-ca.crt\n          key: ca.crt\n          namespace: cert-manager\n      auth:\n        serviceAccount:\n          name: eso-reader\n          namespace: cert-manager\n```\nThis is Kubernetes RBAC from ch. 14 applied to ESO: the store can read Secrets in `cert-manager` only."
+            },
+            {
+              "subgoal": "Declare the ExternalSecret",
+              "detail": "Save as `es.yaml` and run `kubectl apply -f es.yaml`:\n```yaml\napiVersion: external-secrets.io/v1beta1\nkind: ExternalSecret\nmetadata:\n  name: nico-roots-eso\n  namespace: nico-system\nspec:\n  refreshInterval: 1m\n  secretStoreRef:\n    kind: ClusterSecretStore\n    name: lab-cert-manager-store\n  target:\n    name: nico-roots\n  data:\n    - secretKey: site-root\n      remoteRef:\n        key: site-root\n        property: ca.crt\n```\n`remoteRef.key` is the source Secret's name, `property` is the key inside it, and `secretKey` is the key in the target."
+            },
+            {
+              "subgoal": "Verify the copy and watch a rotation propagate",
+              "detail": "```bash\nkubectl get clustersecretstore            # STATUS Valid, READY True\nkubectl get externalsecret -n nico-system  # STATUS SecretSynced\nkubectl get secret nico-roots -n nico-system -o jsonpath='{.data.site-root}' \\\n  | base64 -d | openssl x509 -noout -subject   # subject=CN = nico.lab trust root\n# \"rotate\" the source (any PEM shows the change):\nkubectl create secret generic site-root -n cert-manager \\\n  --from-file=ca.crt=pki/dpu-01.pem --dry-run=client -o yaml | kubectl apply -f -\nsleep 70\nkubectl get secret nico-roots -n nico-system -o jsonpath='{.data.site-root}' \\\n  | base64 -d | openssl x509 -noout -subject   # subject=CN = dpu-01\n```\nClean up with `kind delete cluster --name eso-lab`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so this ExternalSecret uses the cluster-wide store from the worked example and writes a Secret with the name NICo pods expect for the root CA bundle.",
+          "partialSolution": "apiVersion: external-secrets.io/v1beta1\nkind: ExternalSecret\nmetadata:\n  name: nico-roots-eso\n  namespace: nico-system\nspec:\n  refreshInterval: 1m\n  secretStoreRef:\n    kind: ___\n    name: lab-cert-manager-store\n  target:\n    name: ___\n  data:\n    - secretKey: site-root\n      remoteRef:\n        key: site-root\n        property: ca.crt",
+          "answer": "kind: ClusterSecretStore (a namespaced SecretStore in cert-manager couldn't be referenced from nico-system) and name: nico-roots (the target Secret name from NICo's software prerequisites)."
+        },
+        "independentProblem": {
+          "prompt": "In your kind lab, create a namespace `postgres` holding a Secret `pg-nico-creds` with keys `username` and `password`. Write the objects that make ESO copy **both keys** into a Secret named `nico.nico-pg-cluster.credentials` in `nico-system`, following the pattern NICo uses for DB credentials. Use the ExternalSecret name `nico-db-eso`.",
+          "hints": [
+            "You need a second ClusterSecretStore, because the first one's remoteNamespace is cert-manager. It also needs its own reader ServiceAccount, Role and RoleBinding in `postgres`.",
+            "Instead of listing each key under `data`, ESO can copy every key from one source Secret using `dataFrom` with `extract`.",
+            "dataFrom:\n    - extract:\n        key: pg-nico-creds"
+          ],
+          "answer": "Create the source first: `kubectl create ns postgres; kubectl create secret generic pg-nico-creds -n postgres --from-literal=username=nico --from-literal=password=s3cret`. Then copy the ServiceAccount, Role and RoleBinding from store.yaml with namespace: postgres, plus a ClusterSecretStore named lab-postgres-store with remoteNamespace: postgres, caProvider namespace: postgres, and auth.serviceAccount namespace: postgres. Finally:\n\napiVersion: external-secrets.io/v1beta1\nkind: ExternalSecret\nmetadata:\n  name: nico-db-eso\n  namespace: nico-system\nspec:\n  refreshInterval: 1m\n  secretStoreRef:\n    kind: ClusterSecretStore\n    name: lab-postgres-store\n  target:\n    name: nico.nico-pg-cluster.credentials\n  dataFrom:\n    - extract:\n        key: pg-nico-creds\n\nVerify with `kubectl get secret nico.nico-pg-cluster.credentials -n nico-system -o jsonpath='{.data.password}' | base64 -d`, which should print s3cret."
+        },
+        "selfExplanation": "NICo could mount CA bundles and DB passwords into pods with a one-off kubectl copy. Explain why a continuously reconciling operator is the better design, and what new risk it introduces (think about who can read the source namespaces).",
+        "checks": [
+          {
+            "question": "In NICo's reference install, where do the ClusterSecretStores read the site-root CA bundle and the DB credentials from?",
+            "options": [
+              "Directly from Vault's KV engine",
+              "From Kubernetes Secrets in the cert-manager and postgres namespaces",
+              "From the nico-api ConfigMap",
+              "From the NGC registry"
+            ],
+            "answer": "From Kubernetes Secrets in the cert-manager and postgres namespaces",
+            "explanation": "The software prerequisites page says so explicitly and adds that ESO does not read Vault there. That is a common misconception, because ESO *can* use Vault as a backend in general. ConfigMaps and the registry don't hold these secrets."
+          },
+          {
+            "question": "An operator hand-edits the `nico-roots` Secret in `nico-system`. What happens?",
+            "options": [
+              "ESO pushes the edit back to the source Secret",
+              "The edit persists permanently",
+              "ESO overwrites it from the source on the next sync",
+              "nico-api rejects the Secret"
+            ],
+            "answer": "ESO overwrites it from the source on the next sync",
+            "explanation": "ESO owns the target and reconciles it toward the source. Sync is one-way, so nothing is written back to the source. Make changes in the source Secret instead."
+          },
+          {
+            "question": "Why is a ClusterSecretStore, rather than a SecretStore, the natural choice for NICo's CA bundle?",
+            "options": [
+              "ClusterSecretStores encrypt data and SecretStores don't",
+              "One store must serve ExternalSecrets in several NICo namespaces",
+              "SecretStores can't use the Kubernetes provider",
+              "ClusterSecretStores don't need any RBAC"
+            ],
+            "answer": "One store must serve ExternalSecrets in several NICo namespaces",
+            "explanation": "A SecretStore is only usable from its own namespace, while a ClusterSecretStore can be referenced from any namespace, and NICo copies the bundle into several of them. Neither kind adds encryption. Both can use the Kubernetes provider. The ClusterSecretStore still needs a reader with RBAC on the source namespace."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/software.md",
+          "overview/what-is-nico.md",
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "kmip-kek-provider",
+        "prequestions": [
+          {
+            "question": "With envelope encryption (ch. 18), data is encrypted with a DEK and the DEK is wrapped with a KEK. If the wrapped DEKs, the ciphertext *and* the KEK all sit in the same database backup, what has the encryption achieved against someone who steals that backup?",
+            "answer": "Almost nothing. The thief has everything needed to unwrap the DEKs and decrypt the data. The KEK has to live somewhere separate from the ciphertext to add any protection."
+          },
+          {
+            "question": "An external key server wants to know which program is asking it for keys. What would you expect that program to present when it connects?",
+            "answer": "A client certificate and its private key over mutual TLS, plus a CA bundle so it can verify the key server. This is the same client-identity idea as the earlier lessons, with NICo now acting as the client."
+          }
+        ],
+        "explanation": "Recall envelope encryption: each secret is encrypted with a **DEK** (data encryption key), and the DEK is stored wrapped by a **KEK** (key-encryption key). Protecting stored secrets then comes down to protecting the KEK and controlling who can use it.\n\n**KMIP** (Key Management Interoperability Protocol) is an OASIS standard protocol for talking to key-management servers. Many enterprise key managers and HSM-backed appliances speak it, conventionally on TCP port 5696 over mutually authenticated TLS. The key server decides what to allow based on the client's certificate identity: client identity and RBAC again, with the key manager as the server.\n\nNICo's **KMIP KEK provider** is an **opt-in** feature. With it, the KEKs that protect stored secrets come from an external KMIP server, so they don't sit in the cluster with the ciphertext. Other KEK sources exist. The `--skip-vault` preflight, for example, refers to a Vault *Transit* KEK provider. KMIP is the choice when the site's security policy says keys belong in a dedicated key manager.\n\nThe connection needs three **client TLS files**:\n\n| File | Purpose |\n|---|---|\n| `ca.pem` | CA(s) used to verify the KMIP *server's* certificate |\n| `client.pem` | nico-api's client certificate, i.e. its identity to the key manager |\n| `client.key` | the private key matching `client.pem` |\n\n**How it's wired in setup.** Set `NICO_KMIP_CLIENT_DIR` to a directory holding exactly those three files. Before Core deploys, `setup.sh` creates the `nico-system/nico-kmip-client` Secret from them for `nico-api` to mount. Preflight checks that each of the provider's TLS paths lies under a chart-provided mount or under a mounted Secret that exists and contains the key the path reads. When the site config mentions KMIP, that check needs Python 3.11+ or the `tomli` package. Without either, preflight warns and skips the check, or fails if `NICO_KMIP_CLIENT_DIR` is set. Setting the variable together with `--skip-core` is an error, because the Secret exists for Core. The provider's own TOML settings are documented on NICo's KMIP KEK provider configuration page. Look them up there rather than guessing.\n\nThe trade-off: keys get separation of duties, revocation (revoke the client cert) and the key manager's audit logs. In return, the key manager becomes a dependency. In general, anything that needs the KEK can't unwrap secrets while the key manager is unreachable.",
+        "analogy": "It works like a bank's safe-deposit vault. Your locked boxes (wrapped DEKs) can sit in your own office, but the master key is held at the bank. You must show bank-issued ID (`client.pem` and `client.key`) and check that you're at the real bank (`ca.pem`) before using it. The analogy breaks down because a bank never hands out its master key. Whether a KMIP key ever leaves the key manager, or the server unwraps on your behalf, depends on how the provider uses KMIP. Check NICo's KMIP configuration page rather than assuming either.",
+        "workedExample": {
+          "title": "Prepare and validate a NICO_KMIP_CLIENT_DIR",
+          "steps": [
+            {
+              "subgoal": "Get a client certificate for nico-api",
+              "detail": "In production, the key-manager team issues this from a CA their KMIP server trusts. In the lab, the `nico.lab` CA stands in for that CA. Using the `issue()` helper from the client-identity lesson:\n```bash\ncd ~/nico-ch21\nissue nico-api-kmip \"URI:spiffe://nico.lab/nico-api\" clientAuth\n```"
+            },
+            {
+              "subgoal": "Assemble the directory with the exact file names",
+              "detail": "```bash\nmkdir -p kmip-client\ncp pki/ca.pem            kmip-client/ca.pem      # lab: same CA signs the server too\ncp pki/nico-api-kmip.pem kmip-client/client.pem\ncp pki/nico-api-kmip.key kmip-client/client.key\nchmod 600 kmip-client/client.key\nls kmip-client   # ca.pem  client.key  client.pem\n```"
+            },
+            {
+              "subgoal": "Check that the key matches the certificate",
+              "detail": "A key/cert mismatch is the most common packaging error. Compare the public keys:\n```bash\ncert_pub=$(openssl x509 -in kmip-client/client.pem -noout -pubkey)\nkey_pub=$(openssl pkey -in kmip-client/client.key -pubout)\n[ \"$cert_pub\" = \"$key_pub\" ] && echo match || echo MISMATCH\n```"
+            },
+            {
+              "subgoal": "Check purpose and lifetime",
+              "detail": "```bash\nopenssl x509 -in kmip-client/client.pem -noout -text | grep -A1 \"Extended Key Usage\"\n#   TLS Web Client Authentication\nopenssl x509 -in kmip-client/client.pem -noout -checkend 86400 && echo \"valid >24h\"\n```\nIn the lab only, `openssl verify -CAfile kmip-client/ca.pem kmip-client/client.pem` also passes, because one CA signs everything. In production, `ca.pem` is the CA of the KMIP *server*, which may differ from the CA that signed your client cert."
+            },
+            {
+              "subgoal": "Probe a real KMIP server, then hand the directory to setup",
+              "detail": "If you have a KMIP server, a plain TLS probe shows whether both sides accept each other:\n```bash\nopenssl s_client -connect kmip.example.com:5696 \\\n  -CAfile kmip-client/ca.pem -cert kmip-client/client.pem -key kmip-client/client.key </dev/null \\\n  | grep 'Verify return code'\n```\nThen opt in before running preflight/setup:\n```bash\nexport NICO_KMIP_CLIENT_DIR=$PWD/kmip-client\ncd helm-prereqs/ && source ./preflight.sh\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete the key/certificate match check. Both commands must print the public key in the same PEM format so the strings can be compared.",
+          "partialSolution": "cert_pub=$(openssl x509 -in client.pem -noout ___)\nkey_pub=$(openssl pkey -in client.key ___)\n[ \"$cert_pub\" = \"$key_pub\" ] && echo match || echo MISMATCH",
+          "answer": "cert_pub=$(openssl x509 -in client.pem -noout -pubkey) and key_pub=$(openssl pkey -in client.key -pubout). Both print a \"-----BEGIN PUBLIC KEY-----\" block."
+        },
+        "independentProblem": {
+          "prompt": "After a certificate rotation, the KMIP connection breaks. For each symptom reported by the TLS layer, say which of the three files is wrong and why:\n(a) On the client side: \"certificate verify failed: unable to get local issuer certificate\" when verifying the KMIP server.\n(b) The KMIP server aborts the handshake with an \"unknown ca\" or \"bad certificate\" alert after receiving the client's certificate.\n(c) Loading the TLS files fails with \"key values mismatch\" before any connection is attempted.",
+          "hints": [
+            "Work out which side is doing the verifying in each case: the client verifying the server, or the server verifying the client.",
+            "ca.pem is only used to judge the server. client.pem is what the server judges.",
+            "(c) never touches the network, so it's about two local files disagreeing."
+          ],
+          "answer": "(a) ca.pem. The client can't build a chain from the KMIP server's certificate to anything in ca.pem, so the bundle is missing the server's (possibly new) issuing CA. (b) client.pem. The server doesn't trust the CA that signed the new client certificate, or the certificate has the wrong purpose or has expired. Get it reissued by a CA the key manager trusts and make sure the key manager's policy grants that identity access. (c) client.key and client.pem don't belong together, typically because the new certificate was copied in with the old key. Re-pair them and confirm with the public-key comparison."
+        },
+        "selfExplanation": "Explain why keeping the KEK in an external KMIP server, rather than in the same database or cluster as the encrypted secrets, actually increases security, and what operational cost the site takes on in exchange.",
+        "checks": [
+          {
+            "question": "What does NICo's KMIP KEK provider get from the external KMIP server?",
+            "options": [
+              "Every stored credential, in plaintext",
+              "The key-encryption keys that protect stored secrets",
+              "nico-api's TLS serving certificate",
+              "Tenant JWT-SVIDs"
+            ],
+            "answer": "The key-encryption keys that protect stored secrets",
+            "explanation": "The provider is about KEKs: the secrets themselves stay envelope-encrypted where NICo stores them. Serving certificates come from cert-manager, and JWT-SVIDs are signed by NICo's machine identity feature."
+          },
+          {
+            "question": "Which file in NICO_KMIP_CLIENT_DIR is nico-api's identity to the key manager?",
+            "options": [
+              "ca.pem",
+              "client.pem (with client.key proving possession)",
+              "nico-kmip-client",
+              "site-root"
+            ],
+            "answer": "client.pem (with client.key proving possession)",
+            "explanation": "client.pem is the certificate the KMIP server checks, and client.key proves nico-api holds it. ca.pem is only for verifying the server. nico-kmip-client is the Secret setup creates from the directory. site-root is NICo's CA bundle, unrelated to KMIP."
+          },
+          {
+            "question": "You run `setup.sh --skip-core` with NICO_KMIP_CLIENT_DIR exported. What happens?",
+            "options": [
+              "setup silently ignores the variable",
+              "setup creates the Secret anyway for later",
+              "It's an error, because the Secret exists for nico-api, which this run won't deploy",
+              "setup switches to the Vault Transit provider"
+            ],
+            "answer": "It's an error, because the Secret exists for nico-api, which this run won't deploy",
+            "explanation": "The Quick Start's variable table says NICO_KMIP_CLIENT_DIR is an error with --skip-core. The Secret is created before Core deploys so nico-api can mount it. setup doesn't silently ignore the variable or switch providers."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md",
+          "getting-started/installation-options/day0-machine-identity.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Build an identity-aware mini control plane",
+      "goal": "Run a local mTLS API that takes each caller's SPIFFE ID from its X.509-SVID, rejects callers from other trust domains, authorises actions by role, and applies per-client limits. Then package and validate a KMIP-style client TLS directory.",
+      "whyItMatters": "This is a small version of what happens on every call to nico-api. A verified client identity from mTLS becomes the key for per-client limits, roles grant actions (as Core grants OnDemandRackMaintenance to NicoAdminCLI), and certificates from a foreign CA never get past the handshake. The last step practises the checks to run before you point NICO_KMIP_CLIENT_DIR at a directory. When a real DPU agent gets throttled or an admin gets 403, you'll know which layer to look at.",
+      "setup": [
+        "Linux or macOS with bash, curl and Python 3.8+ (standard library only)",
+        "OpenSSL 1.1.1+ or 3.x (on macOS, if the system LibreSSL errors, run `brew install openssl@3` and put it first on PATH)",
+        "Two terminals and a free TCP port 8443",
+        "A fresh working directory, e.g. `mkdir ~/idlab && cd ~/idlab`. Run every command from here"
+      ],
+      "steps": [
+        {
+          "subgoal": "Mint the trust domain and SVIDs",
+          "detail": "Save as `mkcerts.sh`, then run `bash mkcerts.sh`:\n```bash\n#!/usr/bin/env bash\n# mkcerts.sh - lab trust domain \"nico.lab\", its SVIDs, and a rogue CA\nset -euo pipefail\nrm -rf pki rogue && mkdir pki rogue\n\nnewca() {  # dir cn\n  openssl ecparam -genkey -name prime256v1 -noout -out \"$1/ca.key\"\n  openssl req -x509 -new -key \"$1/ca.key\" -sha256 -days 30 -subj \"/CN=$2\" -out \"$1/ca.pem\"\n}\n\nissue() {  # dir name san eku\n  local dir=$1 name=$2 san=$3 eku=$4\n  openssl ecparam -genkey -name prime256v1 -noout -out \"$dir/$name.key\"\n  openssl req -new -key \"$dir/$name.key\" -subj \"/CN=$name\" -out \"$dir/$name.csr\"\n  cat > \"$dir/$name.ext\" <<EOF\nbasicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=$eku\nsubjectAltName=$san\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\nEOF\n  openssl x509 -req -in \"$dir/$name.csr\" -CA \"$dir/ca.pem\" -CAkey \"$dir/ca.key\" \\\n    -CAcreateserial -sha256 -days 7 -extfile \"$dir/$name.ext\" -out \"$dir/$name.pem\"\n}\n\nnewca pki \"nico.lab trust root\"\nissue pki server   \"DNS:localhost,IP:127.0.0.1\"             serverAuth\nissue pki dpu-01   \"URI:spiffe://nico.lab/dpu-agent/dpu-01\" clientAuth\nissue pki dpu-02   \"URI:spiffe://nico.lab/dpu-agent/dpu-02\" clientAuth\nissue pki alice    \"URI:spiffe://nico.lab/admin-cli/alice\"  clientAuth\nissue pki nico-api \"URI:spiffe://nico.lab/nico-api\"         clientAuth\n\nnewca rogue \"rogue root\"\nissue rogue dpu-01 \"URI:spiffe://nico.lab/dpu-agent/dpu-01\" clientAuth\necho done\n```\nThe rogue `dpu-01` *claims* the same SPIFFE ID but is signed by a different root."
+        },
+        {
+          "subgoal": "Inspect the identities",
+          "detail": "```bash\nfor c in pki/dpu-01 pki/alice rogue/dpu-01; do\n  echo \"$c:\"; openssl x509 -in $c.pem -noout -text | grep -A1 'Subject Alternative Name' | tail -1\n  openssl verify -CAfile pki/ca.pem $c.pem 2>&1 | tail -1\ndone\n```\nBoth `dpu-01` certificates show the same URI, but only the real one verifies against `pki/ca.pem`. Identity claims are worth nothing without the trust bundle."
+        },
+        {
+          "subgoal": "Write the server: identity, limits, RBAC",
+          "detail": "Save as `server.py`:\n```python\n#!/usr/bin/env python3\nimport http.server, json, ssl, time\n\nTRUST_DOMAIN = \"spiffe://nico.lab/\"\nROLES = {  # SPIFFE ID prefix -> role\n    \"spiffe://nico.lab/dpu-agent/\": \"DpuAgent\",\n    \"spiffe://nico.lab/admin-cli/\": \"NicoAdminCLI\",\n}\nPERMS = {  # role -> allowed actions (illustrative names)\n    \"DpuAgent\": {\"GetNetworkConfig\", \"ReportHealth\"},\n    \"NicoAdminCLI\": {\"GetNetworkConfig\", \"ListMachines\", \"RackMaintenance\"},\n}\nLIMIT, WINDOW = 5, 10  # 5 requests per client per 10 seconds\ncounters = {}\n\ndef spiffe_id(cert):\n    ids = [v for (k, v) in cert.get(\"subjectAltName\", ()) if k == \"URI\"]\n    return ids[0] if len(ids) == 1 else None\n\ndef role_for(sid):\n    for prefix, role in ROLES.items():\n        if sid.startswith(prefix):\n            return role\n    return None\n\nclass H(http.server.BaseHTTPRequestHandler):\n    def reply(self, code, body):\n        data = json.dumps(body).encode()\n        self.send_response(code)\n        self.send_header(\"Content-Type\", \"application/json\")\n        self.send_header(\"Content-Length\", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\n    def do_GET(self):\n        sid = spiffe_id(self.connection.getpeercert())\n        if sid is None or not sid.startswith(TRUST_DOMAIN):\n            return self.reply(401, {\"error\": \"no SPIFFE ID in nico.lab\"})\n        now = time.time()\n        start, n = counters.get(sid, (now, 0))\n        if now - start >= WINDOW:\n            start, n = now, 0\n        n += 1\n        counters[sid] = (start, n)\n        if n > LIMIT:\n            return self.reply(429, {\"client\": sid, \"error\": \"per-client limit\"})\n        action = self.path.strip(\"/\")\n        role = role_for(sid)\n        if action not in PERMS.get(role, set()):\n            return self.reply(403, {\"client\": sid, \"role\": role, \"action\": action})\n        self.reply(200, {\"client\": sid, \"role\": role, \"action\": action})\n\nctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\nctx.load_cert_chain(\"pki/server.pem\", \"pki/server.key\")\nctx.load_verify_locations(\"pki/ca.pem\")\nctx.verify_mode = ssl.CERT_REQUIRED\nsrv = http.server.HTTPServer((\"127.0.0.1\", 8443), H)\nsrv.socket = ctx.wrap_socket(srv.socket, server_side=True)\nprint(\"listening on https://127.0.0.1:8443\")\nsrv.serve_forever()\n```\nStart it in terminal 1: `python3 server.py`. A handshake from an untrusted CA fails inside `accept()` and is dropped before `do_GET` runs."
+        },
+        {
+          "subgoal": "Exercise it by hand",
+          "detail": "In terminal 2:\n```bash\ncurl -s --cacert pki/ca.pem --cert pki/alice.pem --key pki/alice.key https://127.0.0.1:8443/RackMaintenance; echo\ncurl -s --cacert pki/ca.pem --cert pki/dpu-01.pem --key pki/dpu-01.key https://127.0.0.1:8443/RackMaintenance; echo\n```\nAlice (role `NicoAdminCLI`) gets `200` JSON. dpu-01 (role `DpuAgent`) gets a `403` body that names its role and the action it was denied."
+        },
+        {
+          "subgoal": "Package and check a KMIP client directory",
+          "detail": "```bash\nmkdir -p kmip-client\ncp pki/ca.pem kmip-client/ca.pem\ncp pki/nico-api.pem kmip-client/client.pem\ncp pki/nico-api.key kmip-client/client.key\nchmod 600 kmip-client/client.key\n```\nSave as `check-kmip-dir.sh` and run `chmod +x check-kmip-dir.sh`:\n```bash\n#!/usr/bin/env bash\n# check-kmip-dir.sh DIR - sanity-check a KMIP client TLS directory\nset -euo pipefail\nd=${1:?usage: $0 DIR}\nfor f in ca.pem client.pem client.key; do\n  [ -s \"$d/$f\" ] || { echo \"FAIL: missing $d/$f\"; exit 1; }\ndone\ncert_pub=$(openssl x509 -in \"$d/client.pem\" -noout -pubkey)\nkey_pub=$(openssl pkey -in \"$d/client.key\" -pubout)\n[ \"$cert_pub\" = \"$key_pub\" ] || { echo \"FAIL: client.key does not match client.pem\"; exit 1; }\nopenssl x509 -in \"$d/client.pem\" -noout -checkend 86400 >/dev/null \\\n  || { echo \"FAIL: client.pem expires within 24h\"; exit 1; }\nopenssl x509 -in \"$d/client.pem\" -noout -text | grep -q \"TLS Web Client Authentication\" \\\n  || { echo \"FAIL: client.pem lacks clientAuth\"; exit 1; }\n# Lab-only: one CA signs everything here. In production ca.pem verifies the KMIP server.\nopenssl verify -CAfile \"$d/ca.pem\" \"$d/client.pem\" >/dev/null \\\n  || { echo \"FAIL: client.pem does not chain to ca.pem (lab check)\"; exit 1; }\necho \"OK: $d is a usable KMIP client TLS directory\"\n```\nTry breaking it: copy `pki/dpu-01.key` over `kmip-client/client.key`, rerun the script and see the mismatch reported, then restore the correct key."
+        },
+        {
+          "subgoal": "Run the end-to-end verification",
+          "detail": "Save as `verify.sh` and run it with the server still running:\n```bash\n#!/usr/bin/env bash\n# verify.sh - expects server.py running in another terminal\nc() {  # dir name action\n  curl -s -o /dev/null -w '%{http_code} ' --cacert pki/ca.pem \\\n    --cert \"$1/$2.pem\" --key \"$1/$2.key\" \"https://127.0.0.1:8443/$3\" || true\n}\nsleep 11   # let any earlier rate-limit window expire\nc pki dpu-01 GetNetworkConfig\nc pki dpu-01 RackMaintenance\nc pki alice RackMaintenance\nc rogue dpu-01 GetNetworkConfig\nfor i in 1 2 3 4 5; do c pki dpu-01 ReportHealth; done\nc pki dpu-02 GetNetworkConfig\necho\n./check-kmip-dir.sh kmip-client\n```\n`bash verify.sh`"
+        }
+      ],
+      "verify": "`bash verify.sh` prints exactly:\n```\n200 403 200 000 200 200 200 429 429 200 \nOK: kmip-client is a usable KMIP client TLS directory\n```\nReading left to right: dpu-01 may read config (200) but not start rack maintenance (403, RBAC). Alice's NicoAdminCLI role may (200). The rogue certificate never completes the handshake (000). dpu-01's 6th and 7th requests in the window are throttled (429), while dpu-02 is unaffected (200), which shows the limits are per client. Finally, the KMIP directory passes every check.",
+      "hints": [
+        "Every request prints 000: the server isn't running, or you started it from a different directory. The paths `pki/...` are relative, so start server.py and verify.sh from the same directory.",
+        "`openssl x509 -req ... -extfile` errors on macOS: the system LibreSSL may be too old. Install openssl@3 with Homebrew and put it first on PATH, then rerun mkcerts.sh.",
+        "Python raises `ssl.SSLError: [SSL] PEM lib` at startup: server.pem and server.key don't match, usually because mkcerts.sh was half-run. Rerun it from scratch.",
+        "The counts are off by one or two (e.g. 429 appears early): requests you made by hand in the last 10 s count against dpu-01's window. verify.sh sleeps 11 s first. Restarting server.py also resets the counters.",
+        "`Address already in use`: another process holds 8443. Change the port in both server.py and verify.sh.",
+        "The KMIP check says the key doesn't match: you copied the cert and key from different names (e.g. nico-api.pem with dpu-01.key)."
+      ],
+      "stretch": "Two extensions. (1) Replace the fixed-window limiter with a GCRA limiter keyed on the SPIFFE ID, the same algorithm the DPU agent's machine-identity limiter uses (rate plus burst), and show that bursts of 8 pass while a sustained flood is smoothed. (2) In a kind cluster with ESO 0.14.3, store `pki/ca.pem` as `cert-manager/site-root`, mirror it into `nico-system/nico-roots` with a ClusterSecretStore and ExternalSecret, run server.py in a pod that mounts `nico-roots` as its trust bundle, then rotate the CA in the source Secret and show that clients signed by the old CA start failing once the pod restarts with the new bundle."
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "oauth2-client-credentials-flow-and-jwt-bearer-tokens",
+        "severity": "major",
+        "problem": "The 'Inspect the claims' step says to 'Check that iss contains keycloak.nico-rest:8082/realms/nico'. The docs never say what issuer value nico-rest-api expects or what the in-cluster token's iss is. They only say a localhost-fetched token won't match. The REST Keycloak config even has a separate externalBaseURL setting, so the actual issuer may differ. This states a NICo internal the docs don't support, and learners on a real site may wrongly conclude a good token is broken.",
+        "fix": "Change it to: check that iss does not name localhost and equals the issuer nico-rest-api is configured to trust (for example, derived from the Keycloak baseURL/externalBaseURL in values/nico-rest.yaml). Don't assert a specific hostname."
+      },
+      {
+        "where": "tls-certificates-and-x-509-san",
+        "severity": "minor",
+        "problem": "In the 'See it in a live handshake' step, `openssl s_server ... &` is started and `s_client` runs immediately. If pasted as a block, the client can connect before the server is listening. It then fails with connection refused, and grep prints nothing instead of the expected `0 (ok)`.",
+        "fix": "Add `sleep 1` after starting s_server, as the build task does for its servers."
+      }
+    ]
+  }
+}

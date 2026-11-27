@@ -179,3 +179,14 @@ chapters:
       Tested 2026-11-26: minivault works as written; verify.sh prints all five
       expected results, and the side experiment (removing kek-1 before
       re-wrapping) fails with the predicted message. Keep it.
+  19:
+    - >-
+      Don't state NICo internals the docs don't state. For RFC 8693 token
+      delegation the docs only say per-org settings include delegation,
+      `token_endpoint_http_proxy` is an egress proxy for it, and
+      `token_endpoint_domain_allowlist` restricts token_endpoint hosts. They
+      don't say which token NICo sends as subject_token or which component
+      makes the exchange request: describe the typical RFC 8693 pattern as
+      typical, not as NICo fact. Likewise, describe
+      `core-grpc-client-site-agent-certs` only as a Certificate the health
+      check confirms; its role is suggested by its name, not documented.

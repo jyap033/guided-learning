@@ -190,3 +190,19 @@ chapters:
       typical, not as NICo fact. Likewise, describe
       `core-grpc-client-site-agent-certs` only as a Certificate the health
       check confirms; its role is suggested by its name, not documented.
+    - >-
+      Tested 2026-11-27: the rewritten mTLS + toy token-service lab works as
+      written (authenticated call returns tls_client and jwt_sub; no client
+      cert exits 56, no token 401, wrong issuer InvalidIssuerError, wrong
+      hostname exit 60). Keep it.
+  20:
+    - >-
+      Tested 2026-11-27: Vault credential lifecycle lab works as written
+      (current_version 2; both mock BMCs 200 with vault-v2; the :8002 401
+      lockout window appears between the two rotations; the boot verifier
+      prints TRUSTED, UNTRUSTED for tampered grub, then TRUSTED). Keep it.
+  21:
+    - >-
+      Tested 2026-11-27: SPIFFE/mTLS identity lab works as written; verify.sh
+      prints exactly "200 403 200 000 200 200 200 429 429 200" and the KMIP
+      directory OK line; the swapped-key check reports the mismatch. Keep it.

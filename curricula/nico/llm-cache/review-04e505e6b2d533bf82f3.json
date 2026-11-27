@@ -1,0 +1,46 @@
+{
+  "kind": "review",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "verdict": "major-issues",
+    "issues": [
+      {
+        "where": "network-planes",
+        "severity": "major",
+        "problem": "The completion problem's blanks are already inside quotes (\"nico_mechanism\": \"___\", \"traffic\": \"___\"), but the answer gives the values with their own quotes (`\"UFM P_Key partition assignment\"`, `\"GPU-to-GPU scale-up\"`). Filled in exactly as the answer says, the line becomes \"\"UFM P_Key partition assignment\"\", which is invalid Python. Testers flagged exactly this kind of problem.",
+        "fix": "Give the answer values without quotes (UFM P_Key partition assignment / GPU-to-GPU scale-up), or replace \"___\" with a bare ___ in the partial solution."
+      },
+      {
+        "where": "network-planes",
+        "severity": "major",
+        "problem": "The NVLink 'traffic' blank is ambiguous. The other entries use the north-south/east-west axis, and the chapter's own worked example classifies NVLink flow 2 as E/W. So \"east-west\" is a correct fill, but the given answer only accepts \"GPU-to-GPU scale-up\".",
+        "fix": "Accept \"east-west (scale-up)\" explicitly, or change the field (e.g. add a 'scope' field with scale-out/scale-up) so only one answer fits."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The hint says acme's selections come out as 0031/0042 if you 'sorted by GUID or by device name'. Sorting by device name (ibp203…, ibp234…, or the identical label) gives the same order as slot order and selects 00f1/00b2. Only sorting by GUID produces 0031/0042.",
+        "fix": "Drop 'or by device name' from the hint."
+      },
+      {
+        "where": "nvlink-scale-up-fabric",
+        "severity": "minor",
+        "problem": "The worked example concludes 'R3 shows no NmxcUnreachable alert, so NICo's partition monitor can reach NMX-C.' Per the docs, single failed passes aren't reported, the alert needs 3 consecutive failures, and racks skipped by change detection are only checked every 10m. A missing alert therefore doesn't prove reachability, and the lesson's own independent problem makes that point.",
+        "fix": "Reword to 'no NmxcUnreachable alert has been raised (it needs 3 consecutive failed passes)' and avoid stating that reachability is proven."
+      },
+      {
+        "where": "infiniband-fabric",
+        "severity": "minor",
+        "problem": "The chapter states that discovery via Scout reports each device's fabric and slot, and that FMDS returns pf_guid, as current behaviour. In nic_selection.md these are proposed changes (the FMDS format is 'still TBD'), and the doc notes that a host cannot resolve its fabric. The build task's claim that fabric info 'comes from the site' is unsupported and conflicts with the Scout claim.",
+        "fix": "Frame the fields as the design doc's model ('the design proposes discovery records carry…') and remove the unsupported 'comes from the site' claim, or say the source of the fabric mapping isn't covered here."
+      },
+      {
+        "where": "build task",
+        "severity": "minor",
+        "problem": "The 'Compare the two tenants' step says 'All three plane files differ' but only diffs ufm.json and dpu_hbn.json.",
+        "fix": "Add `diff out/acme/nmxc.json out/globex/nmxc.json` or say 'both files differ'."
+      }
+    ]
+  }
+}

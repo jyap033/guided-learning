@@ -1,0 +1,623 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "This chapter answers a question the earlier chapters set up without answering: **why NICo is built the way it is.** You already know the parts. Chapter 7 covered the BlueField DPU and out-of-band (OOB) management, chapter 11 covered VXLAN/EVPN overlays, chapter 22 covered discovery and the PN/PSID of a card. Here they become one design.\n\nWe start with **multi-tenancy**: many customers share the same racks and cables, and none of them can see the others. Next is the security stance that follows from it, the **zero-trust host model**. NICo never trusts the host OS a tenant controls. Isolation is enforced on the DPU, and monitoring goes through BMCs and the DPU agent. With those two ideas in place, **NICo** itself is easy to describe: a suite of microservices that does zero-trust bare-metal lifecycle management through APIs. You'll also learn its **scope boundaries**, meaning what NICo deliberately leaves to your platform team and your network team.\n\nThe last two lessons go down to the DPU card. **Mellanox Device Kind** is how NICo records what a card *is*, separate from what mode it is running in. **DPU restricted mode** is the locked-down state that stops a tenant's host from reconfiguring the DPU underneath it. NICo raises a `RestrictedMode` alert when a DPU is not in that state.\n\nThe build task puts these ideas into a laptop lab. You'll build network namespaces in which \"DPUs\" enforce tenant isolation that a hostile \"host\" cannot undo. Then you'll write a small out-of-band monitor that classifies cards by part number and raises a restricted-mode alert.",
+    "objectives": [
+      "Explain what multi-tenancy requires of shared bare-metal infrastructure and name NICo's isolation mechanism for each network plane",
+      "Apply the zero-trust host model to judge whether a design decision may rely on a given signal or enforcement point",
+      "Describe NICo's role, its main Site Controller services and its on-DPU agents, and place each in the Day 0/1/2 lifecycle",
+      "Sort operational tasks into NICo's scope versus the platform team's or network team's scope",
+      "Tell apart a card's device kind, its observed operating mode and the operator's DPU policy",
+      "Explain what DPU restricted mode protects against and how the RestrictedMode health probe surfaces a violation"
+    ],
+    "lessons": [
+      {
+        "concept": "multi-tenancy",
+        "prequestions": [
+          {
+            "question": "Two customers rent servers in the same rack, and both servers plug into the same top-of-rack switch. Guess what could go wrong if nothing separated their traffic.",
+            "answer": "Each customer could see or reach the other's machines. They could sniff broadcast traffic, scan ports, or reuse IP addresses and collide. Multi-tenancy is about stopping that while still sharing the hardware."
+          },
+          {
+            "question": "When a customer gives a server back, what might the next customer find on it if nothing is cleaned up?",
+            "answer": "The previous tenant's data on the disks, their network configuration and routes, and possibly their metadata or IP addresses. Isolation therefore covers the moment of handover too, not only the time of sharing."
+          }
+        ],
+        "explanation": "**Multi-tenancy** means several customers, called **tenants**, share the same physical infrastructure (racks, cables, switches, sometimes the same server over time), and each tenant is isolated from the others. A tenant should experience a private environment. It should not be able to see, reach, slow down or inherit anything from another tenant.\n\nIsolation has two dimensions:\n\n1. **Isolation in space.** At any moment, tenant A's traffic must not reach tenant B. You saw the Ethernet tool for this in chapter 11. A VTEP wraps each tenant's frames in VXLAN with a tenant-specific **VNI**, and per-tenant **VRFs** keep routing tables apart. In NICo the DPU is the VTEP, so the separation happens on the card attached to each host, not on the leaf switches.\n2. **Isolation in time.** When a host moves from one tenant to the next, nothing may carry over. NICo's tenant transition securely erases drives, removes the old tenant's configuration from the DPU, withdraws its BGP EVPN routes, returns its IPs and VNIs to their pools, and redirects DHCP and metadata. It does not report the release as complete until the DPU confirms it has left every tenant network.\n\nAI clusters have more than one network, so isolation has to hold on every **plane**:\n\n| Plane | NICo's mechanism |\n|---|---|\n| Ethernet (north-south) | BlueField HBN: L3 VXLAN/EVPN, VRFs, Network Security Groups |\n| InfiniBand (east-west) | P_Key partitions per tenant, assigned through UFM |\n| NVLink | Partitions managed through NMX-C |\n| Spectrum-X (east-west) | SP-X partitioning |\n\nThe physical switches are not reconfigured when tenants change. The DPU and the fabric-manager APIs do the enforcement.\n\nNew terms: *tenant* (a customer or group with its own isolated slice), *plane* (a separate physical network such as Ethernet, InfiniBand or NVLink), *P_Key* (InfiniBand partition key, which plays the role a VNI plays for VXLAN).",
+        "analogy": "An apartment building. Tenants share the foundation, plumbing and hallways, but each unit has its own lock, and the locks are changed and the unit is cleaned between renters. The analogy breaks down because apartment walls are fixed and visible. Tenant boundaries in a datacenter are software and firmware state that can drift, so they have to be checked and re-established constantly.",
+        "workedExample": {
+          "title": "Tracing why tenant red's frame never reaches tenant blue",
+          "steps": [
+            {
+              "subgoal": "Write down the tenancy map",
+              "detail": "Suppose an operator has two tenant VPCs:\n\n| Tenant | VPC | VNI | Host |\n|---|---|---|---|\n| red | vpc-red | 5001 | H1, H2 |\n| blue | vpc-blue | 5002 | H3 |\n\nAll three hosts sit behind the same leaf switch."
+            },
+            {
+              "subgoal": "Follow the frame out of H1",
+              "detail": "H1 sends an Ethernet frame to H2. It leaves H1 as a plain frame. H1 knows nothing about VXLAN. The DPU on H1 (the VTEP) wraps it in a VXLAN header with **VNI 5001** and sends it as an ordinary IP/UDP packet across the routed underlay."
+            },
+            {
+              "subgoal": "See what the leaf does",
+              "detail": "The leaf switch routes the outer IP packet like any other. It has no per-tenant configuration. This is why NICo can change tenants without touching the leaf."
+            },
+            {
+              "subgoal": "Decide delivery at the receiving VTEP",
+              "detail": "The DPU on H2 receives VNI 5001, which belongs to vpc-red, and unwraps the frame for H2. The DPU on H3 only has VNI 5002 configured in its tenant VRF. EVPN never advertised H1's red routes into blue's VRF, so a red frame is never delivered to H3."
+            },
+            {
+              "subgoal": "Check the time dimension",
+              "detail": "When red later releases H2, NICo removes red's config from H2's DPU, withdraws the EVPN routes and returns VNI and IP allocations to their pools. If blue then gets H2, its DPU carries only blue's configuration."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this toy delivery check. A receiving DPU should hand a frame to a host only if the frame's VNI matches the VNI of the tenant that owns that host.",
+          "partialSolution": "tenant_vni = {\"red\": 5001, \"blue\": 5002}\n\ndef deliver(frame_vni, dest_tenant):\n    \"\"\"Return True if a frame tagged frame_vni may go to dest_tenant's host.\"\"\"\n    return ___ == frame_vni\n\nprint(deliver(5001, \"red\"))   # True\nprint(deliver(5001, \"blue\"))  # False",
+          "answer": "`tenant_vni[dest_tenant]`. The full line is `return tenant_vni[dest_tenant] == frame_vni`. The VNI acts as the tenant label on the wire, and the receiving VTEP compares it with the tenant that owns the destination host."
+        },
+        "independentProblem": {
+          "prompt": "Tenant red releases host H2, and tenant blue will get it next. List everything that has to change or be cleaned before blue can safely use H2, covering both the host and the network.",
+          "hints": [
+            "Think about the two dimensions: what is stored on the machine, and what is configured on the network for it.",
+            "On the network side, look at the DPU: its tenant config, its BGP EVPN routes, the pools that red's IP/VNI came from, and DHCP/metadata.",
+            "Host: secure erase of drives, verification of the UEFI memory-overwrite request, InfiniBand reset, TPM clear where supported, re-attestation if enabled, firmware revalidation. Network: tenant config removed from the DPU, routes withdrawn, allocations returned, DHCP/metadata redirected, release gated on DPU confirmation."
+          ],
+          "answer": "Host side: secure erase of NVMe and SAS/SATA drives, verification of the UEFI memory-overwrite request, InfiniBand device reset, TPM clear where the platform supports it, re-attestation when attestation is enabled, and firmware integrity revalidation. Network side: remove red's configuration from the DPU data path and detach the host interfaces from red's VPC, so the host is back on the admin overlay. Tear down red's VRF so the DPU stops advertising its BGP EVPN routes and the fabric withdraws them. Return the tenant IP, VNI and DPU-loopback allocations to their pools. Redirect DPU-side DHCP and metadata so the host boots the discovery image and cannot read red's metadata. The release is reported complete only after the DPU confirms it has left all tenant networks."
+        },
+        "selfExplanation": "Why isn't it enough to isolate tenants while they're running? Explain in your own words what can leak at the moment a host changes owner.",
+        "checks": [
+          {
+            "question": "In NICo, where is Ethernet tenant isolation enforced?",
+            "options": [
+              "On the leaf switches, by reconfiguring VLANs per tenant",
+              "On the BlueField DPU attached to each host, through HBN (VXLAN/EVPN, VRFs)",
+              "Inside the host OS, through iptables rules NICo installs",
+              "On the spine routers, through per-tenant ACLs"
+            ],
+            "answer": "On the BlueField DPU attached to each host, through HBN (VXLAN/EVPN, VRFs)",
+            "explanation": "The DPU is the VTEP and runs HBN. Leaf and spine switches stay static during tenancy changes, which rules out the switch options. NICo installs nothing in the host OS for isolation."
+          },
+          {
+            "question": "Which mechanism isolates tenants on the InfiniBand plane?",
+            "options": [
+              "VXLAN VNIs",
+              "P_Key partitions assigned through UFM",
+              "NVLink partitions through NMX-C",
+              "VLAN IDs on the leaf"
+            ],
+            "answer": "P_Key partitions assigned through UFM",
+            "explanation": "Each plane has its own mechanism. VNIs belong to Ethernet overlays and NMX-C partitions belong to NVLink. InfiniBand uses P_Key partition membership managed by UFM."
+          },
+          {
+            "question": "Why is VLAN alone a poor fit for isolating tenants in a large shared datacenter?",
+            "options": [
+              "VLANs cannot carry IP traffic",
+              "The 12-bit VLAN ID allows only 4096 networks, which is too few, while VXLAN's 24-bit VNI allows about 16 million",
+              "VLANs require a DPU",
+              "VLANs only work on InfiniBand"
+            ],
+            "answer": "The 12-bit VLAN ID allows only 4096 networks, which is too few, while VXLAN's 24-bit VNI allows about 16 million",
+            "explanation": "VLANs carry IP fine and need no DPU. The problem is the ID space, which is why the datacenter overlay uses VXLAN. VLAN IDs can still appear on the DPU-to-host link."
+          }
+        ],
+        "sources": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "concept": "zero-trust-host-model",
+        "prequestions": [
+          {
+            "question": "A tenant has root on a bare-metal server. List three things they can do to software running on that server.",
+            "answer": "Anything at all: stop or replace agents, edit firewall rules, fake log output and metrics, load kernel modules, change IP addresses. Root on the host means every piece of software on the host is under the tenant's control."
+          },
+          {
+            "question": "If you can't trust software on the host, where else could you enforce rules and collect health data?",
+            "answer": "On hardware the host cannot control: a separate processor on the network path (the DPU) for enforcement, and the BMC over an out-of-band network for monitoring."
+          }
+        ],
+        "explanation": "On bare metal the tenant gets the whole machine, often with root. The operator cannot hide code inside the host OS, and anything placed there can be stopped, modified or made to lie. NICo therefore follows the **zero-trust host model**: *software inside the host OS is never trusted for security or isolation decisions.*\n\nThe NICo docs list five operational principles, and three of them make up this model:\n\n- **The machine is untrustworthy.** The BlueField DPU is the enforcement boundary. It has its own Arm CPU, OS and BMC, it sits between the host and the network, and it runs independently of the host. A tampered host cannot undo isolation it never controlled.\n- **No OS requirements on the machine.** NICo puts no agents or daemons into the tenant's OS. Any OS that boots via iPXE works. NICo hands off at boot and does not re-enter the host during tenant use. The only host-side code is **Scout**, which runs temporarily during discovery, before any tenant has the machine.\n- **All monitoring is out-of-band.** Health, firmware state and machine status come from **Redfish** on the BMCs and from the **DPU agent**. A compromised or hung host OS cannot block or fake these sources.\n\nThe other defences follow from this. NICo disables in-band host-to-BMC access, applies UEFI lockdown during tenancy, manages BMC and UEFI credentials itself, and (when enabled) attests hosts with Measured Boot and the TPM at ingestion and between tenants.\n\nOne way to remember it is that **enforcement happens on the DPU and evidence comes out-of-band.** If a design needs the host OS to cooperate for security, it breaks this model.\n\nNew term: *trust anchor*, the component everything else relies on to be honest. In NICo that is the DPU. The DPU also holds the keys used to lock SuperNIC firmware, which a later chapter covers.",
+        "analogy": "An airport doesn't ask passengers whether they're carrying anything dangerous and take their word for it. Screening happens at a checkpoint the passenger doesn't control, and cameras watch independently. The analogy breaks down because passengers walk through the checkpoint once, while the DPU sits inline on every packet for as long as the tenancy lasts.",
+        "workedExample": {
+          "title": "Design review: \"let the host agent tell us when to isolate\"",
+          "steps": [
+            {
+              "subgoal": "State the proposal",
+              "detail": "An engineer proposes: *install a small daemon in the tenant OS that configures iptables to block other tenants and reports link and temperature health to the control plane.*"
+            },
+            {
+              "subgoal": "Find the enforcement point",
+              "detail": "The iptables rules live in the host OS. The tenant has root, so `iptables -F` removes them. Enforcement placed under tenant control is not enforcement. **Move it to the DPU**, which the host cannot configure."
+            },
+            {
+              "subgoal": "Find the evidence source",
+              "detail": "Health reported by the daemon can be faked (\"all temperatures fine\") or stop arriving if the OS hangs. **Use the BMC over Redfish and the DPU agent** instead. Both are out-of-band."
+            },
+            {
+              "subgoal": "Check OS requirements",
+              "detail": "The daemon also forces a particular OS and agent onto every tenant, which violates \"no OS requirements\". NICo supports any iPXE-installable OS precisely because it needs nothing inside it."
+            },
+            {
+              "subgoal": "Write the verdict",
+              "detail": "Rejected. Isolation goes on the DPU (HBN VRFs and security groups), monitoring goes through Redfish and the DPU agent, and the host stays agent-free during tenancy."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks: mark each signal as trusted or untrusted for security decisions under the zero-trust host model, and name what NICo uses instead of the untrusted one.",
+          "partialSolution": "| Signal | Trusted? |\n|---|---|\n| Sensor reading from the host BMC via Redfish | trusted |\n| Report from the DPU agent | trusted |\n| `systemctl status` output sent by a daemon in the tenant OS | ___ |\n| Firewall rules inside the tenant OS | untrusted, enforce instead on the ___ |",
+          "answer": "`systemctl status` output from a tenant-OS daemon: **untrusted**, because the tenant controls that OS and can fake or block it. Firewall rules inside the tenant OS: untrusted, so enforce instead on the **DPU** (HBN on the BlueField)."
+        },
+        "independentProblem": {
+          "prompt": "A host's OS keeps reporting \"GPU temperature 55 °C, all fine\" to a tenant dashboard. Meanwhile the host BMC's Redfish sensors show a GPU heatsink at critical temperature. Which source does NICo act on, and why? Also say what NICo would observe if the host OS crashed completely.",
+          "hints": [
+            "Which of the two sources can the tenant tamper with?",
+            "NICo's monitoring principle names exactly two kinds of source: Redfish and the DPU agent.",
+            "NICo acts on the BMC reading (the Hardware Health service scrapes Redfish and reports a `BmcSensor` alert). When the OS crashes, the BMC and DPU keep working."
+          ],
+          "answer": "NICo acts on the BMC's Redfish reading. The Hardware Health service scrapes BMC sensors and reports alerts such as `BmcSensor` to the API Service. The OS-reported value comes from software the tenant controls, and NICo never uses in-band host reporting for security or health decisions. If the host OS crashed, NICo's view would barely change: the BMC still answers Redfish, the DPU agent keeps reporting, and NICo can still power-cycle or inspect the machine out-of-band. That robustness is the point of the principle."
+        },
+        "selfExplanation": "Why does putting the enforcement point on a separate processor (the DPU) protect isolation even when the tenant has full root on the host? Explain it in terms of who controls which software.",
+        "checks": [
+          {
+            "question": "Which statement best describes NICo's zero-trust host model?",
+            "options": [
+              "Hosts must pass attestation once, and after that their in-band reports are trusted",
+              "Software in the host OS is never trusted for security or isolation decisions; the DPU enforces and monitoring is out-of-band",
+              "Every host must run a NICo agent that is cryptographically signed",
+              "Tenants are trusted but other tenants' hosts are not"
+            ],
+            "answer": "Software in the host OS is never trusted for security or isolation decisions; the DPU enforces and monitoring is out-of-band",
+            "explanation": "Attestation happens at ingestion and between tenants, and it does not make in-band reporting trustworthy afterwards. NICo runs no agent in the tenant OS, so a signed agent is not part of the model. Every host is treated as untrustworthy."
+          },
+          {
+            "question": "Scout runs on the x86 host. Why doesn't that contradict the zero-trust host model?",
+            "options": [
+              "Scout is signed, so its output is trusted forever",
+              "Scout runs only temporarily during discovery, before any tenant has the host, to collect inventory that can't be read out-of-band",
+              "Scout runs inside the DPU, not the host",
+              "Scout is optional and never used"
+            ],
+            "answer": "Scout runs only temporarily during discovery, before any tenant has the host, to collect inventory that can't be read out-of-band",
+            "explanation": "Scout runs on the x86 host, not the DPU. It is temporary and runs before tenancy, while NICo controls what boots. During tenant use NICo runs nothing in the host OS."
+          }
+        ],
+        "sources": [
+          "overview/operational-principles.md",
+          "overview/capabilities.md",
+          "overview/what-is-nico.md"
+        ]
+      },
+      {
+        "concept": "nico",
+        "prequestions": [
+          {
+            "question": "Based on the earlier chapters, name four jobs a system needs to do to turn a freshly racked server into something a customer can rent through an API.",
+            "answer": "For example: discover the BMC and inventory the hardware, bring firmware to a baseline, provision the DPU, allocate IPs, set up isolation, PXE-boot the tenant's OS, monitor health, and clean the machine on release. NICo does all of these."
+          },
+          {
+            "question": "Where would you run the control plane that manages a datacenter's servers: in the cloud, or in the datacenter itself? Guess the trade-off.",
+            "answer": "NICo's Site Controller runs site-local, on a Kubernetes cluster in the datacenter, so it keeps managing hardware even without an upstream connection. Its REST layer can optionally sit centrally in the cloud and reach sites through Site Agents."
+          }
+        ],
+        "explanation": "**NICo (NVIDIA Infra Controller)** is an open source (Apache 2.0) suite of microservices for **site-local, zero-trust bare-metal lifecycle management**. Its job is to make physical servers behave like cloud instances: you deploy, manage and scale them through APIs.\n\nEach managed unit is a **ManagedHost**: one host server plus its BlueField DPU(s). NICo manages the DPUs directly, independently of the host, because they are the enforcement boundary from the previous lesson.\n\nNICo runs as the **Site Controller** on a Kubernetes cluster of at least three nodes in the datacenter it manages. Its services talk to each other over mTLS/gRPC. The ones you'll meet most:\n\n- **API Service (NICo Core)**: the single source of truth. It is the *only* service that reads and writes PostgreSQL, and it runs the state machines for hosts, segments and partitions.\n- **DHCP Server**, **PXE Service**, **Authoritative/Recursive DNS**: the boot and network services from chapters 8 and 12.\n- **Hardware Health**: scrapes host and DPU BMCs over Redfish.\n- **SSH Console Service**: serial console over the BMCs.\n- **NICo REST + Site Agent**: a JSON/JWT API that can run in the cloud and reaches a site through Temporal.\n- **Admin CLI**: direct gRPC administration.\n\nOn each managed machine:\n\n- **DPU Agent**: a persistent daemon on the DPU's Arm OS. Every 30 seconds it polls the API Service for desired network config, applies it through HBN, and reports observed state.\n- **FMDS**: a metadata service on the DPU for tenant workloads.\n- **Scout**: temporary, on the host, during discovery only.\n\nAcross the lifecycle (chapter 5), Day 0 covers discovery, SKU validation, firmware baseline, DPU provisioning and optional attestation. Day 1 covers isolation, lockdown and OS provisioning. Day 2 covers monitoring, firmware updates, sanitization between tenants, and break-fix.\n\nNICo depends on off-the-shelf prerequisites it doesn't build: PostgreSQL, Vault, Temporal, cert-manager, ESO, MetalLB, and optionally ArgoCD, Keycloak and the telemetry stack.",
+        "analogy": "An airport's operations centre: one control tower (API Service) holds the authoritative schedule, while ground services (DHCP, PXE, DNS, health) each handle one job and report back. The analogy breaks down because NICo's \"planes\" (machines) are distrusted, and each one has a NICo-controlled co-pilot on board (the DPU agent) that enforces rules on the machine directly.",
+        "workedExample": {
+          "title": "Which NICo pieces touch a host from rack to tenant",
+          "steps": [
+            {
+              "subgoal": "Day 0: get an address and be found",
+              "detail": "The host BMC and DPU BMC request DHCP over the underlay. The **DHCP Server** forwards the request to the **API Service** for IP management. The site explorer crawler then probes the BMCs over Redfish and pairs the DPU with its host via LLDP and serial numbers."
+            },
+            {
+              "subgoal": "Day 0: provision the DPU and inspect the host",
+              "detail": "The **PXE Service** serves the DPU its artifacts. Once the DPU is up, the **DPU Agent** starts polling the API Service every 30 s. The host boots **Scout** to collect in-band-only inventory and run validation tests."
+            },
+            {
+              "subgoal": "Day 0 to 2: keep watching",
+              "detail": "**Hardware Health** scrapes both BMCs over Redfish and reports alerts to the API Service. Prometheus can scrape its `/metrics`."
+            },
+            {
+              "subgoal": "Day 1: give it to a tenant",
+              "detail": "An orchestrator calls **NICo REST**, which goes through Temporal and the **Site Agent**, or an admin calls gRPC with the **Admin CLI**. The API Service records the instance, the DPU agent picks up the tenant's VPC config on its next poll, and the PXE Service serves the tenant's OS. NICo then hands off at boot."
+            },
+            {
+              "subgoal": "Notice the pattern",
+              "detail": "Every arrow points at the **API Service**, and only it touches PostgreSQL. The other services are mostly stateless helpers. This is why the scale chapter (16) kept returning to the CPU limits of nico-api and the Postgres primary."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this YAML map of lifecycle tasks to the NICo component that performs them. It must stay valid YAML.",
+          "partialSolution": "day0_discovery:\n  assigns_ip_to_bmcs: DHCP Server\n  collects_in_band_only_inventory: ___\nday1_provisioning:\n  serves_ipxe_scripts_and_os_images: ___\nday2_operations:\n  scrapes_bmc_sensors: Hardware Health\n  applies_tenant_network_config_on_dpu: DPU Agent",
+          "answer": "`collects_in_band_only_inventory: Scout` and `serves_ipxe_scripts_and_os_images: PXE Service`. Scout is the temporary host-side discovery agent. The PXE Service serves boot artifacts over HTTP after fetching the right one per host from the API Service."
+        },
+        "independentProblem": {
+          "prompt": "A DPU agent needs its desired network configuration. Name which service it talks to, how often, over what protocol, and why it never reads the database directly.",
+          "hints": [
+            "Exactly one service is allowed to touch PostgreSQL.",
+            "The DPU agent's loop has a fixed polling interval stated in the architecture overview.",
+            "API Service, every 30 seconds, mTLS/gRPC. Think about what a single writer buys you for state machines and consistency."
+          ],
+          "answer": "It polls the API Service (NICo Core) every 30 seconds over mTLS/gRPC, applies the config through HBN, and reports observed state back. It never reads PostgreSQL because the API Service is the only service that reads from and writes to the database. That keeps one source of truth and one place where state-machine transitions and access control happen. It also avoids handing database credentials to an agent on a machine NICo does not fully trust."
+        },
+        "selfExplanation": "Why does it make sense for NICo's Site Controller to be site-local, even though NICo REST can run centrally in the cloud?",
+        "checks": [
+          {
+            "question": "Which NICo service is the only one that reads from and writes to PostgreSQL?",
+            "options": [
+              "NICo REST",
+              "API Service (NICo Core)",
+              "Site Agent",
+              "Hardware Health"
+            ],
+            "answer": "API Service (NICo Core)",
+            "explanation": "NICo REST has its own deployment pieces (it uses Temporal and its own components), but the Site Controller's state lives in `nico_system_nico`, which only the API Service touches. The Site Agent and Hardware Health both talk to the API Service over gRPC."
+          },
+          {
+            "question": "What is a ManagedHost in NICo?",
+            "options": [
+              "A Kubernetes node of the Site Controller",
+              "One physical box: a host machine grouped with its attached DPU machine(s)",
+              "Any host that has a tenant assigned",
+              "A virtual machine running on a DPU"
+            ],
+            "answer": "One physical box: a host machine grouped with its attached DPU machine(s)",
+            "explanation": "A host with a tenant assigned is an Instance. Site Controller nodes run NICo itself. The ManagedHost groups one Host Machine with its DPU Machines. Zero-DPU hosts also exist, gated by configuration."
+          },
+          {
+            "question": "How does the DPU Agent get its desired configuration?",
+            "options": [
+              "The API Service pushes config to it whenever something changes",
+              "It polls the API Service every 30 seconds over mTLS/gRPC",
+              "It reads a ConfigMap from Kubernetes",
+              "The host OS forwards config to it"
+            ],
+            "answer": "It polls the API Service every 30 seconds over mTLS/gRPC",
+            "explanation": "The agent pulls on a fixed interval. The host OS is never part of the path (zero-trust), and the DPU agent runs on the DPU, not in the Site Controller's Kubernetes cluster."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "overview/lifecycle.md",
+          "glossary.md"
+        ]
+      },
+      {
+        "concept": "nico-scope-boundaries",
+        "prequestions": [
+          {
+            "question": "After NICo boots a tenant's Ubuntu image, who do you think applies security patches to that Ubuntu: NICo or someone else?",
+            "answer": "Someone else: the operator's platform or the tenant. NICo hands off at boot and does not manage the installed OS."
+          },
+          {
+            "question": "Does NICo configure the leaf switches when it creates a tenant VPC?",
+            "answer": "No. The underlay is pre-configured by the network team and stays static. NICo isolates tenants at the DPU (and through UFM and NMX-C APIs)."
+          }
+        ],
+        "explanation": "NICo is deliberately one layer of a stack:\n\n```text\nISV / NCP control plane\nKubernetes / BMaaS / VMaaS\nNICo            <- infrastructure lifecycle\nBlueField DPU + host hardware\n```\n\nIts scope runs **from the physical underlay up to the OS boot handoff**. Below that line is the network team's physical network. Above it is your platform. Knowing this boundary tells you where to file a ticket and what your integration has to build.\n\n**Host OS and applications.** NICo delivers the OS image through PXE/iPXE, sets the UEFI boot order and Secure Boot, and attests on ingestion and between tenants. *Your platform* handles OS patching, upgrades, runtime configuration, application software, and any in-band monitoring during tenancy. NICo runs nothing in the host OS during tenant use and does not attest continuously.\n\n**Clusters and scheduling.** NICo provisions individual hosts, defines instance types and allocates hosts to tenants through its API, with per-tenant network isolation. *Your platform* assembles hosts into Kubernetes or SLURM clusters, schedules workloads, and runs cluster networking (CNI, service mesh).\n\n**Network underlay.** NICo enforces tenant isolation on the DPU (HBN), assigns InfiniBand partitions through UFM APIs, manages NVLink partitions through NMX-C APIs, and has DPUs advertise BGP routes. *Your network team* configures leaf, spine and router switches, designs and cables the underlay, and deploys and runs UFM and NMX-C. NICo does not install Cumulus on switches or run NetQ.\n\n**External dependencies.** PostgreSQL, Vault, Temporal, cert-manager and the others must already exist. NICo uses them but does not operate them.\n\nThe pattern is that NICo **uses** fabric managers through their APIs but doesn't **operate** them, and it **delivers** an OS but doesn't **maintain** it. This follows from the earlier principles: a static fabric keeps network operations simple, and staying out of the host OS keeps the zero-trust model intact.",
+        "analogy": "A hotel that rents out rooms. It prepares and cleans each room, hands over the key, and keeps the building systems running. It doesn't unpack your luggage or plan your trip, and it doesn't lay the city's roads. The analogy breaks down because the hotel can walk into your room in an emergency, while NICo by design does not re-enter the host OS during tenancy. It works only out-of-band.",
+        "workedExample": {
+          "title": "Triage five tickets",
+          "steps": [
+            {
+              "subgoal": "Ticket 1: \"Instance stuck before OS boots, iPXE times out\"",
+              "detail": "This happens before the boot handoff and involves the PXE Service, DHCP and boot order. **NICo's scope.**"
+            },
+            {
+              "subgoal": "Ticket 2: \"Kubelet on three instances can't join the control plane\"",
+              "detail": "Cluster assembly happens after the OS is running. **Platform team.** NICo did its part when it provisioned the hosts and their tenant network."
+            },
+            {
+              "subgoal": "Ticket 3: \"Leaf-07 has a misconfigured BGP neighbor\"",
+              "detail": "Switch configuration is **network team**. NICo's `BgpPeeringTor` alert can be the *symptom* that surfaces it on a DPU, but fixing the leaf isn't NICo's job."
+            },
+            {
+              "subgoal": "Ticket 4: \"Tenant A can reach tenant B over InfiniBand\"",
+              "detail": "Partition assignment through UFM APIs is **NICo's scope**, so start by checking NICo's partition state. If UFM itself is unhealthy, its deployment belongs to the network team."
+            },
+            {
+              "subgoal": "Ticket 5: \"Need CVE patch for glibc on running instances\"",
+              "detail": "OS patching is **platform or tenant**. NICo doesn't re-enter the host."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the owner for each task: NICo, platform team or network team.",
+          "partialSolution": "| Task | Owner |\n|---|---|\n| Set UEFI boot order before installing the tenant OS | NICo |\n| Install SLURM across 64 allocated hosts | ___ |\n| Deploy and upgrade UFM | ___ |\n| Advertise BGP routes from DPUs | NICo |",
+          "answer": "Install SLURM: **platform team** (cluster assembly). Deploy and upgrade UFM: **network team**. NICo only calls UFM's APIs to assign P_Key partitions."
+        },
+        "independentProblem": {
+          "prompt": "A tenant asks: \"When you provision my 16 GPU hosts, can NICo also put them on VLAN 300 on the leaf switches, install Kubernetes, and keep the NVIDIA driver patched?\" Write the reply, saying which parts NICo does, which it doesn't, and who does them instead.",
+          "hints": [
+            "Take each request and find which side of the boot handoff and the underlay it falls on.",
+            "For the VLAN request, think about how NICo isolates Ethernet tenants without touching switches.",
+            "NICo: provision the hosts, allocate them as instances, and isolate them in the tenant's VPC via the DPU (VXLAN/EVPN), not leaf VLANs. Kubernetes and driver patching are for the platform or tenant. Leaf VLANs are for the network team, and NICo's design doesn't need them."
+          ],
+          "answer": "NICo will provision the 16 hosts (firmware baseline, DPU, iPXE install of the chosen image), allocate them to the tenant as instances, and isolate them in a tenant VPC enforced on each DPU with VXLAN/EVPN and VRFs. It does not change leaf switches. The underlay is static and belongs to the network team, and tenant separation doesn't need per-tenant leaf VLANs. Installing Kubernetes is cluster assembly, which belongs to the platform or ISV control plane consuming NICo's API. Patching the NVIDIA driver is OS and runtime management, which belongs to the platform or tenant. NICo hands off at boot and doesn't re-enter the host."
+        },
+        "selfExplanation": "Why would NICo's zero-trust design become weaker if NICo also managed the tenant's OS after boot? Connect the scope boundary to the principles from the previous lessons.",
+        "checks": [
+          {
+            "question": "Where does NICo's responsibility end on the host side?",
+            "options": [
+              "When the tenant's Kubernetes cluster is healthy",
+              "At the OS boot handoff; after that the OS belongs to the platform or tenant",
+              "After the first OS security patch is applied",
+              "NICo continuously manages the host OS through an agent"
+            ],
+            "answer": "At the OS boot handoff; after that the OS belongs to the platform or tenant",
+            "explanation": "NICo provisions through PXE/iPXE and hands off at boot. Cluster health and patching are platform work, and NICo runs no agents in the tenant OS."
+          },
+          {
+            "question": "Which is NOT NICo's job?",
+            "options": [
+              "Assigning InfiniBand P_Key partitions through UFM APIs",
+              "Configuring leaf and spine switches",
+              "Managing NVLink partitions through NMX-C",
+              "Tenant isolation through HBN on the DPU"
+            ],
+            "answer": "Configuring leaf and spine switches",
+            "explanation": "Switch configuration and underlay design belong to the network team. NICo does call UFM and NMX-C APIs for partitions, and it does enforce Ethernet isolation on the DPU."
+          },
+          {
+            "question": "How often does NICo attest a host?",
+            "options": [
+              "Continuously during tenant use",
+              "On ingestion and between tenant transitions, when attestation is enabled",
+              "Never",
+              "Only when a tenant asks"
+            ],
+            "answer": "On ingestion and between tenant transitions, when attestation is enabled",
+            "explanation": "The scope page says explicitly that NICo doesn't attest continuously. Attestation is off by default and, when enabled, runs on ingestion and between tenants."
+          }
+        ],
+        "sources": [
+          "overview/scope-and-boundaries.md",
+          "overview/what-is-nico.md",
+          "overview/operational-principles.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "concept": "mellanox-device-kind",
+        "prequestions": [
+          {
+            "question": "A BlueField-3 DPU is switched from DPU mode to NIC mode (chapter 12). Is it now a different product?",
+            "answer": "No. It's the same SKU with the same part number, running in a different mode. NICo keeps the product class (device kind) separate from the current mode."
+          },
+          {
+            "question": "Where would you look to find out what product a card is, in a way that doesn't change with configuration?",
+            "answer": "Its part number (PN), which you met in chapter 22 alongside the PSID. NICo derives the device kind from the part number."
+          }
+        ],
+        "explanation": "A BlueField card has several properties that are easy to mix up. NICo keeps three of them separate:\n\n| Property | Question it answers | Changes when? |\n|---|---|---|\n| **Mellanox/BlueField Device Kind** (`MlxDeviceKind`) | *What product is this?* | Never. It comes from the factory part number |\n| **BlueField Operating Mode** (`BlueFieldOperatingMode`: `Dpu` or `Nic`) | *What is it doing right now?* | When the card is reconfigured. It is reported by the card's own BMC when available |\n| **Host DPU Policy** (`Manage`, `Nic`, `Ignore`) | *What does the operator want?* | When the operator changes intent |\n\n**Device kind** is the factory product class NICo derives from the card's **part number**. It identifies a SKU. A DPU-capable product reconfigured from DPU mode to NIC mode keeps the same device kind. Note the naming trap: some historical variant and protobuf names contain the word `Mode`. They are kept only for compatibility, and they still mean the SKU, not observed state. Likewise the Redfish and protobuf boundaries keep a legacy `NicMode` name for what the model code calls `BlueFieldOperatingMode`.\n\nWhy keep them apart? NICo compares **observed mode** against **policy** to decide whether a DPU-capable card needs reconfiguring. That comparison only makes sense if neither value doubles as the card's identity. If identity were derived from mode, a card would appear to change product every time it was reconfigured, and checks that expect particular hardware (such as SKU validation) would see churn instead of a stable answer.\n\nDevice kind also covers cards that *cannot* switch. NIC-only SuperNIC products are classified by product without implying they can enter DPU mode, and they don't need to report a switchable mode. The glossary says future CX8 and CX9 SuperNIC support follows this model.\n\nSo: **kind is identity, mode is observation, policy is intent.**",
+        "analogy": "A car's model (from its VIN) versus whether it's currently in sport or eco mode, versus the mode the owner wants it in. Switching to eco doesn't make it a different model. The analogy breaks down because a car's VIN is the authoritative identity, while NICo *derives* a classification from the part number, so the mapping table matters, and a new product needs a new entry.",
+        "workedExample": {
+          "title": "Reconcile one card",
+          "steps": [
+            {
+              "subgoal": "Read the part number",
+              "detail": "From chapter 22: the PN can be read out of band or through firmware tools. Say it identifies a BlueField-3 DPU SKU. (We use a made-up label `TOY-BF3D-0001` throughout this course, not a real NVIDIA PN.)"
+            },
+            {
+              "subgoal": "Derive the device kind",
+              "detail": "Look up the PN in the classification table, giving *DPU-capable BlueField-3*. Record it as the card's kind. It won't change unless the card is physically swapped."
+            },
+            {
+              "subgoal": "Read the observed operating mode",
+              "detail": "The card's BMC reports `BlueFieldOperatingMode = Dpu`."
+            },
+            {
+              "subgoal": "Compare with policy",
+              "detail": "The operator set the host's DPU policy to `Nic`, meaning \"run this DPU hardware as a plain NIC\". Observed `Dpu` doesn't match intended `Nic`, so the card needs reconfiguration."
+            },
+            {
+              "subgoal": "After reconfiguration",
+              "detail": "Mode now reads `Nic`, policy `Nic`, so they agree. The device kind is still *DPU-capable BlueField-3*. Inventory and SKU checks see the same product as before."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this toy reconciliation. It treats `Manage` as wanting DPU mode, which is a simplification for the exercise. Fill in which field to compare, and what the last line prints.",
+          "partialSolution": "card = {\n    \"part_number\": \"TOY-BF3D-0001\",\n    \"device_kind\": \"BlueField3Dpu\",  # derived from part number\n    \"operating_mode\": \"Dpu\",         # observed, from the card's BMC\n    \"host_dpu_policy\": \"Nic\",        # operator intent\n}\n\ndef needs_reconfiguration(card):\n    wanted = {\"Manage\": \"Dpu\", \"Nic\": \"Nic\"}[card[\"host_dpu_policy\"]]\n    return card[___] != wanted\n\nprint(needs_reconfiguration(card))  # True\ncard[\"operating_mode\"] = \"Nic\"\nprint(needs_reconfiguration(card))  # False\nprint(card[\"device_kind\"])          # prints ___",
+          "answer": "The first blank is `\"operating_mode\"`, because you compare the observed mode with the intent. Comparing `device_kind` would be meaningless, since kind never equals a mode. The last line prints `BlueField3Dpu`: reconfiguration changed the mode, not the kind."
+        },
+        "independentProblem": {
+          "prompt": "An engineer proposes simplifying the data model: \"Drop device kind. If the BMC says `Nic`, call the card a NIC; if it says `Dpu`, call it a DPU.\" Give two concrete problems this causes.",
+          "hints": [
+            "What happens to a card's identity when it's reconfigured?",
+            "Think about SuperNIC products that never report a switchable mode, and about comparing observed state with intent.",
+            "(1) Identity would flip on reconfiguration and confuse inventory and SKU checks. (2) The observed-vs-policy comparison would lose its stable reference, and NIC-only SuperNICs, which may not report a mode, would have no classification."
+          ],
+          "answer": "(1) A DPU-capable card reconfigured to NIC mode would suddenly look like a different product. Inventory, SKU validation and anything keyed on hardware class would see the hardware \"change\" without any physical swap. (2) NICo's reconciliation compares observed mode with policy to decide whether a DPU-capable card needs reconfiguring. Without a separate kind, NICo can't tell \"a DPU-capable card currently in NIC mode, which can be switched\" apart from \"a NIC-only SuperNIC, which can't\". It might also try to reconfigure cards that have no DPU mode, and NIC-only SuperNICs, which needn't report a switchable mode, would have no classification. Mode is observation and kind is identity, so they can't stand in for each other."
+        },
+        "selfExplanation": "Explain in your own words why NICo needs three separate fields (kind, observed mode, policy) instead of one or two, and what decision depends on comparing two of them.",
+        "checks": [
+          {
+            "question": "A BlueField-3 DPU is reconfigured from DPU mode to NIC mode. What happens to its Mellanox Device Kind?",
+            "options": [
+              "It changes to a NIC kind",
+              "It stays the same, because it is derived from the part number and identifies the SKU",
+              "It becomes Unknown until rediscovery",
+              "It is copied from the Host DPU Policy"
+            ],
+            "answer": "It stays the same, because it is derived from the part number and identifies the SKU",
+            "explanation": "Device kind is factory classification, independent of operating mode. Policy is operator intent and is never copied into kind."
+          },
+          {
+            "question": "Some historical protobuf names for device kind contain the word `Mode`. What do they mean?",
+            "options": [
+              "The card's current operating mode",
+              "They identify a SKU; the names are kept only for compatibility",
+              "The operator's DPU policy",
+              "The UEFI boot mode"
+            ],
+            "answer": "They identify a SKU; the names are kept only for compatibility",
+            "explanation": "This is a naming trap the glossary warns about. Observed state lives in `BlueFieldOperatingMode` (legacy `NicMode` at protobuf and Redfish boundaries)."
+          },
+          {
+            "question": "Which value is operator intent rather than an observation?",
+            "options": [
+              "MlxDeviceKind",
+              "BlueFieldOperatingMode",
+              "HostDpuPolicy",
+              "PSID"
+            ],
+            "answer": "HostDpuPolicy",
+            "explanation": "HostDpuPolicy (`Manage`/`Nic`/`Ignore`) is what the operator wants. Operating mode is observed from the BMC, and device kind and PSID describe the product and firmware identity."
+          }
+        ],
+        "sources": [
+          "glossary.md"
+        ]
+      },
+      {
+        "concept": "dpu-restricted-mode",
+        "prequestions": [
+          {
+            "question": "The host and its DPU share a PCIe link. If the tenant's root user on the host could run Mellanox firmware tools against the DPU (like mlxconfig in chapter 10), what could they try to change?",
+            "answer": "For example, switching the card's operating mode or other firmware settings so the DPU stops enforcing isolation. That would undo the zero-trust boundary from below."
+          },
+          {
+            "question": "How would NICo find out that a DPU isn't locked down, given that it doesn't trust the host?",
+            "answer": "From an out-of-band source. The DPU agent checks the DPU's own state and reports health to the API Service. NICo raises a `RestrictedMode` alert when the DPU isn't in restricted mode."
+          }
+        ],
+        "explanation": "The DPU is NICo's trust anchor, but it is also a PCIe device inside the tenant's server. By default a BlueField lets the host side reach management functions such as firmware configuration tools over that link. In a zero-trust design that is a back door: the untrusted host could reconfigure the very device meant to police it.\n\n**DPU restricted mode** closes the door. It is a locked-down mode in which **the host cannot reconfigure the DPU**. Configuration authority stays with the DPU's own side (its Arm OS and BMC), which NICo manages. (General BlueField background: NVIDIA's firmware tools include a utility for restricting host privileges, `mlxprivhost`. The NICo docs in this course don't show how NICo itself applies the setting, so don't assume a specific command.)\n\nIt fits with defences you've already seen:\n\n- NICo **disables in-band host-to-BMC access**, so the host can't manage its BMC from inside.\n- **UEFI lockdown** stops BIOS changes during tenancy.\n- **Restricted mode** stops DPU reconfiguration from the host.\n\nAll three remove a path from the untrusted host to something NICo depends on.\n\nNICo *checks* this out-of-band and doesn't rely on having set it once. NICo health reports identify each check by a stable **probe ID**. Failed checks appear in `alerts`, and passing checks can appear in `successes`. The DPU-related probe **`RestrictedMode`** means *the DPU is not running in restricted mode*. It sits alongside other DPU probes such as `HeartbeatTimeout` (no recent DPU agent contact) and `BgpPeeringTor`. Operators can search machines by probe ID, so you can query the fleet for every DPU carrying a `RestrictedMode` alert.\n\nThe docs define what the probe *indicates*. They don't, on these pages, say which allocation-blocking classification it carries, so check your deployment's health alert classifications before assuming it blocks tenants.",
+        "analogy": "A rental car whose engine computer is sealed so the renter can't plug in a tuning laptop. The rental company checks the seal remotely and flags any car where it's broken. The analogy breaks down because a broken seal on a car is physical and permanent, while restricted mode is a configuration state that can be toggled. That's why NICo keeps checking it instead of checking once.",
+        "workedExample": {
+          "title": "From attack path to alert",
+          "steps": [
+            {
+              "subgoal": "Name the attack path",
+              "detail": "A tenant with root on the host sees the BlueField as a PCIe device and tries to reconfigure it from the host, for example to change its mode or firmware settings so traffic bypasses HBN enforcement."
+            },
+            {
+              "subgoal": "Apply the control",
+              "detail": "With the DPU in restricted mode, host-side reconfiguration attempts are refused. The DPU's management stays on its own side, which NICo controls through provisioning and the DPU agent."
+            },
+            {
+              "subgoal": "Detect drift",
+              "detail": "Suppose a DPU comes back from a repair with restricted mode off. NICo's DPU health checks report the `RestrictedMode` probe ID as an alert on that machine."
+            },
+            {
+              "subgoal": "Find all affected machines",
+              "detail": "Because health alerts are searchable by probe ID, an operator can list every machine with `RestrictedMode` instead of inspecting DPUs one by one."
+            },
+            {
+              "subgoal": "Decide the response",
+              "detail": "Treat the host as one whose isolation can't be guaranteed until the DPU is back in restricted mode. Look up the alert's classification on your install to see whether it already blocks allocation."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this toy check that turns DPU observations into alerts carrying the probe ID `RestrictedMode`. The dict shape is invented for the exercise and isn't NICo's real report format.",
+          "partialSolution": "def restricted_mode_alerts(dpus):\n    alerts = []\n    for dpu in dpus:\n        if ___:\n            alerts.append({\"id\": \"RestrictedMode\", \"target\": dpu[\"name\"]})\n    return alerts\n\nprint(restricted_mode_alerts([\n    {\"name\": \"dpu-a\", \"restricted\": True},\n    {\"name\": \"dpu-b\", \"restricted\": False},\n]))",
+          "answer": "`not dpu[\"restricted\"]`. The alert fires when the DPU is NOT in restricted mode. Output: `[{'id': 'RestrictedMode', 'target': 'dpu-b'}]`."
+        },
+        "independentProblem": {
+          "prompt": "A colleague says: \"We set restricted mode during DPU provisioning, so the RestrictedMode probe is redundant.\" Argue against this using the zero-trust principles, and say where the evidence for the probe must come from.",
+          "hints": [
+            "Can a configuration state change after it is first set? Think about repairs, reflashes and firmware updates.",
+            "NICo's monitoring principle says what kind of source it may use.",
+            "State drifts, so it must be verified continuously, and verified out-of-band from the DPU side, never from the host."
+          ],
+          "answer": "Setting a value once doesn't guarantee it stays set. DPUs get reflashed, repaired, swapped or updated, and a mistake or regression can leave one unrestricted. Zero-trust means verifying, not assuming, so NICo keeps checking and raises `RestrictedMode` whenever the DPU isn't restricted. The evidence must come from the DPU side, through the DPU agent and health reporting to the API Service, or otherwise out-of-band, never from software in the host OS. A host that had already exploited the gap could simply lie that everything is locked."
+        },
+        "selfExplanation": "Why does restricted mode matter specifically *because* NICo made the DPU its trust anchor? What would an unrestricted DPU let a tenant do to the zero-trust model?",
+        "checks": [
+          {
+            "question": "What does the `RestrictedMode` health probe indicate?",
+            "options": [
+              "The host is in UEFI lockdown",
+              "The DPU is not running in restricted mode",
+              "The tenant has restricted network access",
+              "The DPU agent's heartbeat timed out"
+            ],
+            "answer": "The DPU is not running in restricted mode",
+            "explanation": "The probe fires on the missing lockdown. UEFI lockdown is a separate host control, and agent heartbeat loss is `HeartbeatTimeout`."
+          },
+          {
+            "question": "What does restricted mode prevent?",
+            "options": [
+              "The DPU from forwarding tenant traffic",
+              "The host from reconfiguring the DPU",
+              "NICo from updating DPU firmware",
+              "The BMC from answering Redfish"
+            ],
+            "answer": "The host from reconfiguring the DPU",
+            "explanation": "It removes host-side control over the DPU. NICo still manages the DPU from its own side, and traffic forwarding and Redfish are unaffected."
+          },
+          {
+            "question": "Which is the right source for NICo to learn whether a DPU is restricted?",
+            "options": [
+              "A script in the tenant's host OS",
+              "The DPU side (DPU agent and health reporting), out-of-band from the host",
+              "The leaf switch's LLDP table",
+              "The tenant's dashboard"
+            ],
+            "answer": "The DPU side (DPU agent and health reporting), out-of-band from the host",
+            "explanation": "Host-side software is untrusted. LLDP describes cabling, not DPU lockdown, and a tenant dashboard is in-band."
+          }
+        ],
+        "sources": [
+          "architecture/health/health_probe_ids.md",
+          "overview/capabilities.md",
+          "overview/operational-principles.md",
+          "glossary.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "A mini zero-trust site: DPU-enforced tenant isolation plus an out-of-band monitor",
+      "goal": "Inside one privileged container, build three tenant \"hosts\", each behind its own \"DPU\" network namespace that enforces tenant isolation with nftables. Show that a hostile host cannot break isolation. Then write an out-of-band monitor that ignores host-reported data, classifies cards by part number (device kind), checks enforcement directly on each DPU, and raises a `RestrictedMode` alert.",
+      "whyItMatters": "This is NICo's design at laptop scale. The fabric is static, isolation lives on the DPU and not the host, monitoring trusts only out-of-band sources, device kind stays fixed when mode changes, and an unrestricted DPU raises an alert. Seeing a root user on the \"host\" fail to reach another tenant makes the zero-trust host model concrete. A namespace is not a real hardware boundary, though. Here you role-play the tenant by only running commands inside `host-*` namespaces.",
+      "setup": [
+        "Docker (or Podman) on Linux or macOS. Docker Desktop on macOS works because the lab runs inside the Linux VM.",
+        "An empty working directory on your machine, e.g. `mkdir zt-lab && cd zt-lab`",
+        "About 200 MB for the `debian:stable-slim` image and packages"
+      ],
+      "steps": [
+        {
+          "subgoal": "Start the lab container",
+          "detail": "From your `zt-lab` directory:\n\n```sh\ndocker run --rm -it --privileged --name zt -v \"$PWD\":/lab -w /lab debian:stable-slim bash\n```\n\nInside the container:\n\n```sh\napt-get update && apt-get install -y iproute2 nftables iputils-ping python3\n```\n\nEverything below runs inside this container shell unless stated otherwise. (Podman: replace `docker` with `podman`.)"
+        },
+        {
+          "subgoal": "Write the topology script",
+          "detail": "On your host machine, create `zt-lab/setup.sh` (it appears in `/lab` inside the container). The `fabric` namespace is the static underlay router. Each tenant host `host-X` reaches it only through its own `dpu-X`, and each DPU's nftables rules are the enforcement point.\n\n```sh\n#!/bin/sh\nset -e\n\nmk() {\n  n=$1; hostnet=$2; fab=$3; dpu=$4; allow=$5\n  ip netns add host-$n\n  ip netns add dpu-$n\n  ip -n host-$n link add eth0 type veth peer name host0 netns dpu-$n\n  ip -n dpu-$n link add up0 type veth peer name f-$n netns fabric\n  ip -n host-$n addr add $hostnet.2/24 dev eth0\n  ip -n dpu-$n addr add $hostnet.1/24 dev host0\n  ip -n dpu-$n addr add 172.16.0.$dpu/31 dev up0\n  ip -n fabric addr add 172.16.0.$fab/31 dev f-$n\n  ip -n host-$n link set lo up\n  ip -n host-$n link set eth0 up\n  ip -n dpu-$n link set lo up\n  ip -n dpu-$n link set host0 up\n  ip -n dpu-$n link set up0 up\n  ip -n fabric link set f-$n up\n  ip -n host-$n route add default via $hostnet.1\n  ip -n dpu-$n route add default via 172.16.0.$fab\n  ip -n fabric route add $hostnet.0/24 via 172.16.0.$dpu\n  ip netns exec dpu-$n sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'\n  ip netns exec dpu-$n nft -f - <<EOF\ntable inet dpu {\n  chain forward {\n    type filter hook forward priority 0; policy drop;\n    iifname \"host0\" ip saddr != $hostnet.2 counter drop\n    iifname \"host0\" ip daddr $allow accept\n    iifname \"up0\" oifname \"host0\" ip saddr $allow accept\n    counter drop\n  }\n}\nEOF\n}\n\nip netns add fabric\nip -n fabric link set lo up\nip netns exec fabric sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'\n\n#  name hostnet   fab dpu allowed-tenant-prefix\nmk r1  10.10.1   0   1   10.10.0.0/16\nmk r2  10.10.2   2   3   10.10.0.0/16\nmk b1  10.20.1   4   5   10.20.0.0/16\necho \"topology ready\"\n```\n\nRun it in the container: `sh setup.sh`. You should see `topology ready`. Tenant **red** owns r1 and r2, and tenant **blue** owns b1. The fabric has a plain route for every host and no tenant logic at all."
+        },
+        {
+          "subgoal": "Prove isolation",
+          "detail": "```sh\nip netns exec host-r1 ping -c2 -W1 10.10.2.2   # red -> red: replies\nip netns exec host-r1 ping -c2 -W1 10.20.1.2   # red -> blue: 100% packet loss\nip netns exec host-b1 ping -c2 -W1 10.10.1.2   # blue -> red: 100% packet loss\n```\n\nThe fabric *can* route between all three subnets (`ip -n fabric route` shows them). The blue traffic is stopped only by the DPUs."
+        },
+        {
+          "subgoal": "Play the hostile tenant",
+          "detail": "You are root on `host-r1`. Try to break out using only `host-r1`:\n\n```sh\n# 'Disable the firewall' - there is nothing here to disable; enforcement isn't on the host\nip netns exec host-r1 nft flush ruleset\nip netns exec host-r1 ping -c2 -W1 10.20.1.2        # still fails\n\n# Spoof a different source address\nip -n host-r1 addr add 10.10.1.99/24 dev eth0\nip netns exec host-r1 ping -c2 -W1 -I 10.10.1.99 10.10.2.2   # fails: anti-spoof on the DPU\n```\n\nNow look at the evidence from the DPU side, not the host:\n\n```sh\nip netns exec dpu-r1 nft list chain inet dpu forward\n```\n\nThe `counter` on the `ip saddr != 10.10.1.2` rule and on the final `drop` show non-zero packet counts. Nothing the tenant did inside `host-r1` touched those rules."
+        },
+        {
+          "subgoal": "Write the out-of-band monitor",
+          "detail": "On your host machine, create `zt-lab/inventory.json`. It stands in for what the cards' BMCs report (`source: oob`), plus one claim from a host agent (`source: host`) that must be ignored. The part numbers are invented.\n\n```json\n[\n  {\"name\": \"dpu-r1\", \"source\": \"oob\",  \"part_number\": \"TOY-BF3D-0001\", \"operating_mode\": \"Dpu\", \"restricted_mode\": true},\n  {\"name\": \"dpu-r2\", \"source\": \"oob\",  \"part_number\": \"TOY-BF3D-0001\", \"operating_mode\": \"Dpu\", \"restricted_mode\": false},\n  {\"name\": \"dpu-r2\", \"source\": \"host\", \"part_number\": \"TOY-BF3D-0001\", \"operating_mode\": \"Dpu\", \"restricted_mode\": true},\n  {\"name\": \"dpu-b1\", \"source\": \"oob\",  \"part_number\": \"TOY-BF3D-0001\", \"operating_mode\": \"Dpu\", \"restricted_mode\": true}\n]\n```\n\nCreate `zt-lab/oob_monitor.py`:\n\n```python\n#!/usr/bin/env python3\n\"\"\"Toy out-of-band monitor: trusts only 'oob' records and checks each DPU directly.\"\"\"\nimport json\nimport subprocess\nimport sys\n\n# Toy table: part-number prefix -> device kind. Invented for this lab.\nDEVICE_KINDS = {\n    \"TOY-BF3D\": \"BlueField3Dpu\",\n    \"TOY-BF3S\": \"BlueField3SuperNic\",\n}\nDPU_CAPABLE = {\"BlueField3Dpu\"}\n\n\ndef device_kind(part_number):\n    for prefix, kind in DEVICE_KINDS.items():\n        if part_number.startswith(prefix):\n            return kind\n    return \"Unknown\"\n\n\ndef enforcement_present(dpu):\n    result = subprocess.run(\n        [\"ip\", \"netns\", \"exec\", dpu, \"nft\", \"list\", \"table\", \"inet\", \"dpu\"],\n        capture_output=True, text=True,\n    )\n    return result.returncode == 0\n\n\ndef main(path):\n    with open(path) as f:\n        records = json.load(f)\n    alert_count = 0\n    for rec in records:\n        if rec[\"source\"] != \"oob\":\n            print(f\"{rec['name']}: ignored record from source={rec['source']}\")\n            continue\n        kind = device_kind(rec[\"part_number\"])\n        alerts = []\n        if kind in DPU_CAPABLE and rec[\"operating_mode\"] == \"Dpu\" and not rec[\"restricted_mode\"]:\n            alerts.append(\"RestrictedMode\")\n        if rec[\"operating_mode\"] == \"Dpu\" and not enforcement_present(rec[\"name\"]):\n            alerts.append(\"EnforcementMissing\")\n        alert_count += len(alerts)\n        print(f\"{rec['name']}: kind={kind} mode={rec['operating_mode']} alerts={alerts}\")\n    return 1 if alert_count else 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main(sys.argv[1]))\n```\n\nRun it: `python3 oob_monitor.py inventory.json; echo \"exit=$?\"`\n\nExpected:\n\n```text\ndpu-r1: kind=BlueField3Dpu mode=Dpu alerts=[]\ndpu-r2: kind=BlueField3Dpu mode=Dpu alerts=['RestrictedMode']\ndpu-r2: ignored record from source=host\ndpu-b1: kind=BlueField3Dpu mode=Dpu alerts=[]\nexit=1\n```\n\n`RestrictedMode` is NICo's real probe ID. `EnforcementMissing` exists only in this lab."
+        },
+        {
+          "subgoal": "Fix, break and flip",
+          "detail": "1. **Fix:** in `inventory.json`, set dpu-r2's `oob` record to `\"restricted_mode\": true`. Re-run and you get no alerts and `exit=0`. The host record's \"true\" never helped. Only the out-of-band record counts.\n2. **Break enforcement:** `ip netns exec dpu-b1 nft delete table inet dpu`, then re-run. dpu-b1 now shows `['EnforcementMissing']` and `exit=1`. Run `ip netns exec host-r1 ping -c2 -W1 10.20.1.2` and it still fails, because red's own DPU protects red.\n3. **Flip mode:** set dpu-b1's `operating_mode` to `\"Nic\"` and re-run. The line reads `dpu-b1: kind=BlueField3Dpu mode=Nic alerts=[]`. The mode changed and the kind did not."
+        }
+      ],
+      "verify": "Inside the container, all of these hold: (1) `ip netns exec host-r1 ping -c2 -W1 10.10.2.2` gets replies; (2) `ip netns exec host-r1 ping -c2 -W1 10.20.1.2` reports 100% packet loss even after `ip netns exec host-r1 nft flush ruleset`; (3) with the original `inventory.json`, `python3 oob_monitor.py inventory.json; echo exit=$?` prints exactly one alert, `['RestrictedMode']` on dpu-r2, plus the `ignored record from source=host` line, and ends with `exit=1`; (4) after setting dpu-r2's oob record to restricted, it prints no alerts and `exit=0`.",
+      "hints": [
+        "`mount --make-shared /run/netns failed` or `Cannot create namespace`: the container isn't privileged. Restart it with `--privileged`.",
+        "`RTNETLINK answers: File exists` when re-running setup.sh: clear the old namespaces with `ip -all netns delete` and run it again.",
+        "Running `nft list ruleset` in the container's default namespace (not a `dpu-*` one) may print Docker's `table ip nat` with warnings like `XT target DNAT not found`. They are harmless. Your rules live in the `dpu-*` namespaces.",
+        "`sysctl: not found` is expected because slim Debian lacks procps. The script enables forwarding with `echo 1 > /proc/sys/net/ipv4/ip_forward` inside each namespace instead.",
+        "Red-to-red ping fails too? Check `ip -n fabric route` lists all three /24s, and check you didn't leave the spoofed 10.10.1.99 as the source. Plain `ping` without `-I` uses 10.10.1.2.",
+        "`json.decoder.JSONDecodeError`: a trailing comma or a missing quote in inventory.json. Validate it with `python3 -m json.tool inventory.json`."
+      ],
+      "stretch": "Turn the monitor into a tiny \"DPU agent\" reconciler. Store the desired allowed prefix per DPU in a JSON file. Every 30 seconds (like NICo's DPU agent polling interval), compare each DPU's live nftables table with the desired state and re-apply it if it's missing or different. Delete dpu-b1's table and confirm your loop restores it within one interval without anyone touching the `host-*` or `fabric` namespaces."
+    }
+  }
+}

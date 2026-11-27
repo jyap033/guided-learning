@@ -1,0 +1,776 @@
+{
+  "kind": "revise",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Day 0 starts when a server is racked and cabled. NICo's goal is **zero-touch** from there: the BMC asks for an IP address, NICo recognises it, logs in with the factory password, reads the hardware inventory over Redfish, works out which BlueField DPUs belong to the host, and starts ingestion. This chapter covers each piece of that pipeline, plus a few supporting skills you need while operating it.\n\nYou already have most of the foundations. In Chapter 6 you learned how a BMC exposes a Redfish tree, in Chapter 8 how DHCP and relays work, in Chapter 12 the difference between DPU mode and NIC mode, and in Chapter 20 why factory default credentials get rotated. Here those pieces join up into a single flow: **DHCP request → expected-machines lookup → Redfish exploration → DPU-host pairing → ingestable**.\n\nThe lessons go in this order. First, two operator tools: **SSH**, for secure remote shells (NICo's SSH console builds on it later), and **Kubernetes Ingress**, for exposing `nico-rest-api` on a real domain name with TLS. Next, three hardware facts that discovery and validation depend on: **PN/PSID**, which identifies NVIDIA NIC models, **Secure Erase**, which NICo requires from drives, and **LLDP**, which tells devices what they are plugged into. Last, the three procedures at the core of ingestion: writing the **Expected Machines Manifest**, understanding **DPU-host pairing**, and tracing **BMC discovery** from end to end.\n\nThe chapter ends with a build task. You write a mock \"site explorer\" in Python that runs fake BMCs on your laptop, takes in a manifest, probes Redfish and pairs DPUs to hosts.",
+    "objectives": [
+      "Set up key-based SSH access to a remote machine and explain what host-key verification protects against",
+      "Configure the nico-rest-api Helm values to expose the REST API through an Ingress with TLS, and verify the certificate chain",
+      "Read a NIC's part number and PSID and check them against an allow-list, and check whether a drive supports Secure Erase",
+      "Decode an LLDP frame's TLVs and explain what LLDP can and cannot tell you",
+      "Write and validate an expected_machines.json manifest and trace how a BMC's DHCP request leads to authenticated Redfish exploration",
+      "Predict whether Site Explorer will mark a host as ingestable from its host and DPU BMC reports and firmware state"
+    ],
+    "lessons": [
+      {
+        "concept": "ssh",
+        "prequestions": [
+          {
+            "question": "When you SSH into a server for the first time, it asks you to confirm a 'fingerprint'. Whose identity is that fingerprint proving: yours or the server's?",
+            "answer": "The server's. It is a hash of the server's host public key. Your own identity is proved separately, with your password or your private key."
+          },
+          {
+            "question": "With key-based login, which file has to be copied onto the server: your private key or your public key?",
+            "answer": "Your public key, which goes into ~/.ssh/authorized_keys on the server. The private key never leaves your machine."
+          }
+        ],
+        "explanation": "**SSH (Secure Shell)** gives you an encrypted, authenticated remote shell over TCP (port 22 by default). It uses the public-key cryptography from Chapter 18 in two directions.\n\n1. **The server proves who it is.** Every SSH server has a **host key pair**. When you connect, the server signs part of the handshake with its host private key. Your client checks the signature against the host public key it saved last time, in `~/.ssh/known_hosts`. On a first connection there is nothing saved yet, so the client shows a fingerprint and asks you to trust it. This is *trust on first use*. If the key changes later, the client refuses to connect with a `REMOTE HOST IDENTIFICATION HAS CHANGED` warning. Either the server was rebuilt, or someone is intercepting the connection.\n2. **You prove who you are.** With key authentication you generate a **user key pair** (`ssh-keygen`). The public half goes into `~/.ssh/authorized_keys` on the server. When you log in, your client signs a challenge with the private half, and the server verifies the signature. No password crosses the network, and there is no password for anyone to guess.\n\nOnce both sides are authenticated, they derive symmetric session keys, and the rest of the session is encrypted.\n\nUseful terms:\n- `~/.ssh/config` stores per-host shortcuts (host name, port, user, key file).\n- `sshd` is the server daemon. It is strict about permissions and ignores an `authorized_keys` file that other users can write to.\n- `ssh-keygen -R host` removes a stale entry from `known_hosts`.\n\nWhy this matters for NICo: `ssh-keygen` is one of the tools the Quick Start requires on the machine that runs `setup.sh`. Setup Phase 4 creates an SSH host key in the `nico-system` namespace. NICo's `ssh-console` service gives tenants and admins serial console access to hosts over SSH (Chapter 26). The same host-key checks apply there, so you need to understand them.",
+        "analogy": "SSH works like a building with ID checks on both sides. The receptionist shows you a staff badge you remember from your last visit (the host key), and you show a badge they have on file (your public key in authorized_keys). The analogy breaks down because a real badge can be copied by looking at it. An SSH key is never shown at all. Each side only proves it holds the key by signing a fresh challenge.",
+        "workedExample": {
+          "title": "Key-based SSH into a throwaway container",
+          "steps": [
+            {
+              "subgoal": "Generate a user key pair",
+              "detail": "```bash\nmkdir -p ~/lab && cd ~/lab\nssh-keygen -t ed25519 -f ./lab_key -N ''\nls lab_key*   # lab_key (private, keep it) and lab_key.pub (public, share it)\n```"
+            },
+            {
+              "subgoal": "Start a server and install sshd",
+              "detail": "```bash\ndocker run -d --name sshlab -p 2222:22 debian:stable-slim sleep infinity\ndocker exec sshlab sh -c 'apt-get update -qq && apt-get install -y -qq openssh-server && mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh'\n```\nInstalling `openssh-server` generates the container's **host keys** under `/etc/ssh/`."
+            },
+            {
+              "subgoal": "Authorise your public key and start sshd",
+              "detail": "```bash\ndocker cp lab_key.pub sshlab:/root/.ssh/authorized_keys\ndocker exec sshlab sh -c 'chown root:root /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && /usr/sbin/sshd'\n```\nDebian's default `PermitRootLogin prohibit-password` allows root to log in with a key but not with a password."
+            },
+            {
+              "subgoal": "Connect and accept the host key",
+              "detail": "```bash\nssh -i ./lab_key -p 2222 -o UserKnownHostsFile=./known_hosts root@127.0.0.1 hostname\n```\nType `yes` when you see the fingerprint. Then look at `./known_hosts`. Because the port is not 22, the entry is stored as `[127.0.0.1]:2222`. Run the command again: there is no prompt this time, because the host key matches."
+            },
+            {
+              "subgoal": "Compare the fingerprint the server actually has",
+              "detail": "```bash\ndocker exec sshlab ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub\n```\nThe SHA256 value should match the one you accepted. In production you would check this through a trusted channel *before* typing `yes`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Add a ~/.ssh/config entry so that `ssh sshlab hostname` works with no flags. Your key is at ~/lab/lab_key and the container's port 22 is published on 2222.",
+          "partialSolution": "Host sshlab\n    HostName 127.0.0.1\n    Port ___\n    User root\n    IdentityFile ___\n    UserKnownHostsFile ~/lab/known_hosts",
+          "answer": "Port 2222 and IdentityFile ~/lab/lab_key. Note that IdentityFile takes the private key. The .pub file lives on the server."
+        },
+        "independentProblem": {
+          "prompt": "You delete and recreate the sshlab container with the same commands. Now `ssh sshlab hostname` fails with 'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!'. Explain why, and give the command that fixes it safely.",
+          "hints": [
+            "What gets generated when openssh-server is installed in a fresh container?",
+            "The new container has a new host key pair, so the fingerprint no longer matches the saved one in known_hosts.",
+            "Remove the old entry with ssh-keygen -R, using the [host]:port form and your custom known_hosts file."
+          ],
+          "answer": "Installing openssh-server in the new container generated fresh host keys. The fingerprint saved in ~/lab/known_hosts belongs to the old container, so the client assumes a possible man-in-the-middle and refuses. You know why the key changed (you rebuilt the server), so remove the stale entry with `ssh-keygen -R '[127.0.0.1]:2222' -f ~/lab/known_hosts`, then reconnect and accept the new fingerprint, ideally after checking it with `docker exec sshlab ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`."
+        },
+        "selfExplanation": "Why does SSH need two separate key pairs, one for the server and one for the user? What attack becomes possible if you remove either one?",
+        "checks": [
+          {
+            "question": "Which file on the server lists the public keys allowed to log in as a user?",
+            "options": [
+              "~/.ssh/known_hosts",
+              "~/.ssh/authorized_keys",
+              "/etc/ssh/ssh_host_ed25519_key",
+              "~/.ssh/config"
+            ],
+            "answer": "~/.ssh/authorized_keys",
+            "explanation": "authorized_keys holds the user public keys the server accepts. known_hosts is on the client and stores server host keys. ssh_host_ed25519_key is the server's own private host key. ~/.ssh/config only holds client-side shortcuts."
+          },
+          {
+            "question": "During login, what does the client do with your private key?",
+            "options": [
+              "Sends it to the server for comparison",
+              "Uses it to sign a challenge, which the server verifies with your public key",
+              "Encrypts your password with it",
+              "Nothing; only the public key is used"
+            ],
+            "answer": "Uses it to sign a challenge, which the server verifies with your public key",
+            "explanation": "The private key never leaves your machine. The server checks a signature, so the key is never transmitted or compared. The 'encrypts your password' option mixes up key authentication with password authentication."
+          },
+          {
+            "question": "A host-key-changed warning appears for a server you have not touched. What is the safest response?",
+            "options": [
+              "Run ssh-keygen -R and reconnect immediately",
+              "Stop and confirm the new fingerprint out of band before trusting it",
+              "Add StrictHostKeyChecking=no to your config",
+              "Regenerate your own user key"
+            ],
+            "answer": "Stop and confirm the new fingerprint out of band before trusting it",
+            "explanation": "An unexpected key change is exactly what a man-in-the-middle attack looks like. Deleting the entry straight away or turning off checking would let an attacker in. Your user key has nothing to do with this warning."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md",
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "concept": "kubernetes-ingress-and-ingress-controllers",
+        "prequestions": [
+          {
+            "question": "If you create a Kubernetes Ingress object in a cluster that has no ingress controller installed, what happens to HTTP traffic for that hostname?",
+            "answer": "Nothing. The Ingress is only a routing rule stored in the API server. Without a controller to read it and program a proxy, nothing serves the traffic."
+          },
+          {
+            "question": "A NodePort exposes a Service on a high port of every node. Name one thing an Ingress gives you that a NodePort does not.",
+            "answer": "Routing by hostname or path on the standard ports 80/443, plus TLS termination with a real certificate for a DNS name."
+          }
+        ],
+        "explanation": "In Chapter 14 you exposed Services with `NodePort` and `LoadBalancer`. Both work at the TCP level: one port forwards to one Service. An **Ingress** works at the HTTP level. It is a Kubernetes object that says \"requests for host `rest-api.mysite.example.com`, path `/`, go to Service `nico-rest-api` on port X, and terminate TLS using the certificate in Secret Y.\"\n\nAn Ingress does nothing by itself. An **ingress controller** watches Ingress objects and configures a real reverse proxy from them. Examples are **Contour**, which drives **Envoy**, and **ingress-nginx**. The controller's proxy is normally exposed by its own `LoadBalancer` Service. In NICo that address comes from MetalLB's `vip-pool-external`. `spec.ingressClassName` (the chart's `className` value) chooses which controller handles a given Ingress.\n\nTLS pieces:\n- `spec.tls[]` lists hosts and the **Secret** holding their certificate and key. The Secret must be in the **same namespace** as the Ingress.\n- **cert-manager** (Chapter 19) can create that Secret from a `Certificate` resource.\n\nHow NICo uses it: by default `setup.sh` exposes `nico-rest-api` on a NodePort. In `helm-prereqs/values/nico-rest.yaml` you can set `nodePort.enabled: false` and `ingress.enabled: true`, and list your hostname under `ingress.hosts`. The chart rejects a config that enables both. With `ingress.certificate.enabled: true`, the chart creates a cert-manager Certificate signed by `nico-rest-ca-issuer` (a private CA) and derives the TLS hosts and `dnsNames` from `ingress.hosts`. `./setup.sh --install-contour` installs Contour/Envoy if your cluster has no controller.\n\nRules worth remembering from the docs:\n- A `spec.tls` block does not redirect port 80. The chart's default annotation `ingress.kubernetes.io/force-ssl-redirect: \"true\"` works for Contour. ingress-nginx needs `nginx.ingress.kubernetes.io/force-ssl-redirect`.\n- Annotation values must be **quoted strings**.\n- `ingress.tls[].hosts` must name the host **exactly**, even when the Secret holds a wildcard certificate, because Contour matches the literal string.\n- The API pod itself still serves plain HTTP. TLS ends at the proxy.",
+        "analogy": "An Ingress is like a building directory that reads 'Accounts: floor 3, Legal: floor 5'. The ingress controller is the receptionist who reads the directory and walks visitors to the right floor. If there is no receptionist, the directory just hangs on the wall. The analogy is weak on TLS: the receptionist also checks and decrypts every sealed envelope at the door, which a real directory never does.",
+        "workedExample": {
+          "title": "Expose nico-rest-api on a domain with a managed certificate",
+          "steps": [
+            {
+              "subgoal": "Switch from NodePort to Ingress in values",
+              "detail": "In `helm-prereqs/values/nico-rest.yaml`:\n```yaml\nnico-rest-api:\n  nodePort:\n    enabled: false\n  ingress:\n    enabled: true\n    className: contour\n    hosts:\n      - host: rest-api.mysite.example.com\n        paths:\n          - path: /\n            pathType: Prefix\n    certificate:\n      enabled: true\n      secretName: rest-api-mysite-example-com-tls\n```\nThe hostname appears only under `hosts`. The chart copies it into `spec.tls` and the certificate's `dnsNames`."
+            },
+            {
+              "subgoal": "Make sure a controller exists",
+              "detail": "Populate the `vip-pool-external` addresses in `helm-prereqs/values/metallb-config.yaml`, then run setup with the optional controller:\n```bash\n./setup.sh --install-contour\n```"
+            },
+            {
+              "subgoal": "Point DNS at the proxy",
+              "detail": "```bash\nkubectl get service contour-envoy -n projectcontour \\\n  -o jsonpath='{.status.loadBalancer.ingress[0].ip}'\n```\nCreate an `A` record for `rest-api.mysite.example.com` that points at this IP."
+            },
+            {
+              "subgoal": "Trust the private CA and verify",
+              "detail": "```bash\nkubectl get secret rest-api-mysite-example-com-tls -n nico-rest \\\n  -o jsonpath='{.data.ca\\.crt}' | base64 -d > nico-rest-ca.crt\nopenssl s_client -connect rest-api.mysite.example.com:443 \\\n  -servername rest-api.mysite.example.com \\\n  -CAfile nico-rest-ca.crt </dev/null | grep 'Verify return code'\n```\nYou want `Verify return code: 0 (ok)`. Clients then use `curl --cacert nico-rest-ca.crt https://rest-api.mysite.example.com/...`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Your cluster already runs ingress-nginx and has a wildcard Secret `mysite-wildcard-tls` (for *.mysite.example.com), already copied into the nico-rest namespace. Fill in the blanks so the chart accepts this config.",
+          "partialSolution": "nico-rest-api:\n  nodePort:\n    enabled: false\n  ingress:\n    enabled: true\n    className: ___\n    annotations:\n      nginx.ingress.kubernetes.io/force-ssl-redirect: \"true\"\n    hosts:\n      - host: rest-api.mysite.example.com\n        paths:\n          - path: /\n            pathType: Prefix\n    certificate:\n      enabled: false\n    tls:\n      - secretName: mysite-wildcard-tls\n        hosts:\n          - ___",
+          "answer": "className: nginx, and the tls host is rest-api.mysite.example.com. Even though the certificate is a wildcard, ingress.tls[].hosts must name the concrete host exactly. The chart rejects any ingress.hosts entry that the tls list does not name exactly."
+        },
+        "independentProblem": {
+          "prompt": "A teammate enabled the ingress with `certificate.enabled: false` and `tls[].secretName: corp-wildcard`. The Secret exists in the `default` namespace. They also wrote the annotation as `nginx.ingress.kubernetes.io/force-ssl-redirect: true`. List the two problems and how to fix each.",
+          "hints": [
+            "One problem shows up when the YAML is applied; the other shows up when the proxy looks for the certificate.",
+            "Kubernetes annotations are map[string]string, and spec.tls[].secretName is looked up in the Ingress's own namespace.",
+            "Quote the value, and copy or mirror the Secret into nico-rest."
+          ],
+          "answer": "(1) The unquoted `true` is a YAML boolean. Apply fails with `cannot unmarshal bool into Go struct field ObjectMeta.metadata.annotations of type string`, so write it as \"true\". (2) secretName is resolved in the Ingress's namespace (nico-rest), so the controller cannot find a Secret that lives in default. Copy or mirror it into nico-rest. With Contour, reading a Secret from another namespace would also need a TLSCertificateDelegation."
+        },
+        "selfExplanation": "Why does Kubernetes split routing into two parts, an Ingress object and a separately installed controller, instead of building one HTTP proxy into the cluster?",
+        "checks": [
+          {
+            "question": "Where does TLS terminate when nico-rest-api is exposed through the chart's Ingress?",
+            "options": [
+              "Inside the nico-rest-api pod",
+              "At the ingress controller's proxy (e.g. Envoy)",
+              "At MetalLB",
+              "At cert-manager"
+            ],
+            "answer": "At the ingress controller's proxy (e.g. Envoy)",
+            "explanation": "The docs state the API pod still serves plain HTTP internally. MetalLB only hands out the VIP, and cert-manager only issues the certificate. Neither one handles traffic."
+          },
+          {
+            "question": "What does the chart do if both `ingress.enabled` and `nodePort.enabled` are true?",
+            "options": [
+              "Exposes the API both ways",
+              "Prefers the Ingress silently",
+              "Rejects the configuration",
+              "Disables TLS"
+            ],
+            "answer": "Rejects the configuration",
+            "explanation": "The docs say the chart rejects `ingress.enabled` together with `nodePort.enabled`. It does not quietly pick one."
+          },
+          {
+            "question": "With Contour, why does putting `*.mysite.example.com` in `ingress.tls[].hosts` fail even though the certificate is a wildcard?",
+            "options": [
+              "Wildcard certificates are not allowed in Kubernetes",
+              "Contour keys its HTTPS virtual host by the literal host string and attaches routes only on an exact match",
+              "cert-manager cannot issue wildcards",
+              "Envoy does not support SNI"
+            ],
+            "answer": "Contour keys its HTTPS virtual host by the literal host string and attaches routes only on an exact match",
+            "explanation": "The wildcard certificate itself still works, and certificate.dnsNames does accept wildcards. The exact-match requirement applies only to the tls hosts list."
+          }
+        ],
+        "sources": [
+          "getting-started/quick-start.md"
+        ]
+      },
+      {
+        "concept": "pn-psid",
+        "prequestions": [
+          {
+            "question": "Two NICs have the same part number. Can they still need different firmware images? Guess why or why not.",
+            "answer": "Yes. Cards built for different OEMs or configurations can share a base model but carry different board-specific firmware settings. The PSID tells you which variant a card is."
+          }
+        ],
+        "explanation": "NVIDIA (Mellanox) network adapters, including BlueField DPUs, carry two identifiers that matter for automation.\n\n- **PN (part number)** names the board model as ordered. The BlueField-3 B3220 P-Series DPU recommended in NICo's hardware prerequisites is `900-9D3B6-00CV-AA0`. The part number tells you the hardware: chip, port count, speed, form factor.\n- **PSID (Parameter-Set ID)** is a short string stored in the adapter's firmware. It identifies the **firmware configuration** for that board: default settings and board-specific parameters. NVIDIA-branded cards use PSIDs that start with `MT_`, and OEM-branded variants have their own. NVIDIA publishes firmware images per PSID. The firmware tools refuse to burn an image whose PSID does not match the card unless you explicitly force it.\n\nYou can read both with the Mellanox tools from Chapter 12. On a real host, `mlxfwmanager --query` prints `Part Number:` and `PSID:` for each device, and `flint -d <device> query` prints the PSID.\n\n**Why both are useful for matching (general practice).** In fleet automation, an **allow-list** is the set of device variants a site has validated and will accept. A part number alone cannot tell apart two cards that look the same but run different firmware configurations. A PSID alone does not describe the hardware clearly. Keying the allow-list on the **(PN, PSID) pair** answers two questions together: is this the card we expect, and is its firmware the variant we know how to update? This is a common pattern for any tooling that manages NVIDIA NIC firmware. How NICo itself applies NIC firmware policy is covered later, in the NIC firmware baseline policy (Chapter 36) and Mellanox device kinds (Chapter 23) chapters, so do not assume specific NICo behaviour from this lesson.\n\n**What the docs in this chapter do say about NICo.** Part numbers matter during discovery: when Site Explorer pairs DPUs to hosts, it prefers inventory records that carry a BlueField part number when it decides which PCIe devices are DPUs.",
+        "analogy": "PN and PSID are like a car's model name and its trim/market code. 'Sedan X' tells you the body and engine. The trim code tells you whether it is the EU or US variant, and which software and parts it takes. The analogy breaks down because you can retrofit a car with parts from another trim, but you are blocked from flashing another PSID's firmware unless you force it.",
+        "workedExample": {
+          "title": "Check a card against a (PN, PSID) allow-list",
+          "steps": [
+            {
+              "subgoal": "Get the tool output",
+              "detail": "On a host with the Mellanox tools you would run `sudo mlxfwmanager --query`. On a laptop, save this example output (the values are illustrative) as `query.txt`:\n```text\nDevice #1:\n----------\n  Device Type:      BlueField3\n  Part Number:      900-9D3B6-00CV-AA0\n  PSID:             MT_0000000884\n  PCI Device Name:  /dev/mst/mt41692_pciconf0\n```"
+            },
+            {
+              "subgoal": "Extract the identifiers",
+              "detail": "```bash\ngrep -E 'Part Number|PSID' query.txt\n```"
+            },
+            {
+              "subgoal": "Compare against the allow-list",
+              "detail": "Save as `check_nic.py`:\n```python\nimport sys\n\nALLOWED = {(\"900-9D3B6-00CV-AA0\", \"MT_0000000884\")}\n\nfields = {}\nfor line in open(sys.argv[1]):\n    if \":\" in line:\n        key, _, value = line.partition(\":\")\n        fields[key.strip()] = value.strip()\n\npair = (fields.get(\"Part Number\"), fields.get(\"PSID\"))\nprint(\"ALLOWED\" if pair in ALLOWED else f\"NOT ALLOWED: {pair}\")\n```\nRun `python3 check_nic.py query.txt` and you get `ALLOWED`."
+            },
+            {
+              "subgoal": "Try a variant",
+              "detail": "Change the PSID in `query.txt` to `DEL0000000099` (an imaginary OEM PSID) and run the script again. You get `NOT ALLOWED`: the hardware model is the same, but the firmware configuration is not one you have approved."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Extend the allow-list check so it also reports *why* a card failed: unknown model, or known model with an unknown PSID.",
+          "partialSolution": "ALLOWED = {(\"900-9D3B6-00CV-AA0\", \"MT_0000000884\")}\nKNOWN_PNS = {pn for pn, _ in ALLOWED}\n\ndef verdict(pn, psid):\n    if (pn, psid) in ALLOWED:\n        return \"ALLOWED\"\n    if pn in ___:\n        return \"KNOWN MODEL, UNAPPROVED PSID\"\n    return \"UNKNOWN MODEL\"\n\nprint(verdict(\"900-9D3B6-00CV-AA0\", \"DEL0000000099\"))",
+          "answer": "The blank is KNOWN_PNS. The call prints 'KNOWN MODEL, UNAPPROVED PSID'."
+        },
+        "independentProblem": {
+          "prompt": "A vendor ships replacement DPUs whose part number matches your allow-list but whose PSID does not. Someone suggests matching on part number only, so the cards are accepted. Give one concrete risk of doing that.",
+          "hints": [
+            "Think about what the PSID selects.",
+            "Firmware images are published per PSID.",
+            "Automated firmware updates and baselines depend on knowing which image belongs on the card."
+          ],
+          "answer": "The PSID selects the firmware configuration and the image line for the card. If you accept cards on PN alone, your firmware baseline and update automation may not have an approved image for that PSID. Updates could then fail, or be forced with a mismatched image, or the card could run with board defaults you have never validated. The safe options are to add the new (PN, PSID) pair after validating it, or to reject the cards."
+        },
+        "selfExplanation": "Why is the pair (PN, PSID) a better key for an allow-list than either value alone?",
+        "checks": [
+          {
+            "question": "What does a PSID identify?",
+            "options": [
+              "The card's serial number",
+              "The board-specific firmware configuration (parameter set) of the adapter",
+              "The PCIe slot the card is in",
+              "The card's MAC address"
+            ],
+            "answer": "The board-specific firmware configuration (parameter set) of the adapter",
+            "explanation": "The PSID is shared by every card of a given variant, so it is not unique per card the way a serial number or MAC is. It has nothing to do with the slot the card sits in."
+          },
+          {
+            "question": "Two cards report the same part number but different PSIDs. What is the most likely explanation?",
+            "options": [
+              "One card is faulty",
+              "They are the same hardware model with different firmware configurations, e.g. NVIDIA-branded vs OEM-branded",
+              "They are different chip generations",
+              "One is in NIC mode and one in DPU mode"
+            ],
+            "answer": "They are the same hardware model with different firmware configurations, e.g. NVIDIA-branded vs OEM-branded",
+            "explanation": "The part number pins down the hardware, so a different chip generation is ruled out. DPU vs NIC mode is a runtime setting and does not change the PSID. A different PSID is not a sign of a fault."
+          },
+          {
+            "question": "Which use of part numbers do NICo's discovery docs describe?",
+            "options": [
+              "Site Explorer prefers inventory records with a BlueField part number when deciding which PCIe devices are DPUs",
+              "Site Explorer rejects any host whose NIC PSID is not on an allow-list",
+              "The DHCP hook reads the part number from the DHCP packet",
+              "The manifest must list each DPU's part number"
+            ],
+            "answer": "Site Explorer prefers inventory records with a BlueField part number when deciding which PCIe devices are DPUs",
+            "explanation": "The Redfish workflow page describes the BlueField part-number preference during pairing. The pages in this chapter say nothing about a PSID allow-list in discovery, the DHCP hook extracts MAC and vendor class (not part numbers), and the manifest's required fields do not include part numbers."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/hardware.md",
+          "architecture/redfish_workflow.md"
+        ]
+      },
+      {
+        "concept": "secure-erase",
+        "prequestions": [
+          {
+            "question": "You run `rm -rf` on every file on an SSD and empty the trash. Is the data gone? Why or why not?",
+            "answer": "No. Deleting files only removes filesystem references. The data blocks stay on flash until something overwrites them, and SSD wear-levelling means some copies may never be overwritten."
+          },
+          {
+            "question": "A 7.68 TB self-encrypting drive can be 'erased' in a few seconds. How could that be possible?",
+            "answer": "Cryptographic erase. The drive already encrypts everything with an internal key, so destroying and replacing that key makes all the old data unreadable instantly."
+          }
+        ],
+        "explanation": "When NICo hands a host from one tenant to the next, nothing the first tenant stored may be readable by the second. Deleting files and reformatting does not achieve that. Even overwriting the whole disk from the OS is unreliable on SSDs: the controller remaps blocks (wear-levelling) and keeps hidden spare capacity (over-provisioning) that the host cannot address.\n\n**Secure Erase** is a command the drive runs on itself, so it covers every block, including the ones the host cannot see. The command depends on the drive type:\n\n| Drive | Commands |\n|---|---|\n| NVMe | **Format NVM** with a Secure Erase Setting (user-data erase or crypto erase); **Sanitize** (block erase, crypto erase, overwrite) |\n| SATA | ATA **Security Erase Unit** (normal or enhanced) |\n| SAS | SCSI **SANITIZE** |\n\n**Crypto erase** uses the encryption from Chapter 18. A self-encrypting drive always encrypts data with an internal media key. Erasing means destroying that key and generating a new one, so the old ciphertext becomes useless in seconds. This only works if you trust the drive firmware actually did it.\n\nWhat NICo's hardware prerequisites require (they are worded differently for the two kinds of machine):\n- **Site controller nodes:** *all* local storage drives must support Secure Erase.\n- **Managed hosts:** *NVMe* drives must support Secure Erase, their firmware must be updated only via signed images, and rollback must not be possible. The signed, no-rollback rule protects the trust that crypto erase depends on.\n\nWhat NICo does with it: during tenant transitions (Day 2), the first sanitization step is **secure erase of NVMe and SAS/SATA drives**, followed by verification of the UEFI memory-overwrite request, which clears RAM.\n\nSo on a managed host, an NVMe drive without Secure Erase support is not just slower to clean. It does not meet the prerequisites for a multi-tenant host. Checking support is a read-only query, as the example below shows.",
+        "analogy": "Crypto erase is like a safe-deposit vault where every box is locked with one master key. Instead of emptying thousands of boxes, you melt the key and cut a new one, and every old box is now sealed forever. The analogy breaks down because you would never melt a real key without seeing it destroyed. With a drive, you are trusting its firmware, which is why NICo also requires signed, no-rollback NVMe firmware on managed hosts.",
+        "workedExample": {
+          "title": "Check whether your drives support Secure Erase (read-only)",
+          "steps": [
+            {
+              "subgoal": "List drives and their transport",
+              "detail": "Linux:\n```bash\nlsblk -d -o NAME,TRAN,MODEL,SIZE\n```\n`nvme` means an NVMe drive, and `sata`/`sas` mean SATA or SAS. (On macOS, `diskutil list` shows the disks, but the commands below are Linux-only.)"
+            },
+            {
+              "subgoal": "Query NVMe capabilities",
+              "detail": "Install `nvme-cli` (`sudo apt install nvme-cli`), then run:\n```bash\nsudo nvme id-ctrl /dev/nvme0 -H | grep -iE 'crypto erase|sanitize'\n```\nLook for lines similar to `Crypto Erase Supported as part of Secure Erase` in the Format NVM attributes, and for the Sanitize capabilities (crypto erase / block erase / overwrite). This only reads the controller's identify data."
+            },
+            {
+              "subgoal": "Query SATA capabilities",
+              "detail": "```bash\nsudo hdparm -I /dev/sda | sed -n '/^Security:/,/^[A-Z]/p'\n```\n`supported` and `supported: enhanced erase` mean the ATA Security Erase feature set is present. `frozen` means the BIOS has locked it until the next power cycle."
+            },
+            {
+              "subgoal": "Decide",
+              "detail": "Apply the right rule for the machine's role. On a **managed host**, an NVMe drive that reports none of these capabilities does not meet NICo's prerequisites. On a **site controller node**, *every* local drive, whatever its type, must support Secure Erase. **Do not run the erase commands themselves on your laptop.** They destroy all data."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this loop so it prints the erase-related capability lines for every NVMe controller on the machine.",
+          "partialSolution": "for ctrl in /dev/nvme[0-9]; do\n  [ -e \"$ctrl\" ] || continue\n  echo \"== $ctrl\"\n  sudo nvme id-ctrl \"$ctrl\" -H | grep -iE '___'\ndone",
+          "answer": "The pattern is 'crypto erase|sanitize'. The grep then matches the Format NVM crypto-erase attribute and the Sanitize capability lines."
+        },
+        "independentProblem": {
+          "prompt": "Explain why crypto erase on a 7.68 TB NVMe drive finishes in seconds while an overwrite sanitize takes hours. Then name the assumption crypto erase depends on, and the NICo managed-host requirement that protects that assumption.",
+          "hints": [
+            "What does crypto erase actually change on the drive?",
+            "It replaces one small key rather than touching the stored data blocks.",
+            "You have to trust the drive firmware to really destroy the old key. Look at the NVMe firmware requirements for managed hosts on the hardware page."
+          ],
+          "answer": "Crypto erase destroys and regenerates only the media encryption key, a few bytes. The terabytes of ciphertext stay on the drive, but nobody can decrypt them. Overwrite has to physically write every block. Crypto erase assumes the firmware really encrypted everything and really destroyed the old key. NICo's managed-host requirement that NVMe firmware be updated only via signed images, with no rollback possible, keeps an attacker from installing or downgrading to firmware that fakes the erase."
+        },
+        "selfExplanation": "Why can't NICo just reformat drives from the host OS between tenants? What does a drive-level command guarantee that an OS-level wipe cannot?",
+        "checks": [
+          {
+            "question": "Why is overwriting a whole SSD from the operating system not a reliable wipe?",
+            "options": [
+              "SSDs are read-only from the OS",
+              "Wear-levelling and over-provisioning leave blocks the host cannot address",
+              "Overwrites are always cached and never written",
+              "Only HDDs store data magnetically"
+            ],
+            "answer": "Wear-levelling and over-provisioning leave blocks the host cannot address",
+            "explanation": "The controller remaps writes and keeps spare blocks that the host cannot address, so stale copies can survive. The other options are false: the OS can write to an SSD, and writes do reach the flash."
+          },
+          {
+            "question": "In NICo's tenant sanitization sequence, which step comes first?",
+            "options": [
+              "TPM clear",
+              "Secure erase of NVMe and SAS/SATA drives",
+              "Firmware integrity revalidation",
+              "InfiniBand device reset"
+            ],
+            "answer": "Secure erase of NVMe and SAS/SATA drives",
+            "explanation": "The lifecycle page lists secure erase first, then UEFI memory-overwrite verification, IB reset, TPM clear (where supported), re-attestation and firmware revalidation."
+          },
+          {
+            "question": "According to NICo's hardware prerequisites, which statement is correct?",
+            "options": [
+              "All drives on both site controllers and managed hosts must support Secure Erase",
+              "Site controllers need Secure Erase on all local drives; managed hosts need it on NVMe drives, with signed, no-rollback firmware",
+              "Only site controllers need Secure Erase",
+              "Secure Erase is optional if attestation is enabled"
+            ],
+            "answer": "Site controllers need Secure Erase on all local drives; managed hosts need it on NVMe drives, with signed, no-rollback firmware",
+            "explanation": "The page states the two requirements separately. The 'all drives on both' option over-generalises the site controller rule. Attestation does not replace drive sanitization."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/hardware.md",
+          "overview/lifecycle.md",
+          "overview/capabilities.md"
+        ]
+      },
+      {
+        "concept": "lldp",
+        "prequestions": [
+          {
+            "question": "Can a server learn the name of a switch two hops away using LLDP?",
+            "answer": "No. LLDP frames go only to directly connected neighbours. Bridges do not forward them and routers do not route them."
+          }
+        ],
+        "explanation": "**LLDP (Link Layer Discovery Protocol, IEEE 802.1AB)** lets a device announce \"who I am and which port this is\" to whatever is on the other end of the cable. It is a Layer 2 protocol (Chapter 3), and it has no IP, no request and no reply. Every port periodically sends a frame:\n\n- addressed to the multicast MAC `01:80:C2:00:00:0E`, which standard bridges do **not** forward, so the frame reaches exactly one hop;\n- with EtherType `0x88CC`;\n- whose payload is a list of **TLVs** (Type-Length-Value records).\n\nEach TLV starts with a 2-byte header: the top 7 bits are the type and the low 9 bits are the length. Three TLVs are mandatory and come first:\n\n| Type | TLV | Example |\n|---|---|---|\n| 1 | Chassis ID | the switch's MAC |\n| 2 | Port ID | `swp7` |\n| 3 | Time To Live | 120 seconds |\n\nOptional TLVs include Port Description (4), System Name (5) and Management Address (8). Type 0 marks the end. The receiver stores what it hears in a neighbour table and drops entries when the TTL runs out.\n\nOn Linux, the `lldpd` daemon sends and receives these frames, and `lldpcli show neighbors` prints the table. Cumulus/NVOS switches (Chapter 9) run LLDP by default.\n\n**Why NICo cares.** A data centre has thousands of cables, and nobody wants to type up a wiring map. LLDP lets each end of a link report its neighbour, for example \"this DPU port is plugged into leaf01 port swp7\". NICo's docs state that discovery pairs DPUs with their host servers **using LLDP and serial-number matching**, with no manual inventory entry. The serial-number side is covered in the DPU-host pairing lesson. LLDP adds physical-topology evidence about where each port is cabled.\n\nLLDP has one major limitation: it is self-reported and unauthenticated. Any device can claim any name. Treat it as evidence about cabling, not as proof of identity.",
+        "analogy": "LLDP is like the name tag each person wears at a networking event, readable only by the person standing right in front of them. It breaks down because nobody checks the tags. A device can write anything on its own.",
+        "workedExample": {
+          "title": "Build and decode an LLDP frame in pure Python",
+          "steps": [
+            {
+              "subgoal": "Write the builder and parser",
+              "detail": "Save as `lldp.py`:\n```python\nimport struct\n\n\ndef tlv(t, value):\n    return struct.pack(\"!H\", (t << 9) | len(value)) + value\n\n\ndef build_frame():\n    dst = bytes.fromhex(\"0180c200000e\")\n    src = bytes.fromhex(\"aabbcc000001\")\n    body = (\n        tlv(1, b\"\\x04\" + src)              # Chassis ID, subtype 4 = MAC\n        + tlv(2, b\"\\x05\" + b\"swp7\")        # Port ID, subtype 5 = interface name\n        + tlv(3, struct.pack(\"!H\", 120))   # TTL in seconds\n        + tlv(5, b\"leaf01\")                # System Name\n        + tlv(0, b\"\")                      # End of LLDPDU\n    )\n    return dst + src + struct.pack(\"!H\", 0x88CC) + body\n\n\nNAMES = {1: \"Chassis ID\", 2: \"Port ID\", 3: \"TTL\", 4: \"Port Description\", 5: \"System Name\"}\n\n\ndef show(t, v):\n    if t == 3:\n        return f\"{int.from_bytes(v, 'big')} s\"\n    if t in (1, 2):\n        sub, rest = v[0], v[1:]\n        if (t, sub) in ((1, 4), (2, 3)):\n            return \":\".join(f\"{b:02x}\" for b in rest)\n        return rest.decode()\n    return v.decode(errors=\"replace\")\n\n\ndef parse(frame):\n    assert frame[12:14] == b\"\\x88\\xcc\", \"not an LLDP frame\"\n    i = 14\n    while i + 2 <= len(frame):\n        (header,) = struct.unpack(\"!H\", frame[i:i + 2])\n        t = header >> 9\n        length = header & 0x1FF\n        value = frame[i + 2:i + 2 + length]\n        i += 2 + length\n        if t == 0:\n            break\n        print(f\"{NAMES.get(t, t)}: {show(t, value)}\")\n\n\nframe = build_frame()\nprint(frame.hex())\nparse(frame)\n```"
+            },
+            {
+              "subgoal": "Run it and read the TLVs",
+              "detail": "`python3 lldp.py` prints the raw hex, then:\n```text\nChassis ID: aa:bb:cc:00:00:01\nPort ID: swp7\nTTL: 120 s\nSystem Name: leaf01\n```"
+            },
+            {
+              "subgoal": "Decode one header by hand",
+              "detail": "The Port ID TLV header is `0405`. In binary that is `0000010 000000101`: the top 7 bits give type 2, and the low 9 bits give length 5 (one subtype byte plus `swp7`)."
+            },
+            {
+              "subgoal": "Relate to a real host",
+              "detail": "On a Linux server with `lldpd` running, `sudo lldpcli show neighbors` shows the same fields (ChassisID, SysName, PortID) for each cabled port. That is how you find out which switch port each NIC or DPU port is plugged into."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the two blanks that split a TLV header into its 7-bit type and 9-bit length.",
+          "partialSolution": "(header,) = struct.unpack(\"!H\", frame[i:i + 2])\nt = header ___ 9\nlength = header & ___",
+          "answer": "t = header >> 9 and length = header & 0x1FF (0x1FF is nine 1-bits, decimal 511)."
+        },
+        "independentProblem": {
+          "prompt": "A DPU advertises the System Name 'dpu-bf3-07'. What are the two header bytes of that TLV, in hex?",
+          "hints": [
+            "System Name is type 5. Count the bytes in the string.",
+            "The string is 10 bytes long. The header is (type << 9) | length.",
+            "(5 << 9) is 2560. Add 10 and convert to hex."
+          ],
+          "answer": "0x0A0A. Type 5 shifted left by 9 is 2560 (0x0A00), and adding length 10 gives 2570 = 0x0A0A, so the bytes are 0A 0A."
+        },
+        "selfExplanation": "Why is LLDP useful evidence for working out which DPU belongs to which host, and why is it not enough on its own to prove identity?",
+        "checks": [
+          {
+            "question": "Which three TLVs are mandatory at the start of every LLDPDU?",
+            "options": [
+              "Chassis ID, Port ID, TTL",
+              "System Name, Port Description, TTL",
+              "Chassis ID, Management Address, End",
+              "Port ID, VLAN, TTL"
+            ],
+            "answer": "Chassis ID, Port ID, TTL",
+            "explanation": "System Name, Port Description and Management Address are optional. End (type 0) closes the LLDPDU but is not one of the three identifying TLVs."
+          },
+          {
+            "question": "Why does an LLDP frame reach only the directly connected neighbour?",
+            "options": [
+              "It has an IP TTL of 1",
+              "It is sent to a reserved multicast MAC that standard bridges do not forward",
+              "Switches encrypt it",
+              "It uses UDP port 1"
+            ],
+            "answer": "It is sent to a reserved multicast MAC that standard bridges do not forward",
+            "explanation": "LLDP has no IP header at all, so neither the IP-TTL nor the UDP option applies. It is not encrypted either. In fact it is unauthenticated plain text."
+          }
+        ],
+        "sources": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "concept": "expected-machines-manifest",
+        "prequestions": [
+          {
+            "question": "A new server is racked, cabled and powered on, but it is not listed in expected_machines.json. Will NICo ingest it?",
+            "answer": "No. Only hosts listed in the manifest are discovered and ingested."
+          },
+          {
+            "question": "Why might the manifest include the chassis serial number when NICo already knows the BMC MAC address?",
+            "answer": "To confirm that the BMC answering on that MAC really sits in the chassis you expected, which catches mis-typed MACs and swapped boards."
+          }
+        ],
+        "explanation": "The **Expected Machines Manifest** (`expected_machines.json`) tells NICo which machines it is allowed to take over. It works as an allow-list and a factory-password book in one file. Only hosts listed in it are discovered and ingested.\n\nEach entry has four required fields:\n\n| Field | Purpose |\n|---|---|\n| `bmc_mac_address` | MAC of the host BMC interface, the key NICo looks up when the BMC shows up on DHCP |\n| `chassis_serial_number` | Confirms that the BMC with that MAC is in the chassis you expected |\n| `bmc_username` | Factory default user (typically `root`) |\n| `bmc_password` | Factory default password |\n\nThe factory credentials are only used for first contact. After discovery, NICo rotates them to site-managed values (Chapter 20). So the file is a secret while it exists: restrict its permissions and do not commit it to Git.\n\nOptional per-host fields appear in the docs:\n- `\"dpf_enabled\": false` keeps a host on the deprecated iPXE path. It defaults to `true` (DPF provisioning).\n- The expected-machine record can carry `fallback_dpu_serial_numbers`, used during DPU pairing (next lesson).\n\n**Uploading.** You load the file into NICo Core with the admin CLI (gRPC API `ReplaceAllExpectedMachines`):\n\n```bash\nnico-admin-cli -a <nico-api-endpoint> em replace-all --filename expected_machines.json\n```\n\nAs the name says, this *replaces the whole set*, so the file must list every machine you expect, not just new ones.\n\n**Order of operations.** Set the site-wide credentials first: the site-wide BMC root, and the host and DPU UEFI defaults. Site Explorer checks them before contacting any BMC and aborts each run with `MissingCredentials` while any of them is missing.",
+        "analogy": "The manifest is like a guest list at a venue door. It has each guest's name (MAC), their ID card number to check against (chassis serial), and the temporary entry code they arrive with (factory password). Once inside, everyone gets a new code. The analogy breaks down because a bouncer can glance at someone and improvise. NICo simply ignores anyone who is not on the list.",
+        "workedExample": {
+          "title": "Prepare and sanity-check a manifest",
+          "steps": [
+            {
+              "subgoal": "Write the file",
+              "detail": "```bash\nmkdir -p ~/em && cd ~/em\ncat > expected_machines.json <<'EOF'\n{\n  \"expected_machines\": [\n    {\n      \"bmc_mac_address\": \"C4:5A:B1:C8:38:0D\",\n      \"bmc_username\": \"root\",\n      \"bmc_password\": \"default-password1\",\n      \"chassis_serial_number\": \"SERIAL-1\"\n    },\n    {\n      \"bmc_mac_address\": \"C4:5A:FF:FF:FF:FF\",\n      \"bmc_username\": \"root\",\n      \"bmc_password\": \"default-password2\",\n      \"chassis_serial_number\": \"SERIAL-2\",\n      \"dpf_enabled\": false\n    }\n  ]\n}\nEOF\n```"
+            },
+            {
+              "subgoal": "Protect it",
+              "detail": "```bash\nchmod 600 expected_machines.json\n```\nIt contains working factory passwords for every new BMC."
+            },
+            {
+              "subgoal": "Check structure with jq",
+              "detail": "```bash\njq '.expected_machines | length' expected_machines.json\njq -r '.expected_machines[] | [.bmc_mac_address, .chassis_serial_number] | @tsv' expected_machines.json\njq '[.expected_machines[].bmc_mac_address | ascii_upcase] | group_by(.) | map(select(length > 1))' expected_machines.json\n```\nThe last command prints `[]` when no MAC appears twice."
+            },
+            {
+              "subgoal": "Upload (on a real site)",
+              "detail": "After setting the site-wide credentials:\n```bash\nnico-admin-cli -a <nico-api-endpoint> em replace-all --filename expected_machines.json\n```\nThe second host stays on the iPXE path because `dpf_enabled` is `false`. The first uses the default, DPF."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Finish this validator so that it flags missing fields, malformed MACs and duplicate MACs (case-insensitive). Run it with `python3 validate_em.py expected_machines.json`.",
+          "partialSolution": "import json\nimport re\nimport sys\n\nMAC = re.compile(r\"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$\")\nREQUIRED = [\"bmc_mac_address\", \"bmc_username\", \"bmc_password\", \"chassis_serial_number\"]\n\ndoc = json.load(open(sys.argv[1]))\nseen = set()\nerrors = 0\nfor i, m in enumerate(doc[\"expected_machines\"]):\n    for field in REQUIRED:\n        if not m.get(field):\n            print(f\"entry {i}: missing {field}\")\n            errors += 1\n    mac = m.get(\"bmc_mac_address\", \"\")\n    if not MAC.match(mac):\n        print(f\"entry {i}: bad MAC {mac!r}\")\n        errors += 1\n    if mac.upper() in seen:\n        print(f\"entry {i}: duplicate MAC {mac}\")\n        errors += 1\n    seen.add(___)\nprint(\"OK\" if errors == 0 else f\"{errors} problem(s)\")\nsys.exit(1 if errors else 0)",
+          "answer": "seen.add(mac.upper()). Storing the upper-cased MAC means 'c4:5a:...' and 'C4:5A:...' are caught as the same address."
+        },
+        "independentProblem": {
+          "prompt": "Host SERIAL-1 had its motherboard replaced, and with it the BMC. Its new BMC MAC is C4:5A:B1:00:00:42, with a fresh factory password printed on the board. What do you change, and why must the uploaded file still contain SERIAL-2's entry?",
+          "hints": [
+            "Which fields describe the BMC rather than the chassis?",
+            "The MAC and the factory password belong to the BMC. The chassis serial stays with the chassis.",
+            "Think about what 'replace-all' does to entries that are missing from the file."
+          ],
+          "answer": "Update SERIAL-1's bmc_mac_address to C4:5A:B1:00:00:42 and its bmc_password (and username, if it differs) to the new board's factory values. Keep chassis_serial_number as SERIAL-1. Then upload with `em replace-all`. That call replaces the entire expected-machines set, so the file must still include SERIAL-2 (and every other host), or those entries would be dropped."
+        },
+        "selfExplanation": "Why does NICo insist on an explicit manifest instead of ingesting any BMC that appears on the OOB network?",
+        "checks": [
+          {
+            "question": "Which field does NICo use as the lookup key when a BMC appears on DHCP?",
+            "options": [
+              "chassis_serial_number",
+              "bmc_mac_address",
+              "bmc_username",
+              "dpf_enabled"
+            ],
+            "answer": "bmc_mac_address",
+            "explanation": "A DHCP request carries the client MAC, and that MAC is what gets matched. The chassis serial is only known later from Redfish, and is used to verify the match."
+          },
+          {
+            "question": "Site Explorer logs `MissingCredentials` and contacts no BMCs, even though the manifest is uploaded. What is missing?",
+            "options": [
+              "The chassis serial numbers",
+              "One or more site-wide credentials: the BMC root, or the host/DPU UEFI defaults",
+              "The dpf_enabled field",
+              "A DHCP relay"
+            ],
+            "answer": "One or more site-wide credentials: the BMC root, or the host/DPU UEFI defaults",
+            "explanation": "Site Explorer checks the site-wide BMC root and both UEFI site defaults before contacting any BMC. A missing relay would mean no BMCs appear at all. It would not produce this error."
+          },
+          {
+            "question": "What happens to a host's manifest password after successful discovery?",
+            "options": [
+              "It is used forever",
+              "NICo rotates the BMC credentials to site-managed values",
+              "It is written into the BMC's DHCP options",
+              "It becomes the UEFI password"
+            ],
+            "answer": "NICo rotates the BMC credentials to site-managed values",
+            "explanation": "The factory password is used only for first contact. After rotation, Site Explorer authenticates with credentials it looks up by BMC MAC address."
+          }
+        ],
+        "sources": [
+          "getting-started/prerequisites/bmc-oob-setup.md",
+          "getting-started/quick-start.md",
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "concept": "dpu-host-pairing",
+        "prequestions": [
+          {
+            "question": "A host BMC and a DPU BMC are separate network endpoints with separate IPs. Which piece of data could both of them report that proves the DPU is plugged into that host?",
+            "answer": "The DPU's serial number. The host sees the DPU as a PCIe device or network adapter with a serial, and the DPU's own BMC reports the same serial."
+          }
+        ],
+        "explanation": "A managed host has its own BMC, and each BlueField DPU in it has a separate BMC as well (Chapter 7). Site Explorer explores them independently, then has to answer the question: **which DPU belongs to which host?** It answers it by **serial-number correlation**.\n\nThe algorithm from the Redfish workflow docs has four steps:\n\n1. **DPU serial map.** For every explored DPU BMC, record `serial → endpoint`.\n2. **Host inventory.** Collect devices from the host's `system.pcie_devices` and its chassis inventory (`NetworkAdapters`). Trim whitespace, drop blank serials and deduplicate across both sources. Prefer records with a BlueField part number (the PN from the earlier lesson).\n3. **Match.** Look up each inventory serial in the DPU map. A match identifies the device as a DPU even if the host reported no BlueField part number.\n4. **Configured serials.** Always add `expected_machine.fallback_dpu_serial_numbers` (trimmed, deduplicated). A serial found in both sources counts once.\n\nThen **validation**:\n- **Mode.** Site Explorer works out the target mode from the host's DPU policy and the device part number. If it has to change a mode, the change needs a host power cycle, and ingestion waits for a later pass. Devices in **NIC mode** count toward completeness but are **not attached as managed DPUs**.\n- **Completeness.** Every configured serial must have an explored DPU BMC, every matched DPU must be ready, and the ready matches must cover the reported DPU count. Incomplete pairings are **deferred**, not failed.\n\n**Firmware is the other half of \"ingestable\".** The architecture overview defines an ingestable host as one where all components are found *and* have up-to-date firmware versions. A host whose firmware is below the minimum required for ingestion waits while **Preingestion Manager** updates it. This matters most for very old host or DPU BMCs that cannot yet report the data needed to map the host to its DPUs. Once pairing validation passes and the firmware requirement is met, Site Explorer kicks off ingestion through the ManagedHost state machine (Chapter 4).\n\nTwo edge cases:\n- If `system.serial_number` is missing, the chassis serial is used instead.\n- Hosts with `dpu_policy = \"ignore\"` skip DPU matching.\n\nWatch out after a DPU replacement (RMA): a stale serial left in `fallback_dpu_serial_numbers` **blocks ingestion**, even when every DPU the host reports is present.",
+        "analogy": "Pairing is like matching luggage to passengers. The passenger's ticket stub carries a bag tag number (the host's PCIe serial), the bag carries the same tag (the DPU BMC's serial), and the flight cannot leave until every tagged bag is on board (completeness) and the plane has passed its checks (firmware). The analogy breaks down with NIC mode: here a bag that is found but in the 'wrong mode' still counts as loaded. It is just not handed to the passenger to manage.",
+        "workedExample": {
+          "title": "Run the matching and completeness logic by hand",
+          "steps": [
+            {
+              "subgoal": "Describe what was explored",
+              "detail": "```python\ndpu_reports = {\n    \"MT2333X00001\": {\"mode\": \"DPU\"},\n    \"MT2333X00002\": {\"mode\": \"NIC\"},\n}\nhost_pcie = [\" MT2333X00001\", \"MT2333X00002\", \"\", \"MT2333X00001\"]\nfallback = [\"MT2333X00009\", \" \"]\n```"
+            },
+            {
+              "subgoal": "Normalise inventory and configured serials",
+              "detail": "```python\ninventory = {s.strip() for s in host_pcie if s.strip()}\nconfigured = {s.strip() for s in fallback if s.strip()}\nprint(inventory, configured)\n```\nTrimming and dropping blanks gives `{'MT2333X00001', 'MT2333X00002'}` and `{'MT2333X00009'}`. The duplicate `MT2333X00001` collapses to one entry."
+            },
+            {
+              "subgoal": "Match against explored DPU BMCs",
+              "detail": "```python\nwanted = inventory | configured\nfound = {s for s in wanted if s in dpu_reports}\nmissing_configured = configured - found\nnic_mode = {s for s in found if dpu_reports[s][\"mode\"] == \"NIC\"}\nmanaged = found - nic_mode\nprint(managed, nic_mode, missing_configured)\n```"
+            },
+            {
+              "subgoal": "Decide",
+              "detail": "`managed = {'MT2333X00001'}`, `nic_mode = {'MT2333X00002'}`, `missing_configured = {'MT2333X00009'}`. Every configured serial must be discovered, so this host is **deferred**. If `MT2333X00009` is a DPU that was swapped out, the fix is to update or remove that serial in `fallback_dpu_serial_numbers`. Even after pairing is fixed, the host only becomes ingestable once its components also meet the required firmware versions."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so that `wanted` combines both sources and `nic_mode` picks out the devices that will not be attached as managed DPUs.",
+          "partialSolution": "wanted = inventory ___ configured\nfound = {s for s in wanted if s in dpu_reports}\nnic_mode = {s for s in found if dpu_reports[s][\"mode\"] == ___}\nmanaged = found - nic_mode",
+          "answer": "wanted = inventory | configured (set union, so a serial in both counts once), and the mode check compares against \"NIC\"."
+        },
+        "independentProblem": {
+          "prompt": "A host had DPU MT2333X00005 replaced under RMA with MT2333X00077. The new DPU's BMC is explored and ready, and the host's PCIe inventory now reports MT2333X00077. The host's expected-machine record still has fallback_dpu_serial_numbers = [\"MT2333X00005\"]. Will the host ingest? Why, and what is the fix?",
+          "hints": [
+            "Step 4 says configured serials are always considered, even when the host inventory is fully matched.",
+            "Every configured serial must have an explored DPU BMC.",
+            "No DPU BMC reports MT2333X00005 any more."
+          ],
+          "answer": "No. Configured fallback serials are always included, and every one of them must be discovered with its DPU ready. MT2333X00005 no longer exists, so completeness fails and ingestion is deferred, even though the real DPU MT2333X00077 is matched and ready. Fix: update the record's fallback_dpu_serial_numbers to MT2333X00077, or remove the stale entry. (The host also still needs its components at the required firmware versions before it becomes ingestable.)"
+        },
+        "selfExplanation": "Why does Site Explorer pair DPUs to hosts using serial numbers reported by two different BMCs, instead of trusting the host's PCIe inventory alone?",
+        "checks": [
+          {
+            "question": "A host contains a BlueField device that reports NIC mode after the mode checks succeed. How is it treated?",
+            "options": [
+              "Ingestion fails permanently",
+              "It counts toward pairing completeness but is not attached as a managed DPU",
+              "It is attached as a managed DPU anyway",
+              "It is ignored entirely"
+            ],
+            "answer": "It counts toward pairing completeness but is not attached as a managed DPU",
+            "explanation": "The docs say NIC-mode devices count toward completeness but are not attached. It is neither ignored nor a fatal error."
+          },
+          {
+            "question": "All of a host's DPUs are matched and ready, but its BMC firmware is below the minimum required for ingestion. What happens?",
+            "options": [
+              "The host is ingested immediately and updated later",
+              "The host is not yet ingestable; Preingestion Manager updates the firmware first",
+              "The host is permanently rejected",
+              "Site Explorer ignores firmware during Day 0"
+            ],
+            "answer": "The host is not yet ingestable; Preingestion Manager updates the firmware first",
+            "explanation": "The architecture overview defines ingestable as all components found and with up-to-date firmware versions. Preingestion Manager updates hosts below the minimum. The host is not rejected outright, and pairing alone is not enough."
+          },
+          {
+            "question": "Which hosts skip DPU matching entirely?",
+            "options": [
+              "Hosts with dpf_enabled: false",
+              "Hosts with dpu_policy = \"ignore\"",
+              "Hosts whose BMC uses factory credentials",
+              "Hosts with only one DPU"
+            ],
+            "answer": "Hosts with dpu_policy = \"ignore\"",
+            "explanation": "dpf_enabled chooses the provisioning path (DPF vs iPXE) and has nothing to do with matching. Only dpu_policy = \"ignore\" skips it."
+          }
+        ],
+        "sources": [
+          "architecture/redfish_workflow.md",
+          "architecture/overview.md"
+        ]
+      },
+      {
+        "concept": "bmc-discovery",
+        "prequestions": [
+          {
+            "question": "BMCs sit on an OOB network, and NICo's DHCP service runs as a pod in Kubernetes on another subnet. DHCP discovery messages are broadcasts. How do they reach NICo?",
+            "answer": "A DHCP relay on each BMC-facing network forwards the requests as unicast to the NICo DHCP service IP."
+          },
+          {
+            "question": "Before NICo knows a BMC's vendor, which Redfish request can it safely send without credentials?",
+            "answer": "An anonymous GET of the service root, /redfish/v1."
+          }
+        ],
+        "explanation": "BMC discovery is the first step of the Day 0 pipeline. It goes like this:\n\n1. **DHCP request.** A newly powered BMC sends DHCP. The OOB switches do **not** assign addresses. They run a **DHCP relay** pointing at the NICo DHCP service VIP (`NICo_DHCP_EXTERNAL`, the `nico-dhcp` LoadBalancer IP from setup Step 3h).\n2. **Kea hook.** `nico-dhcp` is Kea plus a Rust hook. The hook extracts the **MAC address, vendor class string, relay address, circuit ID and remote ID**, then sends a gRPC `discover_dhcp()` call to NICo Core. `nico-dhcp` is a **stateless proxy**. NICo Core does the IP address management and returns the network configuration (IP, gateway and so on) for the BMC. DHCP entries are tracked by MAC address. The vendor class string helps identify the BMC type.\n3. **Site Explorer probes.** Now that NICo knows the BMC's IP, Site Explorer sends an **anonymous** `GET /redfish/v1` to detect the vendor (Chapter 6).\n4. **Authenticate.** Site Explorer opens a session using **Direct** credentials, meaning the factory username and password from the **Expected Machines** entry whose MAC matches. After credential rotation it switches to **Key** auth, which looks up the credential by BMC MAC.\n5. **Inventory.** Site Explorer reads Systems, Chassis, NetworkAdapters, Managers, firmware inventory, boot options and power state. This produces an `EndpointExplorationReport`, which feeds DPU-host pairing.\n\nPreconditions you control:\n- Network connectivity from every BMC to the site controller, plus a relay on every BMC-facing network.\n- `Underlay` connectivity for DPU BMC and DPU OOB interfaces.\n- The manifest is uploaded, and the site-wide credentials are set. Otherwise each Site Explorer run aborts with `MissingCredentials`.\n\nThe MAC address is the thread that ties the whole flow together. DHCP reports it, the manifest is keyed by it, and post-rotation credentials are looked up by it.",
+        "analogy": "Discovery is like a hotel's front desk. A guest phones down from the lobby courtesy phone (DHCP relay), the desk looks up the booking by phone number (MAC in the manifest), gives them a room (IP), and lets them in with the temporary key from the booking (factory credentials). Later the hotel re-keys the room (rotation). The analogy breaks down at step 3: a hotel never knocks on the guest's door to ask what brand they are before checking their booking.",
+        "workedExample": {
+          "title": "Trace and verify a BMC's discovery on a site",
+          "steps": [
+            {
+              "subgoal": "Find the DHCP VIP the relay must target",
+              "detail": "```bash\nkubectl get svc nico-dhcp -n nico-system\n```\nThe external IP (from the internal MetalLB pool) is what you configure as the DHCP relay helper address on every BMC-facing OOB switch network."
+            },
+            {
+              "subgoal": "Confirm requests arrive",
+              "detail": "Power on the server, or reset its BMC, then:\n```bash\nkubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp --tail=20\n```\nIf nothing appears for the BMC's MAC, the relay or routing is the problem, not NICo Core."
+            },
+            {
+              "subgoal": "Check the precondition for exploration",
+              "detail": "Make sure the site-wide credentials exist (BMC root plus host and DPU UEFI). Otherwise Site Explorer aborts with `MissingCredentials` before contacting any BMC. Also check that the BMC's MAC is in the uploaded manifest."
+            },
+            {
+              "subgoal": "Watch Site Explorer work",
+              "detail": "```bash\nkubectl logs -n nico-system -l app.kubernetes.io/name=nico-api --tail=50 \\\n  | grep -i \"site explorer\\|bmc\\|discovery\"\n```\nYou can also inspect what was found through the `FindExploredEndpoints` APIs or the Debug Web UI under `/admin`."
+            },
+            {
+              "subgoal": "Reproduce the probe by hand (optional)",
+              "detail": "From a machine on the OOB network, the same anonymous probe Site Explorer starts with is:\n```bash\ncurl -sk https://<bmc-ip>/redfish/v1 | jq .\n```\nNo credentials are needed for the service root. Everything below it requires authentication."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks in this discovery sequence.",
+          "partialSolution": "1. BMC broadcasts a DHCP request on its OOB network.\n2. A ___ on the OOB switch forwards it to the nico-dhcp VIP.\n3. The Kea hook extracts MAC, vendor class, relay address, circuit ID and remote ID, and calls ___ on NICo Core over gRPC.\n4. NICo Core allocates the address and returns the network config.\n5. Site Explorer sends an anonymous GET /redfish/v1, then authenticates with the factory credentials from the manifest entry whose ___ matches.",
+          "answer": "(2) DHCP relay; (3) discover_dhcp(); (5) bmc_mac_address (the BMC MAC)."
+        },
+        "independentProblem": {
+          "prompt": "A new rack is powered on. nico-dhcp logs show requests from all twelve BMC MACs, but only ten hosts ever show up as explored. The other two never get past Site Explorer. Suggest two likely causes and how to check each.",
+          "hints": [
+            "DHCP is working, so look at what Site Explorer needs per host.",
+            "Site Explorer needs a manifest entry for the MAC, and credentials that actually work.",
+            "Compare the two MACs against expected_machines.json (case, typos), and check whether their factory passwords are correct."
+          ],
+          "answer": "(1) The two BMC MACs are missing from the uploaded manifest or mistyped there. Only listed hosts are discovered, so compare the MACs in the DHCP logs against the manifest (for example with jq) and re-upload with em replace-all. (2) The manifest has the wrong factory username or password for those BMCs, so Direct authentication fails after the anonymous probe. Check the nico-api logs for those BMCs, confirm the factory credentials against the labels on the boards, and fix the entries. (A chassis-serial mismatch is a related check: the serial verifies the MAC belongs to the expected chassis.) MissingCredentials is ruled out, because that would block all twelve, not two."
+        },
+        "selfExplanation": "Why is NICo's DHCP service built as a stateless proxy that forwards to NICo Core, instead of a normal DHCP server with its own lease database?",
+        "checks": [
+          {
+            "question": "What do the OOB switches need to do for BMC discovery?",
+            "options": [
+              "Run a DHCP server with a pool for BMCs",
+              "Relay DHCP requests to the NICo DHCP service",
+              "Run LLDP towards NICo",
+              "Nothing; BMCs contact NICo directly by DNS name"
+            ],
+            "answer": "Relay DHCP requests to the NICo DHCP service",
+            "explanation": "NICo manages IP allocation. The OOB switches only relay. A local DHCP server on the switch would hand out addresses NICo does not know about."
+          },
+          {
+            "question": "In what order does Site Explorer use its authentication methods over a BMC's life?",
+            "options": [
+              "Key, then Direct, then Anonymous",
+              "Anonymous probe, then Direct (manifest factory creds), then Key (after rotation)",
+              "Direct only",
+              "Anonymous only"
+            ],
+            "answer": "Anonymous probe, then Direct (manifest factory creds), then Key (after rotation)",
+            "explanation": "An anonymous request detects the vendor, the factory credentials let NICo take ownership, and after rotation credentials are looked up by BMC MAC."
+          },
+          {
+            "question": "Which component performs IP address management for BMCs?",
+            "options": [
+              "nico-dhcp",
+              "NICo Core",
+              "The OOB switch",
+              "Site Explorer"
+            ],
+            "answer": "NICo Core",
+            "explanation": "nico-dhcp converts DHCP into gRPC and forwards it. NICo Core performs the IP address management. Site Explorer only consumes the resulting BMC addresses."
+          }
+        ],
+        "sources": [
+          "architecture/redfish_workflow.md",
+          "getting-started/prerequisites/bmc-oob-setup.md",
+          "getting-started/quick-start.md",
+          "architecture/overview.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Mini Site Explorer: from DHCP lease to ingestable host",
+      "goal": "Build a laptop-scale imitation of NICo's discovery pipeline in standard-library Python. Mock host and DPU BMCs serve Redfish-like JSON. A simulated DHCP lease table stands in for nico-dhcp output, and an explorer script matches leases against expected_machines.json, probes anonymously, authenticates with factory credentials, verifies chassis serials, identifies DPUs by part number allow-list or serial, and decides whether each host is INGESTABLE or DEFERRED.",
+      "whyItMatters": "This is the Day 0 flow NICo runs for every new host: a MAC from DHCP is looked up in the manifest, an anonymous Redfish probe is followed by Direct authentication, and serial-number pairing ends with a completeness check. Building it yourself makes NICo's behaviour predictable, for example why a host sits deferred or why a BMC is never explored. It also gives you a sandbox for practising manifest edits before you touch a real site. (This is a teaching mock with simplified Redfish shapes, not NICo code. It also leaves out the firmware-version requirement: real NICo only treats a host as ingestable once its components have the required firmware, with Preingestion Manager updating hosts that are too old.)",
+      "setup": [
+        "Linux or macOS terminal",
+        "Python 3.8+ (standard library only)",
+        "curl (and optionally jq)",
+        "Free local ports 8001-8002 and 8101-8103"
+      ],
+      "steps": [
+        {
+          "subgoal": "Create the manifest and site config",
+          "detail": "```bash\nmkdir -p ~/minise/bmcs && cd ~/minise\ncat > expected_machines.json <<'EOF'\n{\n  \"expected_machines\": [\n    {\"bmc_mac_address\": \"C4:5A:B1:C8:38:0D\", \"bmc_username\": \"root\",\n     \"bmc_password\": \"default-password1\", \"chassis_serial_number\": \"SERIAL-1\"},\n    {\"bmc_mac_address\": \"C4:5A:FF:FF:FF:FF\", \"bmc_username\": \"root\",\n     \"bmc_password\": \"default-password2\", \"chassis_serial_number\": \"SERIAL-2\"}\n  ]\n}\nEOF\nchmod 600 expected_machines.json\ncat > site.json <<'EOF'\n{\"dpu_bmc_user\": \"root\", \"dpu_bmc_password\": \"lab-dpu-pass\",\n \"dpu_part_numbers\": [\"900-9D3B6-00CV-AA0\"]}\nEOF\n```\n`site.json` is a mock simplification. It holds a lab DPU BMC credential and a list of BlueField part numbers the explorer treats as DPUs (echoing the BlueField part-number preference from the pairing lesson)."
+        },
+        {
+          "subgoal": "Write a mock BMC",
+          "detail": "Save as `fake_bmc.py`:\n```python\nimport base64\nimport json\nimport sys\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n\ncfg = json.load(open(sys.argv[1]))\ntoken = base64.b64encode(f\"{cfg['user']}:{cfg['password']}\".encode()).decode()\n\n\nclass Handler(BaseHTTPRequestHandler):\n    def log_message(self, *args):\n        pass\n\n    def send_json(self, code, body):\n        data = json.dumps(body).encode()\n        self.send_response(code)\n        self.send_header(\"Content-Type\", \"application/json\")\n        self.send_header(\"Content-Length\", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\n    def do_GET(self):\n        if self.path == \"/redfish/v1\":\n            return self.send_json(200, {\"RedfishVersion\": \"1.15.0\", \"Vendor\": cfg[\"vendor\"]})\n        if self.headers.get(\"Authorization\") != f\"Basic {token}\":\n            return self.send_json(401, {\"error\": \"authentication required\"})\n        if self.path == \"/redfish/v1/Systems/1\":\n            return self.send_json(200, {\n                \"SerialNumber\": cfg[\"serial\"],\n                \"Mode\": cfg.get(\"mode\"),\n                \"PCIeDevices\": cfg.get(\"pcie\", []),\n            })\n        self.send_json(404, {\"error\": \"not found\"})\n\n\nHTTPServer((\"127.0.0.1\", cfg[\"port\"]), Handler).serve_forever()\n```\nReal Redfish links PCIe devices as separate resources. Inlining them here keeps the mock small."
+        },
+        {
+          "subgoal": "Describe the hardware",
+          "detail": "```bash\ncat > bmcs/host1.json <<'EOF'\n{\"port\": 8001, \"vendor\": \"MockVendor\", \"user\": \"root\", \"password\": \"default-password1\",\n \"serial\": \"SERIAL-1\", \"pcie\": [\n  {\"PartNumber\": \"900-9D3B6-00CV-AA0\", \"SerialNumber\": \"MT2333X00001\"},\n  {\"PartNumber\": \"NVME-3T84\", \"SerialNumber\": \"S6NVME0001\"}]}\nEOF\ncat > bmcs/host2.json <<'EOF'\n{\"port\": 8002, \"vendor\": \"MockVendor\", \"user\": \"root\", \"password\": \"default-password2\",\n \"serial\": \"SERIAL-2\", \"pcie\": [\n  {\"PartNumber\": \"900-9D3B6-00CV-AA0\", \"SerialNumber\": \"MT2333X00002\"},\n  {\"PartNumber\": \"900-9D3B6-00CV-AA0\", \"SerialNumber\": \" MT2333X00003 \"}]}\nEOF\ncat > bmcs/dpu1.json <<'EOF'\n{\"port\": 8101, \"vendor\": \"MockDPU\", \"user\": \"root\", \"password\": \"lab-dpu-pass\",\n \"serial\": \"MT2333X00001\", \"mode\": \"DPU\"}\nEOF\ncat > bmcs/dpu2.json <<'EOF'\n{\"port\": 8102, \"vendor\": \"MockDPU\", \"user\": \"root\", \"password\": \"lab-dpu-pass\",\n \"serial\": \"MT2333X00002\", \"mode\": \"NIC\"}\nEOF\ncat > bmcs/dpu3.json <<'EOF'\n{\"port\": 8103, \"vendor\": \"MockDPU\", \"user\": \"root\", \"password\": \"lab-dpu-pass\",\n \"serial\": \"MT2333X00003\", \"mode\": \"DPU\"}\nEOF\n```\nHost 2's second DPU serial has deliberate whitespace around it, which the explorer must trim."
+        },
+        {
+          "subgoal": "Start four BMCs and probe them",
+          "detail": "```bash\nfor b in host1 host2 dpu1 dpu2; do python3 fake_bmc.py bmcs/$b.json & done\nsleep 1\ncurl -s http://127.0.0.1:8001/redfish/v1; echo\ncurl -s -o /dev/null -w '%{http_code}\\n' http://127.0.0.1:8001/redfish/v1/Systems/1\ncurl -s -u root:default-password1 http://127.0.0.1:8001/redfish/v1/Systems/1; echo\n```\nYou should see the anonymous service root, then `401`, then the system JSON. DPU 3 is not started yet: it has not been 'racked'."
+        },
+        {
+          "subgoal": "Simulate the DHCP lease table",
+          "detail": "In NICo, nico-dhcp hands the MAC to Core, and Core records the address. Here a file stands in for that:\n```bash\ncat > leases.json <<'EOF'\n[\n  {\"mac\": \"c4:5a:b1:c8:38:0d\", \"ip\": \"127.0.0.1\", \"port\": 8001, \"kind\": \"host_bmc\"},\n  {\"mac\": \"C4:5A:FF:FF:FF:FF\", \"ip\": \"127.0.0.1\", \"port\": 8002, \"kind\": \"host_bmc\"},\n  {\"mac\": \"B8:3F:D2:00:00:01\", \"ip\": \"127.0.0.1\", \"port\": 8101, \"kind\": \"dpu_bmc\"},\n  {\"mac\": \"B8:3F:D2:00:00:02\", \"ip\": \"127.0.0.1\", \"port\": 8102, \"kind\": \"dpu_bmc\"},\n  {\"mac\": \"02:00:00:00:00:99\", \"ip\": \"127.0.0.1\", \"port\": 8003, \"kind\": \"host_bmc\"}\n]\nEOF\n```\nThe `kind` field is a stand-in for vendor-class parsing. The first MAC is lowercase on purpose. The last MAC is a rogue BMC that is not in the manifest."
+        },
+        {
+          "subgoal": "Write the explorer",
+          "detail": "Save as `explorer.py`:\n```python\nimport base64\nimport json\nimport urllib.error\nimport urllib.request\n\nmanifest = json.load(open(\"expected_machines.json\"))[\"expected_machines\"]\nleases = json.load(open(\"leases.json\"))\nsite = json.load(open(\"site.json\"))\nby_mac = {m[\"bmc_mac_address\"].upper(): m for m in manifest}\n\n\ndef get(lease, path, user=None, pw=None):\n    req = urllib.request.Request(f\"http://{lease['ip']}:{lease['port']}{path}\")\n    if user:\n        token = base64.b64encode(f\"{user}:{pw}\".encode()).decode()\n        req.add_header(\"Authorization\", f\"Basic {token}\")\n    with urllib.request.urlopen(req, timeout=3) as resp:\n        return json.load(resp)\n\n\nhosts, dpus = {}, {}\nfor lease in leases:\n    mac = lease[\"mac\"].upper()\n    if lease[\"kind\"] == \"dpu_bmc\":\n        user, pw = site[\"dpu_bmc_user\"], site[\"dpu_bmc_password\"]\n    elif mac in by_mac:\n        user, pw = by_mac[mac][\"bmc_username\"], by_mac[mac][\"bmc_password\"]\n    else:\n        print(f\"SKIP {mac}: not in expected_machines.json\")\n        continue\n    root = get(lease, \"/redfish/v1\")  # anonymous vendor probe\n    try:\n        system = get(lease, \"/redfish/v1/Systems/1\", user, pw)\n    except urllib.error.HTTPError as err:\n        print(f\"AUTH-FAIL {mac}: HTTP {err.code}\")\n        continue\n    serial = system[\"SerialNumber\"].strip()\n    print(f\"EXPLORED {mac} vendor={root['Vendor']} serial={serial}\")\n    if lease[\"kind\"] == \"dpu_bmc\":\n        dpus[serial] = system\n        continue\n    expected = by_mac[mac][\"chassis_serial_number\"]\n    if serial != expected:\n        print(f\"MISMATCH {mac}: BMC reports {serial}, manifest says {expected}\")\n        continue\n    hosts[serial] = system\n\nfor serial, system in hosts.items():\n    managed, nic_mode, missing = [], [], []\n    seen = set()\n    for dev in system.get(\"PCIeDevices\", []):\n        s = dev.get(\"SerialNumber\", \"\").strip()\n        if not s or s in seen:\n            continue\n        seen.add(s)\n        if s not in dpus and dev.get(\"PartNumber\") not in site[\"dpu_part_numbers\"]:\n            continue  # not a DPU, e.g. an NVMe drive\n        if s not in dpus:\n            missing.append(s)\n        elif dpus[s].get(\"Mode\") == \"NIC\":\n            nic_mode.append(s)\n        else:\n            managed.append(s)\n    status = \"DEFERRED\" if missing else \"INGESTABLE\"\n    print(f\"{status} host={serial} managed_dpus={managed} nic_mode={nic_mode} missing={missing}\")\n```\nRun `python3 explorer.py`. Expected output:\n```text\nEXPLORED C4:5A:B1:C8:38:0D vendor=MockVendor serial=SERIAL-1\nEXPLORED C4:5A:FF:FF:FF:FF vendor=MockVendor serial=SERIAL-2\nEXPLORED B8:3F:D2:00:00:01 vendor=MockDPU serial=MT2333X00001\nEXPLORED B8:3F:D2:00:00:02 vendor=MockDPU serial=MT2333X00002\nSKIP 02:00:00:00:00:99: not in expected_machines.json\nINGESTABLE host=SERIAL-1 managed_dpus=['MT2333X00001'] nic_mode=[] missing=[]\nDEFERRED host=SERIAL-2 managed_dpus=[] nic_mode=['MT2333X00002'] missing=['MT2333X00003']\n```"
+        },
+        {
+          "subgoal": "Rack the missing DPU and re-run",
+          "detail": "```bash\npython3 fake_bmc.py bmcs/dpu3.json &\nsleep 1\npython3 -c 'import json; l = json.load(open(\"leases.json\")); l.append({\"mac\": \"B8:3F:D2:00:00:03\", \"ip\": \"127.0.0.1\", \"port\": 8103, \"kind\": \"dpu_bmc\"}); json.dump(l, open(\"leases.json\", \"w\"), indent=2)'\npython3 explorer.py\n```\nThe `sleep 1` gives the new mock BMC time to start listening on port 8103. Without it, the explorer's anonymous probe can hit a closed port and crash with a `URLError`. Host SERIAL-2 now becomes INGESTABLE, with one managed DPU and one in NIC mode. When you are done, run `pkill -f fake_bmc.py`."
+        }
+      ],
+      "verify": "After the final step, `python3 explorer.py | tail -2` prints exactly:\nINGESTABLE host=SERIAL-1 managed_dpus=['MT2333X00001'] nic_mode=[] missing=[]\nINGESTABLE host=SERIAL-2 managed_dpus=['MT2333X00003'] nic_mode=['MT2333X00002'] missing=[]\nThe output also includes a SKIP line for 02:00:00:00:00:99. As a negative test, change SERIAL-1's chassis_serial_number in the manifest to SERIAL-X and re-run: you should see a MISMATCH line, and SERIAL-1 should disappear from the pairing results.",
+      "hints": [
+        "`ConnectionRefusedError` (shown inside a `URLError`) means a mock BMC is not running on that port yet. Check with `jobs` or `lsof -i :8001`, restart it with `python3 fake_bmc.py bmcs/host1.json &`, and wait a second before re-running the explorer.",
+        "`OSError: [Errno 98] Address already in use` means an old copy is still running. Run `pkill -f fake_bmc.py` and start the mocks again.",
+        "`json.decoder.JSONDecodeError` usually means a trailing comma or a smart quote in one of the heredoc files. Run `python3 -m json.tool <file>` to find the line.",
+        "`AUTH-FAIL ... HTTP 401` means the password in expected_machines.json (or site.json) does not match the one in the bmcs/*.json file. This is the same failure a wrong factory password causes on a real site.",
+        "If SERIAL-2 still shows missing=['MT2333X00003'] after step 7, check that leases.json gained the new entry (`cat leases.json`) and that port 8103 answers `curl -s http://127.0.0.1:8103/redfish/v1`."
+      ],
+      "stretch": "Three harder extensions. First, add credential rotation: after a host is explored with Direct credentials, have the explorer generate a new password, store it in a `rotated.json` keyed by BMC MAC, and have fake_bmc.py accept a POST that changes its password. On the next run, the explorer should use the rotated credential (Key-style lookup by MAC) and never fall back to the factory one. Second, add a firmware gate: give each mock BMC a `bmc_firmware` version, add a `min_bmc_firmware` to site.json, and report hosts below it as `PREINGESTION-UPDATE` instead of INGESTABLE. Third, containerise the mock BMCs and the explorer, run them in a local kind cluster, add a small HTTP endpoint that serves the pairing report, and expose it through ingress-nginx with a cert-manager self-signed Certificate on a hostname such as `explorer.lab.test`. Verify it with `curl --cacert` against the exported CA."
+    }
+  }
+}

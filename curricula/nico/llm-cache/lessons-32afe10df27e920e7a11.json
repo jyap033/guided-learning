@@ -1,0 +1,484 @@
+{
+  "kind": "lessons",
+  "promptVersion": "2",
+  "provider": "claude-code",
+  "output": {
+    "intro": "Earlier chapters covered the Ethernet side of a NICo site: the BGP underlay (ch. 9), the VXLAN/EVPN overlay that BlueField DPUs build (ch. 11), and multi-tenancy with the DPU as the enforcement boundary (ch. 23). An AI cluster has more than one network, though. GPUs exchange most of their data over networks that never touch the Ethernet overlay.\n\nThis chapter maps those networks. You'll learn the three **network planes** (Ethernet, InfiniBand or Spectrum-X, and NVLink) and what kind of traffic each carries. Then you'll look at the two GPU fabrics in detail. The first is **InfiniBand**, where every NIC port belongs to exactly one fabric and is identified by a **GUID** and a **LID**. The second is **NVLink**, which joins GPUs across the trays of a rack into one large GPU domain. The chapter ends with the rule that holds all of this together: the **static network fabric principle**. NICo never reconfigures leaf or spine switches when tenants change. It isolates tenants through the DPU and through fabric manager APIs (UFM for InfiniBand, NMX-C for NVLink).\n\nThis matters for operating NICo because a host is only safe to hand to a tenant once it is isolated on *every* plane it is cabled to. Separating a tenant on Ethernet does nothing for its InfiniBand ports. Later chapters cover the actual isolation mechanisms: InfiniBand P_Key partitioning with UFM and NMX-C partitions (ch. 30). This chapter gives you the vocabulary and the mental model those chapters assume.",
+    "objectives": [
+      "Classify a given traffic flow in an AI cluster onto the Ethernet, InfiniBand/Spectrum-X or NVLink plane, and name the mechanism NICo uses to isolate tenants on that plane",
+      "Explain how a host's InfiniBand ports map to fabrics, and resolve a tenant's (device, fabric, device_instance) selection to a specific port the way NICo does",
+      "Describe an NVLink scale-up domain such as GB200 NVL72, and interpret NICo's NVLink health probes (NvlinkUnhealthy, NmxcUnreachable, NmxtUnreachable)",
+      "Tell an InfiniBand GUID from a LID, read both from Linux sysfs or ibstat output, and pick the right one for identity or routing",
+      "Explain why NICo keeps leaf and spine switch configuration static across tenant changes, and list what *does* change on each plane"
+    ],
+    "lessons": [
+      {
+        "concept": "network-planes",
+        "prequestions": [
+          {
+            "question": "A GPU server in an AI cluster often has a DPU plus several more high-speed NICs. Why might it need more than one kind of network card?",
+            "answer": "The different kinds of traffic need different networks. One network carries traffic in and out of the cluster (users, storage, the internet). Separate high-bandwidth, low-latency networks carry GPU-to-GPU traffic between servers. A third kind of link, NVLink, connects GPUs directly to each other without using a NIC at all."
+          },
+          {
+            "question": "If you isolate two tenants from each other on Ethernet using VRFs, does that also stop their GPUs from talking over InfiniBand?",
+            "answer": "No. InfiniBand is a physically separate network with its own switches and its own isolation mechanism (P_Keys, managed through UFM). Every plane has to be isolated on its own."
+          }
+        ],
+        "explanation": "A **network plane** is a separate physical network in the cluster, with its own cables, switches and isolation mechanism. A large AI cluster has three tenant-facing planes, plus the out-of-band management network you met in ch. 8.\n\nTwo terms first:\n- **North-south (N/S)** traffic crosses the cluster edge: users connecting over SSH or APIs, pulling container images, reading datasets from storage, reaching the internet.\n- **East-west (E/W)** traffic stays inside the cluster, between servers. In AI training this is mostly GPU collective operations such as all-reduce, which move huge amounts of data and are very sensitive to latency.\n\n**The planes:**\n\n| Plane | Carries | Typical hardware |\n|---|---|---|\n| Ethernet | N/S traffic | BlueField DPU uplinks to leaf/ToR switches |\n| InfiniBand or Spectrum-X | E/W GPU traffic between servers (*scale-out*) | ConnectX/SuperNIC ports to IB switches, or NVIDIA's Spectrum-X Ethernet platform |\n| NVLink | Direct GPU-to-GPU links (*scale-up*) | NVLink/NVSwitch, which spans a whole rack in GB200 NVL72 |\n\n*Scale-out* adds more servers and links them over a network. *Scale-up* makes one larger GPU domain whose GPUs act almost like a single machine.\n\n**Why NICo cares:** one of NICo's core responsibilities is to *enforce network isolation across Ethernet, InfiniBand, and NVLink planes*. Each plane uses a different mechanism:\n\n| Plane | NICo isolation mechanism |\n|---|---|\n| Ethernet (N/S) | BlueField HBN: L3 VXLAN/EVPN, VRFs, Network Security Groups |\n| InfiniBand (E/W) | UFM-based P_Key partition assignment per tenant |\n| NVLink | NMX-C gRPC partition management |\n| Spectrum-X (E/W) | SP-X partitioning |\n\nBefore a host is assigned to a tenant, NICo sets up isolation on **every applicable plane**. When the tenant releases the host, NICo clears that isolation and sets it up again for the next tenant. A host that is isolated on Ethernet but still sits in the previous tenant's InfiniBand partition is *not* isolated.\n\nThe OOB management network (BMCs, DPU OOB ports) is not a tenant data plane. NICo uses it to manage hardware, and tenants never get to it.",
+        "analogy": "Think of an office tower. The street entrance with its security desk is the Ethernet plane: everything going in or out of the building passes through it. A private freight-elevator network that links every floor is InfiniBand: heavy loads move fast between floors and never touch the street. Inside one large suite, the connecting doors between rooms are NVLink: very fast, but they only reach the rooms of that suite. Each one needs its own locks. Where the analogy breaks down: in a building, a locked front door also slows down intruders inside. In a cluster, the planes are fully independent, so locking one does nothing for the others.",
+        "workedExample": {
+          "title": "Classifying a training job's traffic onto planes",
+          "steps": [
+            {
+              "subgoal": "List the flows",
+              "detail": "A tenant runs a training job on 4 GB200 NVL72 racks:\n1. The engineer opens SSH to a node and pulls a container image from a public registry.\n2. Each step, GPUs inside one rack exchange tensor shards (tensor parallelism).\n3. Each step, gradients are all-reduced across the 4 racks (data parallelism).\n4. Checkpoints are written to an external storage service."
+            },
+            {
+              "subgoal": "Decide N/S vs E/W for each flow",
+              "detail": "Flows 1 and 4 cross the cluster edge, so they are **N/S**. Flows 2 and 3 stay between GPUs inside the cluster, so they are **E/W**."
+            },
+            {
+              "subgoal": "Split E/W into scale-up vs scale-out",
+              "detail": "Flow 2 stays inside one rack's NVLink domain: **NVLink** (scale-up). Flow 3 crosses racks, and NVLink does not reach that far: **InfiniBand or Spectrum-X** (scale-out)."
+            },
+            {
+              "subgoal": "Attach NICo's isolation mechanism",
+              "detail": "- Flows 1, 4 → Ethernet → DPU HBN VRF/VXLAN for the tenant's VPC\n- Flow 2 → NVLink → NMX-C partition that holds the tenant's GPUs\n- Flow 3 → InfiniBand → UFM P_Key partition that holds the tenant's IB ports (or SP-X partitioning on Spectrum-X)"
+            },
+            {
+              "subgoal": "Check on your own laptop",
+              "detail": "Your laptop has one plane. Run:\n```bash\nip -br link            # Linux: Ethernet/Wi-Fi interfaces\nls /sys/class/infiniband 2>/dev/null || echo \"no InfiniBand devices\"\n```\nOn a GPU node you would also see entries under `/sys/class/infiniband` and NVLink status from `nvidia-smi nvlink --status`. On a laptop, expect only Ethernet/Wi-Fi."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Fill in the blanks so this lookup table correctly describes each plane and NICo's mechanism on it.",
+          "partialSolution": "PLANES = {\n    \"ethernet\":   {\"traffic\": \"north-south\", \"nico_mechanism\": \"BlueField HBN (VXLAN/EVPN, VRFs)\"},\n    \"infiniband\": {\"traffic\": \"east-west\",   \"nico_mechanism\": \"___\"},\n    \"nvlink\":     {\"traffic\": \"___\",         \"nico_mechanism\": \"NMX-C partition management\"},\n}",
+          "answer": "`\"UFM P_Key partition assignment\"` for InfiniBand's mechanism, and `\"GPU-to-GPU scale-up\"` (direct GPU links inside one NVLink domain) for NVLink's traffic."
+        },
+        "independentProblem": {
+          "prompt": "A host has 1 BlueField DPU, 8 InfiniBand ports and 4 GPUs in an NVL72 rack. The operator's runbook says: \"To isolate tenant B from tenant A, put B's DPU in its own VRF.\" List every gap in that runbook and what NICo does to close each one.",
+          "hints": [
+            "Count the planes this host is cabled to.",
+            "A VRF on the DPU only affects traffic that passes through the DPU. Does InfiniBand or NVLink traffic pass through it?",
+            "Add the two missing mechanisms: one for the 8 IB ports, one for the 4 GPUs."
+          ],
+          "answer": "A VRF only isolates the Ethernet (N/S) plane. The runbook leaves out (1) InfiniBand: the host's 8 IB ports must be put into tenant B's P_Key partition through UFM, and removed from A's. (2) NVLink: the 4 GPUs must be placed in B's NMX-C NVLink partition, and removed from A's. NICo sets up all three before allocation and clears them on release."
+        },
+        "selfExplanation": "Why can't one isolation mechanism, such as a DPU VRF, protect all three planes? Answer in terms of where each plane's traffic physically flows.",
+        "checks": [
+          {
+            "question": "Gradient all-reduce between GPUs in *different* racks typically travels over which plane?",
+            "options": [
+              "NVLink",
+              "InfiniBand or Spectrum-X",
+              "The OOB management network",
+              "The Ethernet N/S plane through the DPU"
+            ],
+            "answer": "InfiniBand or Spectrum-X",
+            "explanation": "Cross-rack GPU traffic is east-west scale-out traffic, so it goes over InfiniBand or Spectrum-X. NVLink is tempting, but it is scale-up and only reaches within one NVLink domain, such as one NVL72 rack. The N/S Ethernet plane carries traffic in and out of the cluster. The OOB network is for management only."
+          },
+          {
+            "question": "Which mechanism does NICo use to isolate tenants on the NVLink plane?",
+            "options": [
+              "BlueField HBN VRFs",
+              "UFM P_Key partitions",
+              "NMX-C gRPC partition management",
+              "VLANs on the NVLink switches configured per tenant"
+            ],
+            "answer": "NMX-C gRPC partition management",
+            "explanation": "NVLink isolation goes through NMX-C partitions. HBN VRFs are for Ethernet, and P_Keys are for InfiniBand. Per-tenant switch configuration would break NICo's static-fabric principle."
+          }
+        ],
+        "sources": [
+          "overview/what-is-nico.md",
+          "overview/capabilities.md",
+          "overview/lifecycle.md"
+        ]
+      },
+      {
+        "concept": "infiniband-fabric",
+        "prequestions": [
+          {
+            "question": "A dual-port InfiniBand NIC sits in one PCIe slot. How many devices do you think Linux shows under /sys/class/infiniband for it?",
+            "answer": "Two. Each port appears as its own PCI function (for example ca:00.0 and ca:00.1) and its own InfiniBand device (for example ibp202s0f0 and ibp202s0f1)."
+          },
+          {
+            "question": "Can the two ports of that NIC be plugged into two different InfiniBand networks?",
+            "answer": "Yes. Each port is cabled to one switch, and that switch belongs to one fabric. The two ports can go to different fabrics, so a single host can span several fabrics."
+          }
+        ],
+        "explanation": "**InfiniBand (IB)** is a high-speed network built for cluster computing. It has its own switches and cables and does not use Ethernet. It is *lossless*: senders only transmit when the receiver has buffer space, so switches don't drop packets. It also supports **RDMA** (remote direct memory access), where one machine's NIC reads or writes another machine's memory without involving the CPU. This makes it a good fit for GPU collective traffic.\n\nAn **InfiniBand fabric** is one separate IB network: a set of switches and the ports cabled to them, managed together. Each fabric has a **subnet manager (SM)**, software that discovers the topology, assigns addresses and programs the switches' forwarding tables. NVIDIA's **UFM** (Unified Fabric Manager) is the management platform that runs this for a fabric and exposes APIs. NICo calls those APIs. It does not install or operate UFM.\n\nThe key rules:\n- **Each NIC port connects to exactly one fabric**, because the cable goes to one switch.\n- **A host can span several fabrics.** For example, one port can go to `IbFabric1` and another to `IbFabric2`.\n\n**How NICo models it.** NICo treats each port as a separate **device**, a PCI function that sends and receives IB traffic. A dual-port ConnectX-6 becomes two devices. For each device, discovery (via Scout) reports a `guid`, the `fabric` it connects to, and PCI properties including the `slot`. In the single-fabric MVP, an empty fabric means the default fabric.\n\nInstance types summarise this as **capabilities**: one entry per device model and fabric, with a `count`. Both ports on `IbFabric1` gives one entry with `count: 2`. Ports on two fabrics gives two entries with `count: 1`. Capabilities leave out GUIDs and slots, because those differ from machine to machine.\n\nA tenant picks an IB interface by `device` (model name), `fabric` and `device_instance` (the n-th match). NICo resolves this by **sorting the matching devices by PCI slot** and taking the n-th one. Machines of the same type have the same slot layout, so the same request picks the same physical port on every machine. GUIDs would not work for this: they are unique per card, so sorting by GUID would give a different order on each machine.",
+        "analogy": "Picture separate railway networks run by different companies. Each platform (port) is wired into exactly one company's track network (fabric). A big station (host) can have platforms on several networks. Each network has its own control centre (subnet manager) that assigns signal numbers and sets the switches. Where it breaks down: real stations can transfer passengers between networks. InfiniBand fabrics in a NICo site stay separate, and traffic doesn't cross between them.",
+        "workedExample": {
+          "title": "From hardware to discovery records to capabilities",
+          "steps": [
+            {
+              "subgoal": "Inventory the ports",
+              "detail": "A host has two dual-port ConnectX-6 cards. Linux shows four IB devices:\n```text\nca:00.0  ibp202s0f0   cabled to IbFabric1\nca:00.1  ibp202s0f1   cabled to IbFabric2\nea:00.0  ibp234s0f0   cabled to IbFabric1\nea:00.1  ibp234s0f1   cabled to IbFabric2\n```\nThe name encodes the PCI address: `p202` is bus 0xca in decimal (202), `s0` is slot 0, `f0`/`f1` is the function."
+            },
+            {
+              "subgoal": "Write one discovery record per device",
+              "detail": "Each port becomes one record with its own GUID:\n```json\n{\"guid\": \"1111\", \"fabric\": \"IbFabric1\", \"pci_properties\": {\"slot\": \"0000:ca:00.0\", \"device\": \"MT28908 Family [ConnectX-6]\"}}\n```\n...and the same again for `ca:00.1` (IbFabric2), `ea:00.0` (IbFabric1) and `ea:00.1` (IbFabric2)."
+            },
+            {
+              "subgoal": "Collapse into capabilities",
+              "detail": "Group by (device, fabric) and count:\n```json\n[\n  {\"type\": \"Infiniband\", \"name\": \"MT28908 Family [ConnectX-6]\", \"count\": 2, \"fabric\": \"IbFabric1\"},\n  {\"type\": \"Infiniband\", \"name\": \"MT28908 Family [ConnectX-6]\", \"count\": 2, \"fabric\": \"IbFabric2\"}\n]\n```\nNo GUIDs or slots appear here, so every machine with the same cabling reports identical capabilities."
+            },
+            {
+              "subgoal": "Resolve a tenant selection",
+              "detail": "Request: `{device: ConnectX-6, fabric: IbFabric1, device_instance: 1}`.\nThe IbFabric1 matches sorted by slot are `0000:ca:00.0`, `0000:ea:00.0`. Index 1 is `ea:00.0`, which the tenant sees as `ibp234s0f0`."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete NICo-style device selection: filter by model and fabric, sort deterministically, then pick the n-th match.",
+          "partialSolution": "def select(devices, device, fabric, device_instance):\n    matches = [d for d in devices\n               if d[\"pci_properties\"][\"device\"] == device and d[\"fabric\"] == fabric]\n    matches.sort(key=lambda d: ___)\n    return matches[___][\"guid\"]",
+          "answer": "`d[\"pci_properties\"][\"slot\"]` as the sort key, and `device_instance` as the index."
+        },
+        "independentProblem": {
+          "prompt": "Hardware: GUID 1234 at slot 0000:cb:00.0 on IbFabric1; GUID 2345 at 0000:cd:00.0 on IbFabric2; GUID 3456 at 0000:ea:00.0 on IbFabric1; GUID 4567 at 0000:eb:00.0 on IbFabric2. All are ConnectX-6. (a) Which GUID does {fabric: IbFabric2, device_instance: 1} select? (b) A colleague suggests sorting by GUID instead. Give one case where that would select a different physical slot on another machine of the same instance type.",
+          "hints": [
+            "Only look at the IbFabric2 rows, then order them by slot.",
+            "For (b), imagine a second machine with the same slots but different GUIDs, because GUIDs come from the factory.",
+            "Suppose on machine 2 the card in slot cd has a *higher* GUID than the card in slot eb."
+          ],
+          "answer": "(a) The IbFabric2 devices sorted by slot are cd (2345), then eb (4567). Index 1 is GUID 4567. (b) On another machine, the GUIDs might be eb=1000 and cd=9000. Sorting by GUID would make instance 0 the eb slot on that machine but the cd slot on this one. The same tenant config would then hit different hardware. PCI slots are the same on every machine of the instance type, so sorting by slot keeps the selection consistent."
+        },
+        "selfExplanation": "Why does NICo let tenants select IB interfaces by (device, fabric, device_instance) instead of by GUID or MAC? What would break for a tenant who runs the same config on 100 instances?",
+        "checks": [
+          {
+            "question": "A host has one dual-port IB NIC with port 1 on IbFabric1 and port 2 on IbFabric2. How does the instance-type capability list represent it?",
+            "options": [
+              "One entry with count: 2 and two fabrics listed",
+              "Two entries, each with count: 1 and its own fabric",
+              "One entry with count: 1, because it is one physical card",
+              "Two entries that include each port's GUID"
+            ],
+            "answer": "Two entries, each with count: 1 and its own fabric",
+            "explanation": "Each port is a separate device, and capabilities are grouped by device and fabric. Different fabrics give separate entries. Counting the physical card is the misconception NICo's model avoids. GUIDs are left out because they differ per machine."
+          },
+          {
+            "question": "Which statement about InfiniBand fabrics is correct?",
+            "options": [
+              "A host can only connect to one IB fabric",
+              "Each NIC port connects to one fabric, but a host can span several fabrics",
+              "Each port can join several fabrics at once through VLANs",
+              "IB fabrics are segments of the Ethernet underlay"
+            ],
+            "answer": "Each NIC port connects to one fabric, but a host can span several fabrics",
+            "explanation": "A port is cabled to a single switch, and that switch belongs to one fabric. Different ports can go to different fabrics. IB has nothing to do with VLANs or the Ethernet underlay."
+          }
+        ],
+        "sources": [
+          "architecture/infiniband/nic_selection.md",
+          "overview/scope-and-boundaries.md"
+        ]
+      },
+      {
+        "concept": "nvlink-scale-up-fabric",
+        "prequestions": [
+          {
+            "question": "In a GB200 NVL72 rack, roughly how many GPUs can talk to each other directly over NVLink without going through a network card?",
+            "answer": "All 72. The GPUs sit in 18 compute trays (4 per tray), and NVLink switch trays connect them all into one NVLink domain."
+          },
+          {
+            "question": "If the NVLink fabric in a rack is only partly formed, should NICo still hand that rack's hosts to a tenant who wants an NVLink partition?",
+            "answer": "No. NICo gates instance allocation on NVLink cluster readiness. If the fabric isn't healthy or fully formed, provisioning is blocked."
+          }
+        ],
+        "explanation": "**NVLink** is NVIDIA's direct GPU-to-GPU interconnect. Its bandwidth per GPU is much higher than any NIC's. Inside a classic 8-GPU HGX server, NVSwitch chips on the board connect the GPUs. In rack-scale systems like **GB200 NVL72**, NVLink leaves the server: the 18 compute trays (4 GPUs each) are cabled to dedicated **NVLink switch trays**, which joins 72 GPUs into a single **NVLink domain**. This is **scale-up**: making one bigger GPU domain, as opposed to scaling out over InfiniBand.\n\nA tenant usually needs only part of a domain, so the fabric is split into **NVLink partitions**. GPUs in one partition can reach each other over NVLink, and GPUs in different partitions cannot.\n\n**Who manages it.** The NVLink switch trays run NVOS. Two services on the fabric matter here:\n- **NMX-C** is the controller (fabric manager role). It forms the domain, reports GPU and controller health, and creates and changes partitions. NICo uses its gRPC API.\n- **NMX-T** is the telemetry service. It runs only on the switch marked *primary*, and NICo checks that it is reachable on TCP port 9352 by default.\n\nNICo doesn't deploy NMX-C. It consumes it.\n\n**What NICo does on this plane:**\n- Configures GPU membership in NVLink partitions through NMX-C when it provisions for a tenant.\n- Gates allocation on fabric readiness, and batches GB200 allocations by NVL domain so NVLink topology stays intact.\n- Monitors health with probes:\n  - `NmxControllerHealth`: NMX-C reports the controller as Unhealthy.\n  - `NvlinkUnhealthy`: a GPU is reported as `Degraded`, `NoNvlink` or `DegradedBw`. This blocks allocation.\n  - `NmxcUnreachable`: NMX-C could not be used for 3 consecutive passes by default. This is informational and does not block allocation.\n  - `SwitchUnreachable` / `NmxtUnreachable`: the NVOS port or the NMX-T port does not accept TCP connections.\n- Isolates a host when needed (for example, a compute tray due for swap) by removing its GPUs from every partition.",
+        "analogy": "An NVLink domain is like a large open-plan office floor where any desk can talk to any other desk directly. Partitions are movable glass walls that split the floor into team rooms, and NMX-C is the facilities manager who moves the walls. Where it breaks down: office walls block sound only partly, whereas a partition is a hard boundary. GPUs outside it cannot exchange NVLink traffic at all.",
+        "workedExample": {
+          "title": "Deciding whether a rack's hosts can be allocated",
+          "steps": [
+            {
+              "subgoal": "Identify the domain",
+              "detail": "Rack R3 is one GB200 NVL72 domain: 18 compute trays × 4 GPUs = 72 GPUs, connected by NVLink switch trays. One switch is marked primary, so it hosts NMX-T."
+            },
+            {
+              "subgoal": "Check controller and reachability",
+              "detail": "R3 shows no `NmxcUnreachable` alert, so NICo's partition monitor can reach NMX-C. The switches show no `SwitchUnreachable` alert, and the primary shows no `NmxtUnreachable`."
+            },
+            {
+              "subgoal": "Check GPU health",
+              "detail": "Host `tray-07` has an `NvlinkUnhealthy` alert with one entry: `target` = a GPU's NMX-C UID, `message` = `degraded_bw`. The alert carries `PreventAllocations`."
+            },
+            {
+              "subgoal": "Decide",
+              "detail": "Normal allocation will skip `tray-07` until NMX-C reports that same GPU UID as `Healthy`. `Unknown`, or the GPU missing from the response, keeps it flagged. The other trays stay allocatable. Targeted allocation with `allow_unhealthy_machine` can bypass the check, but that is a deliberate operator decision."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete these helpers so they follow NICo's NvlinkUnhealthy rules.",
+          "partialSolution": "UNHEALTHY = {\"Degraded\", \"NoNvlink\", \"___\"}\n\ndef raises_alert(state):\n    return state in UNHEALTHY\n\ndef clears_existing_alert(state):\n    # Unknown or absent keeps a flagged GPU flagged\n    return state == \"___\"",
+          "answer": "`DegradedBw` completes the unhealthy set, and `Healthy` is the only state that clears an existing alert."
+        },
+        "independentProblem": {
+          "prompt": "An operator sees `NmxcUnreachable` on rack R7, but none of R7's hosts have `NvlinkUnhealthy`, and normal allocations on R7 still succeed. They conclude that the NVLink fabric must be fine. What's wrong with that reasoning?",
+          "hints": [
+            "Check what classification NmxcUnreachable carries. Does it block allocations?",
+            "NvlinkUnhealthy is evaluated from NMX-C's GPU-health query. What happens to that query when NMX-C is unreachable?",
+            "Combine the two: missing alerts aren't evidence of health when the data source is down."
+          ],
+          "answer": "`NmxcUnreachable` carries only the `Hardware` classification, so it doesn't block allocations by itself. Allocations succeeding says nothing about fabric health. With NMX-C unreachable, the GPU-health query fails and the monitor can't re-evaluate, so `NvlinkUnhealthy` alerts are neither raised nor updated. Having no GPU alerts just means NICo has no current data. The operator should restore NMX-C connectivity before trusting the NVLink state."
+        },
+        "selfExplanation": "Why does NICo batch GB200 allocations by NVL domain and block provisioning when the NVLink fabric isn't fully formed, instead of handing out hosts one by one?",
+        "checks": [
+          {
+            "question": "Which NICo health probe blocks normal allocation of a host?",
+            "options": [
+              "NmxcUnreachable",
+              "NvlinkUnhealthy",
+              "NmxtUnreachable",
+              "SwitchUnreachable"
+            ],
+            "answer": "NvlinkUnhealthy",
+            "explanation": "`NvlinkUnhealthy` carries `PreventAllocations`. The reachability probes (`NmxcUnreachable`, `SwitchUnreachable`, `NmxtUnreachable`) carry only `Hardware` and do not block allocation. It's tempting to assume a controller outage blocks everything, but it doesn't."
+          },
+          {
+            "question": "Why does only the primary NVLink switch ever get an NmxtUnreachable alert?",
+            "options": [
+              "Non-primary switches have no NVOS",
+              "Only switches marked is_primary host NMX-T",
+              "NICo only monitors one switch per rack",
+              "NMX-T runs on the compute trays"
+            ],
+            "answer": "Only switches marked is_primary host NMX-T",
+            "explanation": "NMX-T runs only on the primary switch, so only that switch is probed on the NMX-T port. Every switch in the `ready` state still gets `SwitchUnreachable` checks on its NVOS port."
+          }
+        ],
+        "sources": [
+          "overview/capabilities.md",
+          "overview/lifecycle.md",
+          "architecture/health/health_probe_ids.md",
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      },
+      {
+        "concept": "infiniband-guid-and-lid",
+        "prequestions": [
+          {
+            "question": "An IB port has a 64-bit ID that was written in at the factory, and a 16-bit number it was given when it joined the network. Which one would you use to recognise the same port after the network is rebuilt?",
+            "answer": "The 64-bit factory ID, the GUID. The 16-bit LID is assigned by the subnet manager and can change."
+          },
+          {
+            "question": "Could two ports on two different InfiniBand fabrics have the same LID?",
+            "answer": "Yes. A LID is only unique inside one subnet, and each fabric's subnet manager assigns LIDs on its own."
+          }
+        ],
+        "explanation": "InfiniBand gives every port two kinds of identifier. They do different jobs, much like a MAC address and an IP address on Ethernet.\n\n**GUID (Globally Unique Identifier)** is a 64-bit ID, written in hex such as `0x0c42a10300aa00f1`. The manufacturer burns it in, so it stays the same whichever fabric the port is plugged into. There are several: a *node GUID* for the device, a *port GUID* per port, and a *system image GUID* shared by a card's devices. Virtual Functions (VFs) have no factory GUID, so software assigns them one. In NICo, NICo allocates the GUIDs for VF interfaces, and the FMDS configuration script writes them where the OS expects them. Use the GUID for **identity**: it answers \"which port is this?\"\n\n**LID (Local Identifier)** is a 16-bit address that the **subnet manager** assigns when the port comes up. Switches forward packets by destination LID, using tables the SM programs. Unicast LIDs run from 0x0001 to 0xBFFF. A LID of 0 means the SM hasn't assigned one yet, which usually means the port isn't active. A LID is only unique **within one subnet** and can change if the SM reassigns it. Use the LID for **routing** (\"how do I reach it right now?\"), never as a long-term key. (A 128-bit *GID*, made from the subnet prefix plus the port GUID, is used when addressing has to work beyond one subnet.)\n\n**Where they show up in NICo:**\n- Discovery records carry each device's `guid`.\n- The `IbPortDown` health alert reports the **GUIDs** of ports that aren't active.\n- FMDS instance status gives the tenant each interface's `guid`, `lid` and addresses, plus `pf_guid` for VFs.\n- Tenant instance configs deliberately contain **no** GUIDs, so one config works across machines and still works after a NIC is replaced.\n\nOn Linux you can read both from sysfs (`/sys/class/infiniband/<dev>/node_guid` and `ports/1/lid`) or with `ibstat`.",
+        "analogy": "A GUID is like a person's passport number: issued once, the same in every country. A LID is like the room number a hotel front desk (the subnet manager) gives you at check-in. Staff use the room number to deliver things to you, but another hotel can give someone else the same number, and you might get a different room next time. Where it breaks down: a passport can be reissued, but a port's factory GUID never changes. A port also only ever stays at one hotel at a time, since it sits on one fabric.",
+        "workedExample": {
+          "title": "Reading GUID and LID from sysfs",
+          "steps": [
+            {
+              "subgoal": "Build a fake sysfs entry",
+              "detail": "Your laptop has no IB hardware, so recreate the real file layout:\n```bash\nD=$(mktemp -d)/infiniband/ibp203s0f0\nmkdir -p \"$D/ports/1\"\necho 0c42:a103:00aa:00f1 > \"$D/node_guid\"\necho 0x1a               > \"$D/ports/1/lid\"\necho \"4: ACTIVE\"         > \"$D/ports/1/state\"\necho 0x1                > \"$D/ports/1/sm_lid\"\n```"
+            },
+            {
+              "subgoal": "Read the GUID",
+              "detail": "```bash\ncat \"$D/node_guid\"            # 0c42:a103:00aa:00f1\ntr -d ':' < \"$D/node_guid\"    # 0c42a10300aa00f1  (the form used in tools/APIs)\n```"
+            },
+            {
+              "subgoal": "Read the LID and convert to decimal",
+              "detail": "```bash\nprintf '%d\\n' \"$(cat \"$D/ports/1/lid\")\"   # 26\n```\n`ibstat` on a real host prints the same port as, for example:\n```text\nNode GUID: 0x0c42a10300aa00f1\nPort 1:\n    State: Active\n    Base lid: 26\n    SM lid: 1\n    Port GUID: 0x0c42a10300aa00f1\n```"
+            },
+            {
+              "subgoal": "Interpret",
+              "detail": "The GUID tells you *which port* this is, and it matches the `guid` in NICo's discovery data. The LID 26 tells you how switches in *this* subnet reach it, and SM lid 1 is the subnet manager's own address. If `state` were `1: DOWN`, the LID would usually be 0 and NICo would list this GUID in an `IbPortDown` alert."
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this parser for one sysfs IB device directory.",
+          "partialSolution": "from pathlib import Path\n\ndef read_port(dev_dir, port=1):\n    p = Path(dev_dir) / \"ports\" / str(port)\n    guid = (Path(dev_dir) / \"node_guid\").read_text().strip().replace(\":\", \"\")\n    lid = int((p / \"lid\").read_text().strip(), ___)\n    state = (p / \"state\").read_text().strip()\n    return {\"guid\": guid, \"lid\": lid, \"active\": ___}",
+          "answer": "Use base `16` (sysfs writes the LID as hex, e.g. `0x1a`, and Python's `int(\"0x1a\", 16)` accepts the prefix), and `\"ACTIVE\" in state` for the active flag (the file holds `4: ACTIVE` when up)."
+        },
+        "independentProblem": {
+          "prompt": "A tenant's MPI launcher has a hard-coded table mapping hostnames to LIDs. After the fabric team restarts UFM's subnet manager, some jobs can't connect. Another tenant on a different fabric reports a port with the same LID as one of yours. Explain both observations and say what the launcher should use instead.",
+          "hints": [
+            "Who assigns LIDs, and is that assignment guaranteed to stay the same?",
+            "What is the scope in which a LID is unique?",
+            "Which identifier stays fixed, and where can a tenant get the current LID at runtime in NICo?"
+          ],
+          "answer": "The subnet manager assigns LIDs. After the SM restarted it handed out LIDs again, and some changed, so the hard-coded table went stale. LIDs are only unique within one subnet, so a port on a different fabric can legitimately have the same LID. The launcher should identify ports by GUID, and get the current LID at runtime, for example from `ibstat` or sysfs on the host, or from the `lid` field FMDS returns next to each interface's `guid`."
+        },
+        "selfExplanation": "Why does NICo report port GUIDs (not LIDs) in IbPortDown alerts and discovery data, while still handing tenants the LID through FMDS?",
+        "checks": [
+          {
+            "question": "Who assigns an InfiniBand port's LID?",
+            "options": [
+              "The NIC manufacturer, at the factory",
+              "The subnet manager of the fabric",
+              "NICo, from an IP address pool",
+              "The tenant OS driver"
+            ],
+            "answer": "The subnet manager of the fabric",
+            "explanation": "The SM (for example, the one UFM runs) assigns LIDs. The manufacturer sets the GUID, not the LID. NICo does allocate VF GUIDs, but it doesn't hand out LIDs from its pools."
+          },
+          {
+            "question": "A port's sysfs lid file reads 0x0. What's the most likely meaning?",
+            "options": [
+              "The port is the subnet manager",
+              "The port hasn't been assigned a LID, typically because it isn't active",
+              "It is a multicast port",
+              "LID 0 is the first normal unicast address"
+            ],
+            "answer": "The port hasn't been assigned a LID, typically because it isn't active",
+            "explanation": "LID 0 is reserved and means \"not assigned\". Unicast LIDs start at 0x0001. The SM's own LID shows up in `sm_lid`, and it is not zero."
+          },
+          {
+            "question": "Why do NICo tenant instance configs leave out GUIDs?",
+            "options": [
+              "GUIDs are secret",
+              "Configs must work across all machines of an instance type and keep working after hardware is replaced",
+              "GUIDs change on every reboot",
+              "UFM does not use GUIDs"
+            ],
+            "answer": "Configs must work across all machines of an instance type and keep working after hardware is replaced",
+            "explanation": "GUIDs are stable but specific to each card, so a config keyed on them couldn't be shared between machines and would break when a NIC is swapped. GUIDs do not change on reboot. That is a property of LIDs, which can change when the SM reassigns them."
+          }
+        ],
+        "sources": [
+          "architecture/infiniband/nic_selection.md",
+          "architecture/health/health_probe_ids.md"
+        ]
+      },
+      {
+        "concept": "static-network-fabric-principle",
+        "prequestions": [
+          {
+            "question": "When a host moves from tenant A to tenant B, do you think someone needs to push a new config to the leaf switch it's cabled to?",
+            "answer": "No. In NICo, leaf and spine switches are never reconfigured for tenant changes. The DPU changes its HBN configuration, and the IB and NVLink fabric managers change partitions through their APIs."
+          },
+          {
+            "question": "If the leaf switch config doesn't change, how can the network learn that tenant B's routes now live behind this host?",
+            "answer": "Dynamically, through BGP EVPN. The DPU advertises tenant B's routes and withdraws tenant A's. The fabric learns routes at runtime while its configuration stays the same."
+          }
+        ],
+        "explanation": "NICo's fifth operational principle: **the network fabric stays static even during tenancy changes.** Leaf switches, spine switches and routers are *not* reconfigured when tenants change, or when hosts are provisioned and released. All tenant isolation happens in two places:\n\n1. **On the DPU** (Ethernet). BlueField HBN builds the tenant's VRFs and VXLAN/EVPN overlay on the host's own DPU (ch. 7, 11). Leaf switches need no configuration changes.\n2. **Through fabric manager APIs.** UFM assigns InfiniBand P_Key partitions, NMX-C sets NVLink partition membership, and Spectrum-X uses SP-X partitioning.\n\n**What changes and what doesn't.** On a tenant change, the DPU's desired config changes. The DPU agent picks it up when it polls every 30 seconds and applies it through HBN. The DPU then advertises the new tenant's EVPN routes and withdraws the old ones. So the *routing state* in the fabric changes, which is normal BGP behaviour. The *switch configuration* does not.\n\n**Why build it this way:**\n- **Lower risk.** A bad tenant change can only affect one DPU, not a switch that hundreds of hosts depend on.\n- **Scale.** Thousands of provisioning events don't turn into thousands of switch config pushes.\n- **Clear ownership.** The network team owns the leaf/spine/router configuration, cabling, UFM and NMX-C deployment. NICo owns tenant isolation.\n- **Zero trust.** The DPU, not the host, enforces the boundary. On release it fails closed: it goes back to the admin overlay, and NICo doesn't report the release complete until the DPU confirms it has left all tenant networks.\n\n**What the principle doesn't cover.** NICo does interact with some switches during *bring-up and maintenance*. For example, it installs certificates on NVLink switches and rotates their NVOS admin password during switch ingestion. That is part of the infrastructure lifecycle, not a per-tenant change.",
+        "analogy": "In a hotel, guests change every day, but nobody moves walls or rewires the corridors. Front desk reprograms the key cards (DPU config, partition membership), and the corridors (leaf/spine) stay exactly as they were. Where it breaks down: a key card is only checked at the door, while a DPU inspects and routes every packet. Also, the fabric's routing tables do change dynamically as the DPU advertises routes, which would be like corridor signs updating themselves.",
+        "workedExample": {
+          "title": "Diffing a tenant change across all planes",
+          "steps": [
+            {
+              "subgoal": "State the change",
+              "detail": "Host `h01` moves from tenant **acme** (VRF `acme-vrf`, P_Key `0x8001`, NVLink partition `acme-nvl`) to tenant **globex** (VRF `globex-vrf`, P_Key `0x8002`, partition `globex-nvl`)."
+            },
+            {
+              "subgoal": "Ethernet plane",
+              "detail": "The DPU's desired HBN config drops `acme-vrf` and adds `globex-vrf` and its VNI. The DPU withdraws acme's EVPN routes and advertises globex's. Leaf switches learn the new routes through BGP, and their config stays the same."
+            },
+            {
+              "subgoal": "InfiniBand plane",
+              "detail": "Through UFM, h01's port GUIDs are removed from P_Key `0x8001` and added to `0x8002`. (Release also includes an InfiniBand device reset.)"
+            },
+            {
+              "subgoal": "NVLink plane",
+              "detail": "Through NMX-C, h01's GPUs leave partition `acme-nvl` and join `globex-nvl`."
+            },
+            {
+              "subgoal": "Prove the leaf is untouched",
+              "detail": "Treat the leaf's config as a file you hash before and after:\n```bash\nprintf 'router:\\n  bgp:\\n    autonomous-system: 65101\\n' > leaf01.yaml\nbefore=$(cat leaf01.yaml | sha256sum)   # macOS: shasum -a 256\n# ... tenant change happens on the DPU and through UFM/NMX-C ...\nafter=$(cat leaf01.yaml | sha256sum)\n[ \"$before\" = \"$after\" ] && echo \"leaf config unchanged\"\n```"
+            }
+          ]
+        },
+        "completionProblem": {
+          "prompt": "Complete this function so it lists the actions for a tenant change and makes the static-fabric rule explicit.",
+          "partialSolution": "def tenant_change_actions(old, new):\n    return {\n        \"dpu_hbn\": f\"remove VRF {old['vrf']}, add VRF {new['vrf']}\",\n        \"ufm\": f\"move port GUIDs from P_Key {old['pkey']} to {new['pkey']}\",\n        \"___\": f\"move GPUs from partition {old['nvl']} to {new['nvl']}\",\n        \"leaf_switch_config\": ___,\n    }",
+          "answer": "Use the key `nmx_c` for the NVLink action, and `None` (no change) for `leaf_switch_config`."
+        },
+        "independentProblem": {
+          "prompt": "A network engineer proposes: \"For extra safety, let's also put each tenant on its own VLAN on the leaf switch ports whenever NICo provisions a host.\" Give three concrete reasons this works against NICo's design, and say where the isolation they want already happens.",
+          "hints": [
+            "Think about what happens across thousands of provision/release events.",
+            "Who owns leaf configuration according to NICo's scope boundaries, and what happens to the blast radius when it changes?",
+            "Where is the zero-trust enforcement point, and what does NICo already do on the leaf-facing side?"
+          ],
+          "answer": "(1) It turns every provisioning event into a switch config push, and at scale that becomes a large, risky change stream. (2) It expands the blast radius: one bad push can disrupt every host on that leaf, while a DPU change only affects one host. It also blurs ownership, since leaf/spine configuration belongs to the network team, not to NICo. (3) It's redundant and moves enforcement away from the trust anchor: the DPU already isolates the tenant with HBN VRFs and VXLAN/EVPN, independently of the host, and fails closed to the admin overlay on release. The fabric only needs to carry the underlay and learn the EVPN routes the DPU advertises."
+        },
+        "selfExplanation": "In your own words: how can the fabric's routing state change on every tenant change while NICo still claims the fabric is static? What exactly is held constant?",
+        "checks": [
+          {
+            "question": "Which of these happens on a NICo tenant change?",
+            "options": [
+              "The leaf switch gets a new per-tenant VRF stanza",
+              "The DPU's HBN config changes and its EVPN route advertisements change",
+              "The spine switches are rebooted to clear old routes",
+              "The network team edits UFM's subnet manager config by hand"
+            ],
+            "answer": "The DPU's HBN config changes and its EVPN route advertisements change",
+            "explanation": "Isolation is set up on the DPU, and routes change dynamically through BGP EVPN. Leaf and spine switches don't get per-tenant config. UFM partitions are changed through its API, not by hand."
+          },
+          {
+            "question": "During switch ingestion, NICo installs TLS certificates on NVLink switches. Does that violate the static network fabric principle?",
+            "options": [
+              "Yes, NICo should never touch any switch",
+              "No, the principle is about tenant changes; bring-up and maintenance are infrastructure lifecycle",
+              "Yes, but only because the switches are NVLink switches",
+              "No, because certificates are not configuration"
+            ],
+            "answer": "No, the principle is about tenant changes; bring-up and maintenance are infrastructure lifecycle",
+            "explanation": "The principle says switches aren't reconfigured *when tenants change*. Certificate installation and password rotation happen during switch bring-up and maintenance, not per tenant. Certificates are still configuration, so that answer gives the wrong reason."
+          }
+        ],
+        "sources": [
+          "overview/operational-principles.md",
+          "overview/scope-and-boundaries.md",
+          "overview/lifecycle.md",
+          "overview/what-is-nico.md",
+          "architecture/state_machines/switch_configure_certificate.md"
+        ]
+      }
+    ],
+    "buildTask": {
+      "title": "Multi-plane isolation planner on a fake InfiniBand host",
+      "goal": "Build a small Python tool that inventories a simulated host's InfiniBand devices from a sysfs-style tree (GUID, LID, state, PCI slot), resolves tenant (device, fabric, device_instance) selections the way NICo does, and writes a per-plane isolation plan for two successive tenants. A hash check proves the leaf switch config never changes.",
+      "whyItMatters": "Before NICo hands out a host, it must isolate the tenant on every plane the host is cabled to: DPU HBN for Ethernet, UFM P_Keys for InfiniBand, NMX-C partitions for NVLink. It does this without touching leaf or spine switches. This build has you resolve ports to GUIDs, tell identity (GUID) from routing (LID), spot inactive ports the way IbPortDown does, and check that a tenant change leaves the switch configuration alone. Note: the plan files you write are a teaching simulation, not NICo, UFM or NMX-C API formats.",
+      "setup": [
+        "Linux or macOS shell (bash or zsh)",
+        "Python 3.8+ (no extra packages)",
+        "sha256sum (Linux) or shasum -a 256 (macOS)",
+        "An empty working directory, e.g. mkdir ~/gpu-fabrics && cd ~/gpu-fabrics"
+      ],
+      "steps": [
+        {
+          "subgoal": "Create a fake sysfs with four IB devices",
+          "detail": "Save as `make_fake_sysfs.sh` and run `bash make_fake_sysfs.sh`. It mirrors the real layout of `/sys/class/infiniband/<dev>/{node_guid,device,ports/1/lid,ports/1/state}`. The GUIDs are deliberately *not* in slot order.\n```bash\n#!/usr/bin/env bash\nset -euo pipefail\nROOT=${1:-./fakesys}\nrm -rf \"$ROOT\"\nmk() { # name slot guid lid state\n  local name=$1 slot=$2 guid=$3 lid=$4 state=$5\n  mkdir -p \"$ROOT/devices/$slot\" \"$ROOT/class/infiniband/$name/ports/1\"\n  ln -s \"../../../devices/$slot\" \"$ROOT/class/infiniband/$name/device\"\n  echo \"$guid\"  > \"$ROOT/class/infiniband/$name/node_guid\"\n  echo \"$lid\"   > \"$ROOT/class/infiniband/$name/ports/1/lid\"\n  echo \"$state\" > \"$ROOT/class/infiniband/$name/ports/1/state\"\n  echo \"MT28908 Family [ConnectX-6]\" > \"$ROOT/devices/$slot/label\"\n}\nmk ibp203s0f0 0000:cb:00.0 0c42:a103:00aa:00f1 0x1a \"4: ACTIVE\"\nmk ibp205s0f0 0000:cd:00.0 0c42:a103:00aa:00b2 0x1b \"4: ACTIVE\"\nmk ibp234s0f0 0000:ea:00.0 0c42:a103:00aa:0031 0x2c \"4: ACTIVE\"\nmk ibp235s0f0 0000:eb:00.0 0c42:a103:00aa:0042 0x0  \"1: DOWN\"\necho \"created $ROOT\"\n```\nCheck: `ls fakesys/class/infiniband` shows four devices. Running `cat fakesys/class/infiniband/ibp235s0f0/ports/1/lid` prints `0x0`, an unassigned LID."
+        },
+        {
+          "subgoal": "Describe which fabric each port is cabled to",
+          "detail": "A host can't see which fabric a port is on. In NICo that information comes from the site, not from the tenant host. Create `fabrics.json`, keyed by GUID:\n```json\n{\n  \"0c42a10300aa00f1\": \"IbFabric1\",\n  \"0c42a10300aa00b2\": \"IbFabric2\",\n  \"0c42a10300aa0031\": \"IbFabric1\",\n  \"0c42a10300aa0042\": \"IbFabric2\"\n}\n```"
+        },
+        {
+          "subgoal": "Write the inventory and selector",
+          "detail": "Save as `inventory.py`:\n```python\n#!/usr/bin/env python3\nimport json\nimport sys\nfrom pathlib import Path\n\n\ndef inventory(sys_root, fabric_map):\n    out = []\n    for dev in sorted((Path(sys_root) / \"class\" / \"infiniband\").iterdir()):\n        port = dev / \"ports\" / \"1\"\n        guid = (dev / \"node_guid\").read_text().strip().replace(\":\", \"\")\n        pci = (dev / \"device\").resolve()\n        state = (port / \"state\").read_text().strip()\n        out.append({\n            \"name\": dev.name,\n            \"guid\": guid,\n            \"lid\": int((port / \"lid\").read_text().strip(), 16),\n            \"active\": \"ACTIVE\" in state,\n            \"fabric\": fabric_map.get(guid, \"\"),\n            \"pci_properties\": {\n                \"slot\": pci.name,\n                \"device\": (pci / \"label\").read_text().strip(),\n            },\n        })\n    return out\n\n\ndef select(devices, device, fabric, device_instance):\n    matches = [d for d in devices\n               if d[\"pci_properties\"][\"device\"] == device and d[\"fabric\"] == fabric]\n    matches.sort(key=lambda d: d[\"pci_properties\"][\"slot\"])\n    if device_instance >= len(matches):\n        raise SystemExit(f\"no instance {device_instance} of {device} on {fabric}\")\n    return matches[device_instance]\n\n\nif __name__ == \"__main__\":\n    sys_root, fabric_file = sys.argv[1], sys.argv[2]\n    devs = inventory(sys_root, json.loads(Path(fabric_file).read_text()))\n    if len(sys.argv) == 3:\n        print(json.dumps(devs, indent=2))\n    elif sys.argv[3] == \"--down\":\n        for d in devs:\n            if not d[\"active\"]:\n                print(\"port not active:\", d[\"guid\"], d[\"name\"])\n    else:\n        d = select(devs, sys.argv[3], sys.argv[4], int(sys.argv[5]))\n        print(d[\"guid\"], d[\"name\"], d[\"pci_properties\"][\"slot\"], \"lid\", d[\"lid\"])\n```\nTry it:\n```bash\npython3 inventory.py fakesys fabrics.json\npython3 inventory.py fakesys fabrics.json --down\npython3 inventory.py fakesys fabrics.json \"MT28908 Family [ConnectX-6]\" IbFabric1 1\n```\nThe last command should print `0c42a10300aa0031 ibp234s0f0 0000:ea:00.0 lid 44`."
+        },
+        {
+          "subgoal": "Create the leaf config and two tenants",
+          "detail": "The leaf file stands in for a switch config owned by the network team. Make it read-only:\n```bash\ncat > leaf01.yaml <<'EOF'\n# Stand-in for the leaf switch startup config. Owned by the network team.\ninterface:\n  swp1:\n    description: dpu-host01-p0\n  swp2:\n    description: dpu-host01-p1\nrouter:\n  bgp:\n    autonomous-system: 65101\nEOF\nchmod a-w leaf01.yaml\nsha256sum leaf01.yaml > leaf01.sha256   # macOS: shasum -a 256 leaf01.yaml > leaf01.sha256\n```\nCreate `acme.json`:\n```json\n{\"tenant\": \"acme\", \"vrf\": \"acme-vrf\", \"vni\": 50001, \"pkey\": \"0x8001\",\n \"nvlink_partition\": \"acme-nvl-0\", \"gpus\": [\"GPU-0\", \"GPU-1\", \"GPU-2\", \"GPU-3\"],\n \"ib_interfaces\": [\n   {\"device\": \"MT28908 Family [ConnectX-6]\", \"fabric\": \"IbFabric1\", \"device_instance\": 0},\n   {\"device\": \"MT28908 Family [ConnectX-6]\", \"fabric\": \"IbFabric2\", \"device_instance\": 0}]}\n```\nAnd `globex.json`, which uses instance 1 on both fabrics:\n```json\n{\"tenant\": \"globex\", \"vrf\": \"globex-vrf\", \"vni\": 50002, \"pkey\": \"0x8002\",\n \"nvlink_partition\": \"globex-nvl-0\", \"gpus\": [\"GPU-0\", \"GPU-1\", \"GPU-2\", \"GPU-3\"],\n \"ib_interfaces\": [\n   {\"device\": \"MT28908 Family [ConnectX-6]\", \"fabric\": \"IbFabric1\", \"device_instance\": 1},\n   {\"device\": \"MT28908 Family [ConnectX-6]\", \"fabric\": \"IbFabric2\", \"device_instance\": 1}]}\n```"
+        },
+        {
+          "subgoal": "Write the per-plane planner",
+          "detail": "Save as `plan.py` in the same directory. It writes one file per plane and never touches the leaf config:\n```python\n#!/usr/bin/env python3\nimport json\nimport sys\nfrom pathlib import Path\n\nfrom inventory import inventory, select\n\nsys_root, fabric_file, tenant_file, out_dir = sys.argv[1:5]\ndevs = inventory(sys_root, json.loads(Path(fabric_file).read_text()))\nt = json.loads(Path(tenant_file).read_text())\nout = Path(out_dir) / t[\"tenant\"]\nout.mkdir(parents=True, exist_ok=True)\n\nports = [select(devs, i[\"device\"], i[\"fabric\"], i[\"device_instance\"])\n         for i in t[\"ib_interfaces\"]]\nplan = {\n    \"dpu_hbn.json\": {\"plane\": \"ethernet\", \"vrf\": t[\"vrf\"], \"l3vni\": t[\"vni\"]},\n    \"ufm.json\": {\"plane\": \"infiniband\", \"pkey\": t[\"pkey\"],\n                 \"port_guids\": [p[\"guid\"] for p in ports]},\n    \"nmxc.json\": {\"plane\": \"nvlink\", \"partition\": t[\"nvlink_partition\"],\n                  \"gpus\": t[\"gpus\"]},\n}\nfor name, body in plan.items():\n    (out / name).write_text(json.dumps(body, indent=2) + \"\\n\")\n    print(f\"wrote {out / name}\")\ndown = [p[\"guid\"] for p in ports if not p[\"active\"]]\nif down:\n    print(\"WARNING: selected IB ports not ACTIVE:\", \", \".join(down))\n```\nRun both tenants in turn, as if the host were released by acme and given to globex:\n```bash\npython3 plan.py fakesys fabrics.json acme.json out\npython3 plan.py fakesys fabrics.json globex.json out\n```\nglobex should print a WARNING for `0c42a10300aa0042`. That is the DOWN port, and in NICo an `IbPortDown` alert would block allocation."
+        },
+        {
+          "subgoal": "Compare the two tenants plane by plane",
+          "detail": "```bash\ndiff out/acme/ufm.json out/globex/ufm.json\ndiff out/acme/dpu_hbn.json out/globex/dpu_hbn.json\n```\nAll three plane files differ between the tenants: VRF/VNI, P_Key plus port GUIDs, and the NVLink partition. Then check the leaf config:\n```bash\nsha256sum -c leaf01.sha256     # macOS: shasum -a 256 -c leaf01.sha256\n```\nIt should report `leaf01.yaml: OK`."
+        }
+      ],
+      "verify": "From the working directory, run: `python3 plan.py fakesys fabrics.json acme.json out && python3 plan.py fakesys fabrics.json globex.json out && grep -h -A3 port_guids out/acme/ufm.json out/globex/ufm.json && sha256sum -c leaf01.sha256` (on macOS use `shasum -a 256 -c leaf01.sha256`). You're done when: acme's port_guids are `0c42a10300aa00f1` and `0c42a10300aa00b2`; globex's are `0c42a10300aa0031` and `0c42a10300aa0042`; the globex run prints a WARNING for `0c42a10300aa0042`; and the checksum line reads `leaf01.yaml: OK`.",
+      "hints": [
+        "`ln: ... File exists`: run make_fake_sysfs.sh again. It deletes ./fakesys first. If you passed a custom path, pass the same one again.",
+        "`ModuleNotFoundError: No module named 'inventory'`: run plan.py from the directory that contains inventory.py. Python puts the script's own directory on the import path.",
+        "`no instance 0 of MT28908 ... on IbFabric1`: the device name must match the label exactly, including the brackets. Quote it in the shell. Also check that fabrics.json uses GUIDs *without* colons.",
+        "If your selections come out as 0031/0042 for acme, you sorted by GUID or by device name instead of by `pci_properties.slot`. Slot order (cb, cd, ea, eb) is what makes the choice the same on every machine.",
+        "`ValueError: invalid literal for int()` on the LID: sysfs LIDs are hex (`0x1a`). Parse them with `int(text, 16)`, not `int(text)`.",
+        "On macOS, `sha256sum` may be missing. Use `shasum -a 256` both to create and to check the .sha256 file."
+      ],
+      "stretch": "Add a second fake host (`fakesys2`) with the same slots and fabric cabling but completely different GUIDs. Write `capabilities.py`, which groups devices by (device, fabric) into `{type: Infiniband, name, count, fabric}` entries with no GUIDs or slots. Show that both hosts produce byte-identical capability JSON, while acme.json resolves to different GUIDs on each host but the same PCI slots. As a further step, make the planner refuse (exit non-zero) any selection that lands on an inactive port, the way IbPortDown keeps a host out of allocation."
+    }
+  }
+}
